@@ -29,3 +29,15 @@ repos:
         language: system
         files: ^\.github/workflows/
         pass_filenames: false
+      - id: opa-fmt
+        name: opa fmt
+        entry: mise exec -- opa fmt --list --fail policy
+        language: system
+        files: ^policy/.*\.rego$
+        pass_filenames: false
+      - id: opa-test
+        name: opa check + test
+        entry: mise exec -- bash -c 'opa check --strict policy && opa test policy'
+        language: system
+        files: ^policy/.*\.rego$
+        pass_filenames: false

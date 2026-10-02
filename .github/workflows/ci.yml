@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege by default; each job opts in to what it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          install_args: python uv
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+
+  secrets-scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # scan full history, not just the tip
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          install_args: gitleaks
+      - run: gitleaks git --redact --no-banner .
+
+  iac-static:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          install_args: terraform opa trivy actionlint
+      - name: terraform fmt
+        run: terraform fmt -check -recursive infra
+      - name: rego fmt, compile, unit tests
+        run: |
+          opa fmt --list --fail policy
+          opa check --strict policy
+          opa test policy
+      - name: trivy config scan
+        run: trivy config --exit-code 1 --severity MEDIUM,HIGH,CRITICAL infra
+      - name: actionlint
+        run: actionlint
+
+  terraform-plan:
+    needs: [python, iac-static]
+    # Fork PRs get no OIDC token; skip rather than fail.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the read-only plan role
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [bootstrap]
+    defaults:
+      run:
+        shell: bash
+        working-directory: infra/${{ matrix.stack }}
+    env:
+      STACK: ${{ matrix.stack }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_IN_AUTOMATION: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          install_args: terraform conftest python
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+          mask-aws-account-id: true
+      - name: terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${STACK}/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+      - name: terraform plan
+        env:
+          TF_VAR_budget_alert_emails: ${{ secrets.BUDGET_ALERT_EMAILS }}
+        run: |
+          terraform plan -input=false -lock-timeout=60s -out=tfplan
+          terraform show -json tfplan > plan.json
+      - name: policy gate
+        run: python ../../scripts/policy_gate.py plan.json ../../policy
+      - name: remove plan artifacts
+        if: always()
+        run: rm -f tfplan plan.json
