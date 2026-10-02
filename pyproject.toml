@@ -1,0 +1,64 @@
+[project]
+name = "energy-curves"
+version = "0.1.0"
+description = "Energy price ingestion, forward-curve generation, and alerting on AWS"
+authors = [
+    { name = "Tsogt Batjargal", email = "122837521+tsogtbatjargal@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.43.107",
+    "fastapi>=0.142.2",
+    "httpx>=0.28.1",
+    "polars>=1.44.2",
+    "psycopg[binary]>=3.3.6",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "redis>=8.1.0",
+    "structlog>=26.1.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+energy-curves = "energy_curves:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pandas>=3.0.6",
+    "playwright>=1.63.0",
+    "pre-commit>=4.6.2",
+    "pyspark==3.5.4",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-playwright>=0.9.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs local Postgres and Redis",
+    "browser: Playwright UI tests",
+    "live: calls the real EIA API (opt-in)",
+]
+
+[tool.mypy]
+strict = true
+packages = ["energy_curves"]
