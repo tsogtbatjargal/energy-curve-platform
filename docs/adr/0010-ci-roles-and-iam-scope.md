@@ -7,8 +7,9 @@ GitHub Actions needs AWS access for two jobs: `terraform plan` on pull requests 
 
 ## Decision
 - Reference the existing OIDC provider through a data source; do not manage it here.
-- `ecp-gha-plan`: trusted for `repo:<repo>:pull_request` and `repo:<repo>:ref:refs/heads/main`. Permissions: `ReadOnlyAccess`, state read, and lock-file write. GitHub does not issue OIDC tokens to pull requests from forks, so outside contributors cannot assume it.
-- `ecp-gha-deploy`: trusted only for `repo:<repo>:environment:prod`. The `prod` environment needs a reviewer's approval and allows only the `main` branch. Permissions:
+- Trust policies match GitHub's **immutable** subject format, `repo:<owner>@<owner_id>/<repo>@<repo_id>:...`, which this repo has enabled. A renamed repo, or a recreated repo with the same name, cannot match it. The first CI run with the classic `repo:<owner>/<repo>` format was denied.
+- `ecp-gha-plan`: trusted for `<subject>:pull_request` and `<subject>:ref:refs/heads/main`. Permissions: `ReadOnlyAccess`, state read, and lock-file write. GitHub does not issue OIDC tokens to pull requests from forks, so outside contributors cannot assume it.
+- `ecp-gha-deploy`: trusted only for `<subject>:environment:prod`. The `prod` environment needs a reviewer's approval and allows only the `main` branch. Permissions:
   - `PowerUserAccess`
   - IAM actions limited to `ecp-*` roles, policies and instance profiles
   - an explicit deny on modifying either CI role

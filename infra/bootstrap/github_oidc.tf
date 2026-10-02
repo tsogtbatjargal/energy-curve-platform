@@ -27,8 +27,8 @@ data "aws_iam_policy_document" "gha_plan_trust" {
       test     = "StringEquals"
       variable = local.oidc_sub
       values = [
-        "repo:${var.github_repo}:pull_request",
-        "repo:${var.github_repo}:ref:refs/heads/main",
+        "${var.github_oidc_subject_prefix}:pull_request",
+        "${var.github_oidc_subject_prefix}:ref:refs/heads/main",
       ]
     }
   }
@@ -86,7 +86,7 @@ data "aws_iam_policy_document" "gha_deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = local.oidc_sub
-      values   = ["repo:${var.github_repo}:environment:prod"]
+      values   = ["${var.github_oidc_subject_prefix}:environment:prod"]
     }
   }
 }
