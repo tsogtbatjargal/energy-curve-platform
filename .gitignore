@@ -35,3 +35,6 @@ metastore_db/
 derby.log
 test-results/
 playwright-report/
+
+# Backend config contains the account ID
+backend.hcl

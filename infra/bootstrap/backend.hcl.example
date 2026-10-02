@@ -1,0 +1,6 @@
+# Copy to backend.hcl (git-ignored) after the first apply, then: terraform init -migrate-state -backend-config=backend.hcl
+bucket       = "ecp-tfstate-<account-id>-ca-central-1"
+key          = "bootstrap/terraform.tfstate"
+region       = "ca-central-1"
+encrypt      = true
+use_lockfile = true
