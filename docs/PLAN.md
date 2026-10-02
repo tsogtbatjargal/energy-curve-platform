@@ -74,17 +74,38 @@ Tenors M0–M4 only, because the data supports nothing further. Method: [ADR-000
 
 These block the first `apply` of any stack other than bootstrap (M4 onward). They are tracked here so they cannot be quietly dropped.
 
-**R1. IAM policies unknown at plan time are verified, not just warned about.**
-Workload policies often reference resource ARNs that don't exist until apply, so their JSON is unknown at plan time and the gate can only warn. Before M4 applies:
-- For workload stacks, the gate fails on an unknown IAM policy unless the deploy job also runs a post-apply verification.
-- That verification re-plans and re-runs the gate against the now-known policy JSON, and runs `aws accessanalyzer validate-policy` on each workload policy.
-- A test shows that a post-apply wildcard grant fails the deploy job.
+**R1. IAM policies unknown at plan time block deployment unless reviewed and approved before apply.**
+A check after deployment would find unsafe permissions only once they are live, so it cannot be the gate. Before M4 applies:
+- For workload stacks, an IAM policy whose JSON is unknown at plan time is a gate **failure**, not a warning.
+- **The only exception** is an approval committed through a reviewed PR in `policy/approvals/iam_unknown.json`, recording:
+  - stack and resource address
+  - SHA-256 of the policy's *configuration expression* from the plan JSON `configuration` section, which is known at plan time
+  - reviewer, date and reason
+
+  If the expression changes, the hash changes and the approval no longer applies.
+- **Reviewer checklist:**
+  - Actions and principals are constant values.
+  - The only unknown parts are resource ARNs of resources in the same stack.
+  - There is no `*` action and no `*` resource paired with a write action.
+- The apply job also needs approval in the protected `prod` environment, before any change is made.
+- Post-apply checks (re-plan, Access Analyzer `validate-policy`) are optional defence in depth, not the gate.
+- **Tests:**
+  - an unknown policy with no approval fails
+  - an approval with a stale hash fails
+  - an approval with a matching hash passes
 
 **R2. A permissions boundary on everything the deploy role creates (ADR-0010).**
 - A managed policy `ecp-workload-boundary` exists.
 - `ecp-gha-deploy` may call `iam:CreateRole`, `iam:PutRolePermissionsBoundary`, `iam:AttachRolePolicy` and `iam:PutRolePolicy` only when `iam:PermissionsBoundary` equals that policy, and may never edit or delete the boundary.
 - A Rego rule denies any `aws_iam_role` in the `batch` or `demo` stacks without `permissions_boundary`.
 - `aws iam simulate-principal-policy` shows that creating a role without the boundary is denied, and so is attaching `AdministratorAccess`.
+
+**R3. Third-party price data stays out of public outputs until redistribution rights are confirmed (ADR-0011).**
+- **Sources:** EIA serves WTI and Brent spot from Refinitiv (an LSEG business) and futures from NYMEX (CME Group). EIA's reuse policy excludes material licensed from third parties, and no redistribution grant was found.
+- **Rules until rights are confirmed:**
+  - No real price values in the public repo. Test fixtures copy EIA's response *structure* but use synthetic values.
+  - Real data lives only in a git-ignored local cache.
+  - Before M6 publishes the GitHub Pages snapshot, decide what may be shown publicly: synthetic data, derived parameters only, or confirmed-licensed data.
 
 ## Milestones
 
