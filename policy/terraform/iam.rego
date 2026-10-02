@@ -32,5 +32,5 @@ warn contains msg if {
 	some rc in input.resource_changes
 	rc.type in policy_types
 	rc.change.after_unknown.policy == true
-	msg := sprintf("%s: policy unknown at plan time; re-checked on the next plan", [rc.address])
+	msg := sprintf("%s: policy JSON unknown at plan time; workload stacks must satisfy PLAN.md R1 before apply", [rc.address])
 }

@@ -35,3 +35,11 @@ test_unknown_policy_warns if {
 	p := {"address": "aws_iam_role_policy.x", "mode": "managed", "type": "aws_iam_role_policy", "change": {"actions": ["create"], "after": {}, "after_unknown": {"policy": true}}}
 	count(iam.warn) == 1 with input as {"resource_changes": [p]}
 }
+
+test_replaced_admin_attachment_denied_both_orders if {
+	ok := {"address": "aws_iam_role_policy_attachment.ok", "mode": "managed", "type": "aws_iam_role_policy_attachment", "change": {"actions": ["no-op"], "after": {"policy_arn": "arn:aws:iam::aws:policy/ReadOnlyAccess"}, "after_unknown": {}}}
+	every order in [["delete", "create"], ["create", "delete"]] {
+		bad := {"address": "aws_iam_role_policy_attachment.bad", "mode": "managed", "type": "aws_iam_role_policy_attachment", "change": {"actions": order, "after": {"policy_arn": "arn:aws:iam::aws:policy/AdministratorAccess"}, "after_unknown": {}}}
+		iam.deny == {"aws_iam_role_policy_attachment.bad: AdministratorAccess attachment is not allowed"} with input as {"resource_changes": [ok, bad]}
+	}
+}

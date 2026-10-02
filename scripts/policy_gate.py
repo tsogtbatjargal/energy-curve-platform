@@ -17,12 +17,18 @@ EXPECTED_NAMESPACES = frozenset(
 )
 
 
+# Must match policy/terraform/lib.rego: only these action lists mean "gone after apply".
+# Replacements (delete+create in either order) leave a new object that must be checked,
+# and unrecognised future actions count as live so the gate fails closed.
+GONE_ACTIONS = frozenset({("delete",), ("forget",)})
+
+
+def is_live(rc: dict) -> bool:
+    return rc.get("mode") == "managed" and tuple(rc["change"]["actions"]) not in GONE_ACTIONS
+
+
 def live_resource_count(plan: dict) -> int:
-    return sum(
-        1
-        for rc in plan.get("resource_changes", [])
-        if rc.get("mode") == "managed" and "delete" not in rc["change"]["actions"]
-    )
+    return sum(1 for rc in plan.get("resource_changes", []) if is_live(rc))
 
 
 def evaluate(plan: dict, results: list[dict]) -> tuple[int, list[str]]:

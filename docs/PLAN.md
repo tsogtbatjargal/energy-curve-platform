@@ -70,6 +70,22 @@ Tenors M0–M4 only, because the data supports nothing further. Method: [ADR-000
 - Policy as code: conftest + Rego against the `terraform plan` JSON, plus trivy ([ADR-0006](adr/0006-policy-as-code.md)).
 - Cost: $40 AWS Budget with alerts at 50/80/100%; anything costing over about $1 is applied only with explicit approval.
 
+## Requirements before workload deployment
+
+These block the first `apply` of any stack other than bootstrap (M4 onward). They are tracked here so they cannot be quietly dropped.
+
+**R1. IAM policies unknown at plan time are verified, not just warned about.**
+Workload policies often reference resource ARNs that don't exist until apply, so their JSON is unknown at plan time and the gate can only warn. Before M4 applies:
+- For workload stacks, the gate fails on an unknown IAM policy unless the deploy job also runs a post-apply verification.
+- That verification re-plans and re-runs the gate against the now-known policy JSON, and runs `aws accessanalyzer validate-policy` on each workload policy.
+- A test shows that a post-apply wildcard grant fails the deploy job.
+
+**R2. A permissions boundary on everything the deploy role creates (ADR-0010).**
+- A managed policy `ecp-workload-boundary` exists.
+- `ecp-gha-deploy` may call `iam:CreateRole`, `iam:PutRolePermissionsBoundary`, `iam:AttachRolePolicy` and `iam:PutRolePolicy` only when `iam:PermissionsBoundary` equals that policy, and may never edit or delete the boundary.
+- A Rego rule denies any `aws_iam_role` in the `batch` or `demo` stacks without `permissions_boundary`.
+- `aws iam simulate-principal-policy` shows that creating a role without the boundary is denied, and so is attaching `AdministratorAccess`.
+
 ## Milestones
 
 | # | Deliverable | Hours |

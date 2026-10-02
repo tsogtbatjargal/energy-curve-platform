@@ -1,0 +1,258 @@
+{
+  "s3_mixed_plan": {
+    "resource_changes": [
+      {
+        "address": "aws_s3_bucket.counted[0]",
+        "mode": "managed",
+        "type": "aws_s3_bucket",
+        "name": "counted",
+        "index": 0,
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "bucket": "ecp-fixture-counted-0"
+          },
+          "after_unknown": {}
+        }
+      },
+      {
+        "address": "aws_s3_bucket.counted[1]",
+        "mode": "managed",
+        "type": "aws_s3_bucket",
+        "name": "counted",
+        "index": 1,
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "bucket": "ecp-fixture-counted-1"
+          },
+          "after_unknown": {}
+        }
+      },
+      {
+        "address": "aws_s3_bucket.unnamed",
+        "mode": "managed",
+        "type": "aws_s3_bucket",
+        "name": "unnamed",
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {},
+          "after_unknown": {
+            "bucket": true
+          }
+        }
+      },
+      {
+        "address": "aws_s3_bucket_public_access_block.counted[0]",
+        "mode": "managed",
+        "type": "aws_s3_bucket_public_access_block",
+        "name": "counted",
+        "index": 0,
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "block_public_acls": true,
+            "block_public_policy": true,
+            "ignore_public_acls": true,
+            "restrict_public_buckets": true
+          },
+          "after_unknown": {
+            "bucket": true
+          }
+        }
+      },
+      {
+        "address": "aws_s3_bucket_public_access_block.counted[1]",
+        "mode": "managed",
+        "type": "aws_s3_bucket_public_access_block",
+        "name": "counted",
+        "index": 1,
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "block_public_acls": true,
+            "block_public_policy": true,
+            "ignore_public_acls": true,
+            "restrict_public_buckets": true
+          },
+          "after_unknown": {
+            "bucket": true
+          }
+        }
+      },
+      {
+        "address": "aws_s3_bucket_public_access_block.unnamed",
+        "mode": "managed",
+        "type": "aws_s3_bucket_public_access_block",
+        "name": "unnamed",
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "block_public_acls": true,
+            "block_public_policy": true,
+            "ignore_public_acls": true,
+            "restrict_public_buckets": true
+          },
+          "after_unknown": {
+            "bucket": true
+          }
+        }
+      },
+      {
+        "address": "module.data_bucket.aws_s3_bucket.this[0]",
+        "mode": "managed",
+        "type": "aws_s3_bucket",
+        "name": "this",
+        "module_address": "module.data_bucket",
+        "index": 0,
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "bucket": "ecp-fixture-module-bucket"
+          },
+          "after_unknown": {}
+        }
+      },
+      {
+        "address": "module.data_bucket.aws_s3_bucket_public_access_block.this[0]",
+        "mode": "managed",
+        "type": "aws_s3_bucket_public_access_block",
+        "name": "this",
+        "module_address": "module.data_bucket",
+        "index": 0,
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "block_public_acls": true,
+            "block_public_policy": true,
+            "ignore_public_acls": true,
+            "restrict_public_buckets": true
+          },
+          "after_unknown": {
+            "bucket": true
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "root_module": {
+        "resources": [
+          {
+            "address": "aws_s3_bucket.counted",
+            "type": "aws_s3_bucket",
+            "name": "counted",
+            "expressions": {
+              "bucket": {
+                "references": [
+                  "count.index"
+                ]
+              }
+            }
+          },
+          {
+            "address": "aws_s3_bucket.unnamed",
+            "type": "aws_s3_bucket",
+            "name": "unnamed",
+            "expressions": {
+              "bucket": null
+            }
+          },
+          {
+            "address": "aws_s3_bucket_public_access_block.counted",
+            "type": "aws_s3_bucket_public_access_block",
+            "name": "counted",
+            "expressions": {
+              "bucket": {
+                "references": [
+                  "aws_s3_bucket.counted",
+                  "count.index"
+                ]
+              }
+            }
+          },
+          {
+            "address": "aws_s3_bucket_public_access_block.unnamed",
+            "type": "aws_s3_bucket_public_access_block",
+            "name": "unnamed",
+            "expressions": {
+              "bucket": {
+                "references": [
+                  "aws_s3_bucket.unnamed.id",
+                  "aws_s3_bucket.unnamed"
+                ]
+              }
+            }
+          }
+        ],
+        "module_calls": {
+          "data_bucket": {
+            "module": {
+              "resources": [
+                {
+                  "address": "aws_s3_bucket.this",
+                  "type": "aws_s3_bucket",
+                  "name": "this",
+                  "expressions": {
+                    "bucket": {
+                      "references": [
+                        "var.bucket"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "address": "aws_s3_bucket_public_access_block.this",
+                  "type": "aws_s3_bucket_public_access_block",
+                  "name": "this",
+                  "expressions": {
+                    "bucket": {
+                      "references": [
+                        "aws_s3_bucket.this[0].id",
+                        "aws_s3_bucket.this[0]",
+                        "aws_s3_bucket.this"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "address": "aws_s3_bucket_server_side_encryption_configuration.this",
+                  "type": "aws_s3_bucket_server_side_encryption_configuration",
+                  "name": "this",
+                  "expressions": {
+                    "bucket": {
+                      "references": [
+                        "var.is_directory_bucket",
+                        "aws_s3_directory_bucket.this[0].bucket",
+                        "aws_s3_directory_bucket.this[0]",
+                        "aws_s3_directory_bucket.this",
+                        "aws_s3_bucket.this[0].id",
+                        "aws_s3_bucket.this[0]",
+                        "aws_s3_bucket.this"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

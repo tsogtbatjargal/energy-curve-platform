@@ -15,7 +15,21 @@ CI runs `terraform plan`, converts it with `terraform show -json`, and evaluates
 5. No `aws_nat_gateway` outside the demo stack (checked through the `stack` tag).
 6. RDS instances and Redshift Serverless workgroups are not publicly accessible. ElastiCache has no public-access setting: it is VPC-only, and rule 1 covers its security groups.
 
-Every resource that will exist after apply is checked, including unchanged ones, so an existing violation still fails. S3 buckets are matched to their access-block and encryption resources by count, because bucket IDs are often unknown at plan time. IAM policies whose JSON is unknown at plan time produce a warning and are checked on the next plan. The policies are unit-tested with `opa test` and checked with `opa check --strict` and `opa fmt --fail`. `scripts/policy_gate.py` runs conftest and exits 0 on pass, 1 on a violation, and 2 when the run proves nothing (no resources in the plan, or an expected policy namespace not loaded), so the gate cannot pass vacuously. `trivy config` runs alongside as an off-the-shelf scanner.
+Every resource that will exist after apply is checked:
+- unchanged resources, so an existing violation still fails
+- replacements, whether destroy-first or create-first
+
+Only plan actions that are exactly `["delete"]` or `["forget"]` are excluded. An unknown future action is treated as live, so the gate fails closed. `scripts/policy_gate.py` counts resources with the same rule.
+
+S3 is checked **per bucket**. Each bucket must have its own public access block and encryption configuration. A companion resource covers a bucket when:
+- both bucket names are known and equal, or
+- its `bucket` argument references that bucket in the same module, with a matching `count`/`for_each` key or a literal instance reference.
+
+For new buckets the companion's `bucket` value is unknown until apply, so the configuration references are what matter. A companion that can be traced neither way is a violation, and the check does not assume it covers anything.
+
+IAM policies whose JSON is unknown at plan time produce a warning. That is acceptable for the bootstrap stack only. Before any workload stack is deployed, requirement R1 in [PLAN.md](../PLAN.md#requirements-before-workload-deployment) must be met.
+
+The policies are unit-tested with `opa test` and checked with `opa check --strict` and `opa fmt --fail`. `scripts/policy_gate.py` runs conftest and exits 0 on pass, 1 on a violation, and 2 when the run proves nothing (no resources in the plan, or an expected policy namespace not loaded), so the gate cannot pass vacuously. `trivy config` runs alongside as an off-the-shelf scanner.
 
 ## Consequences
 Unsafe infrastructure fails before merge, and each rule has a test showing it catches what it claims to.

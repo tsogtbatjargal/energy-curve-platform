@@ -23,4 +23,4 @@ The deploy role can create an `ecp-*` role, attach any managed policy to it, and
 - Allow `iam:CreateRole`, `iam:PutRolePermissionsBoundary`, `iam:AttachRolePolicy` and `iam:PutRolePolicy` only when the `iam:PermissionsBoundary` condition equals that policy.
 - Deny changes to the boundary policy itself.
 
-This is scheduled for M4, when the first workload roles are created.
+This must be in place before any workload stack is deployed: requirement R2 in [PLAN.md](../PLAN.md#requirements-before-workload-deployment).

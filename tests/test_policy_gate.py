@@ -1,4 +1,5 @@
 import policy_gate
+import pytest
 
 PLAN = {
     "resource_changes": [
@@ -32,6 +33,44 @@ def test_violation_fails() -> None:
 def test_empty_plan_is_vacuous() -> None:
     code, _ = policy_gate.evaluate({"resource_changes": []}, ns_results())
     assert code == 2
+
+
+def rc(actions: list[str], mode: str = "managed") -> dict:
+    return {"mode": mode, "change": {"actions": actions}}
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [["no-op"], ["update"], ["create"], ["delete", "create"], ["create", "delete"]],
+    ids=["unchanged", "update", "create", "replace-destroy-first", "replace-create-first"],
+)
+def test_live_actions(actions: list[str]) -> None:
+    assert policy_gate.is_live(rc(actions))
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["forget"]])
+def test_gone_actions(actions: list[str]) -> None:
+    assert not policy_gate.is_live(rc(actions))
+
+
+def test_unknown_future_action_counts_as_live() -> None:
+    assert policy_gate.is_live(rc(["transmogrify"]))
+
+
+def test_data_sources_not_counted() -> None:
+    assert not policy_gate.is_live(rc(["read"], mode="data"))
+
+
+@pytest.mark.parametrize("order", [["delete", "create"], ["create", "delete"]])
+def test_replacements_counted_alongside_unchanged(order: list[str]) -> None:
+    plan = {"resource_changes": [rc(["no-op"]), rc(["no-op"]), rc(order), rc(["delete"])]}
+    assert policy_gate.live_resource_count(plan) == 3
+
+
+@pytest.mark.parametrize("order", [["delete", "create"], ["create", "delete"]])
+def test_replacement_only_plan_is_not_vacuous(order: list[str]) -> None:
+    code, _ = policy_gate.evaluate({"resource_changes": [rc(order)]}, ns_results())
+    assert code == 0
 
 
 def test_delete_only_plan_is_vacuous() -> None:
