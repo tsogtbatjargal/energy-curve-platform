@@ -20,7 +20,8 @@ variable "budget_limit_usd" {
 }
 
 variable "budget_alert_emails" {
-  type = list(string)
+  type      = list(string)
+  sensitive = true # keeps the address out of public CI plan logs
 
   validation {
     condition     = length(var.budget_alert_emails) > 0
