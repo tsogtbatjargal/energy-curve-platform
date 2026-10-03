@@ -247,3 +247,43 @@ def test_prune_deletes_a_prefix_and_raises_the_floor(db: str) -> None:
         assert alerts.prune(conn, T2) == 0
         conn.execute("DELETE FROM app.fired_alerts")  # an empty log keeps its floor and head
         assert alerts.log_state(conn).head == seqs[1]
+
+
+# --- review findings (PR #7) ----------------------------------------------------------------------
+
+
+def reseal(backup_dir: Path, table: str, old: bytes, new: bytes) -> None:
+    """Edit a backed-up table and re-seal its checksum, so the restore gets past verification."""
+    import json
+
+    from energy_curves.db import backup as bk
+    from energy_curves.storage.artifacts import sha256
+
+    f = backup_dir / f"{table}.csv"
+    f.write_bytes(f.read_bytes().replace(old, new, 1))
+    m = backup_dir / bk.MANIFEST
+    doc = json.loads(m.read_text())
+    doc["tables"][table]["sha256"] = sha256(f.read_bytes())
+    m.write_text(json.dumps(doc))
+
+
+def test_f1_a_failed_restore_does_not_rewind_the_alert_sequence(db: str, tmp_path: Path) -> None:
+    """Finding F1: setval is not transactional. A restore that fails after loading
+    fired_alerts must not leave the sequence below alerts that still exist; otherwise the next
+    alert collides on seq and its event retries until it is dead."""
+    from energy_curves.db import backup as bk
+
+    walk(db, ["65", "72"])  # one alert
+    bk.backup(db, tmp_path / "bk")
+    for version, price in ((3, "60"), (4, "72")):  # one more alert after the backup
+        seed(db, version, {KEY: price})
+    run(db)
+    reseal(tmp_path / "bk", "outbox_events", b",done,", b",bogus,")  # fails after fired_alerts
+    with pytest.raises(psycopg.errors.CheckViolation):
+        bk.restore(db, tmp_path / "bk")
+    seed(db, 5, {KEY: "60"})
+    seed(db, 6, {KEY: "72"})
+    stats = run(db, now=T0 + timedelta(minutes=1))
+    assert stats.errors == []
+    assert (stats.retried, stats.dead) == (0, 0)
+    assert [v for v, _, _ in fired(db)] == [2, 4, 6]

@@ -173,7 +173,12 @@ def _reconcile_events(conn: psycopg.Connection) -> int:
 
 
 def _reset_sequences(conn: psycopg.Connection, table: str, cols: list[str]) -> None:
-    """After a bulk load, move any owned sequence past the restored maximum."""
+    """After a bulk load, move any owned sequence past the restored maximum, but never back.
+
+    `setval` is not transactional: if the restore later fails and rolls back, the sequence keeps
+    the value set here. Rewinding it below rows that survive the rollback would make the next
+    insert collide (and an alert's event retry until dead), so a sequence only moves forward.
+    Gaps are harmless; seq is a cursor, not a count."""
     for col in cols:
         row = conn.execute(
             "SELECT pg_get_serial_sequence(%s, %s)", (f"app.{table}", col)
@@ -181,7 +186,8 @@ def _reset_sequences(conn: psycopg.Connection, table: str, cols: list[str]) -> N
         if row and row[0]:
             conn.execute(
                 sql.SQL(
-                    "SELECT setval(%s, coalesce((SELECT max({}) FROM app.{}), 0) + 1, false)"
+                    "SELECT setval(%s, greatest(coalesce((SELECT max({}) FROM app.{}), 0),"
+                    " coalesce(pg_sequence_last_value(%s::regclass), 0), 1))"
                 ).format(sql.Identifier(col), sql.Identifier(table)),
-                (row[0],),
+                (row[0], row[0]),
             )
