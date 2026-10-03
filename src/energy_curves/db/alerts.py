@@ -74,12 +74,20 @@ def create_rule(
 ) -> dict[str, Any]:
     """Create a rule whose baseline is the current version's monitored value. One statement,
     so the version and the value come from one snapshot. A new rule never fires on versions up
-    to its baseline (ADR-0013: new rules establish a baseline without firing)."""
+    to its baseline (ADR-0013: new rules establish a baseline without firing).
+
+    The alert-log lock serialises creation with evaluation, which holds it while choosing and
+    updating rules. Without it, a rule whose snapshot predates version v could commit after the
+    consumer chose its rules for v: v would be done without the rule, and the next, unchanged
+    version would be compared with the stale baseline and fire. With it, the snapshot is taken
+    after any evaluation in progress has committed, or the evaluation waits for the rule and
+    then evaluates it from its baseline."""
     if curve_id not in curve_ids():
         raise RuleError(f"unknown curve {curve_id!r}")
     if position not in POSITIONS:
         raise RuleError(f"unknown position {position!r}")
     with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (ALERT_LOG_LOCK,))
         cur = conn.execute(
             "INSERT INTO app.alert_rules (rule_id, curve_id, position, threshold,"
             " baseline_version, armed, last_value, last_as_of, last_version)"

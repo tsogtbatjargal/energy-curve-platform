@@ -328,3 +328,37 @@ def test_f2_after_restoring_an_empty_pruned_log_new_alerts_stay_above_the_floor(
     assert state.floor == floor
     assert [a["dataset_version"] for a in visible] == [6]
     assert visible[0]["seq"] > floor and state.head == visible[0]["seq"]
+
+
+def test_f3_a_rule_created_during_evaluation_never_fires_on_an_unchanged_version(
+    db: str,
+) -> None:
+    """Finding F3: a rule's baseline snapshot saw version 1 (65), but the rule committed only
+    after the consumer had chosen its rules for version 2 (75). Version 2 was then done without
+    the rule, and the unchanged version 3 (75) was compared with the stale baseline and fired.
+    The crossing belongs to version 2; version 3 must stay silent."""
+    import threading
+    import time
+
+    seed(db, 1, {KEY: "65"})
+    run(db)
+    errors: list[BaseException] = []
+    with psycopg.connect(db) as creator:
+        with creator.transaction():  # the rule stays uncommitted until this block ends
+            alerts.create_rule(creator, *KEY, Decimal("70"))  # baseline: version 1, armed
+            seed(db, 2, {KEY: "75"})
+
+            def consume() -> None:
+                try:
+                    run(db)
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    errors.append(exc)
+
+            consumer = threading.Thread(target=consume)
+            consumer.start()
+            time.sleep(0.5)  # the consumer evaluates version 2 now, or waits for this rule
+        consumer.join(10)
+    assert errors == [] and not consumer.is_alive()
+    seed(db, 3, {KEY: "75"})  # unchanged
+    run(db)
+    assert fired(db) == [(2, "75.0000", "65.0000")]

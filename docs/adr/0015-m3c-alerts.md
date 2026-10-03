@@ -51,6 +51,8 @@ Rules for this logic:
 
 Pending events for versions at or below the baseline therefore never fire the new rule.
 
+**Rule creation is serialised with evaluation.** Creation takes the alert-log lock before its baseline statement, and evaluation holds that lock while it chooses and updates rules. Without it, a rule whose snapshot predates version v could commit after the consumer had chosen its rules for v. Version v would then be marked done without the rule, and the next, unchanged version would be compared with the stale baseline and fire (review finding F3).
+
 **Atomicity and idempotence.**
 - Rule state, fired alerts and the event's `done` marker commit in one transaction.
 - A handler error rolls all of them back, and the retry starts from the same state.
@@ -59,6 +61,7 @@ Pending events for versions at or below the baseline therefore never fire the ne
 
 ### The alert log is the stream (`app.fired_alerts`, `app.alert_log`)
 - **One row per alert.** Each fired alert is a row with `seq bigint GENERATED ALWAYS AS IDENTITY`. This log is the notification intent for the one M3 channel, the local SSE stream. A per-channel intents table arrives with an external channel (M6). This refines ADR-0013's "notification intents".
+- **Sequence after a restore.** `setval` is not transactional, so the restore only ever moves sequences forward: a failed restore must not leave the sequence below alerts that survive its rollback (F1). It also keeps the alert sequence above the restored floor, because an empty, pruned log still has a floor that cursors start from (F2).
 - **Commit order equals `seq` order.** The handler takes the alert-log advisory lock before inserting, and the outbox already runs one consumer per event type. So a reader can never see `seq` 11 committed while `seq` 10 is still pending. Sequence gaps from rolled-back attempts are harmless, because the cursor means "everything after".
 - **`app.alert_log`** is a single row with:
   - `epoch`: a random UUID naming this log's history;
