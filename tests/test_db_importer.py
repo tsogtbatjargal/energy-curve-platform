@@ -287,9 +287,9 @@ def test_cli_end_to_end(
     assert main(["db-status"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status == {
-        "schema_version": 3,
+        "schema_version": 4,
         "dataset_version": 3,
-        "outbox": {"pending": 3},
+        "outbox": {"done": 3},  # db-import evaluates alerts right after importing
         "attempts": {"published": 3},
     }
 

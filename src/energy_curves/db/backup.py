@@ -10,7 +10,8 @@ in a single transaction, so it either fully succeeds or changes nothing.
 `dataset_imported` event. In the same transaction, restore therefore re-creates a missing event
 (a backup older than the import) as `pending` with its deterministic id and payload. It refuses
 an event recorded for other content, and an event for a version `market` has not imported (run
-`db-import` first).
+`db-import` first). It also rotates the alert log's epoch, so every alert-stream cursor issued
+before the restore is unknown and its client re-fetches (ADR-0015).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+from energy_curves.db.alerts import keep_sequence_above_floor, rotate_epoch
 from energy_curves.db.importer import (
     IMPORT_LOCK_KEY,
     IncompatibleHistory,
@@ -140,6 +142,8 @@ def restore(dsn: str, source: Path) -> dict[str, int]:
                     f"backup has {manifest['tables'][table]['rows']}"
                 )
         restored["recreated_events"] = _reconcile_events(conn)
+        keep_sequence_above_floor(conn)  # an empty, pruned log still has its floor
+        rotate_epoch(conn)  # the restored alert log may reuse seq values clients have seen
     return restored
 
 
@@ -170,7 +174,12 @@ def _reconcile_events(conn: psycopg.Connection) -> int:
 
 
 def _reset_sequences(conn: psycopg.Connection, table: str, cols: list[str]) -> None:
-    """After a bulk load, move any owned sequence past the restored maximum."""
+    """After a bulk load, move any owned sequence past the restored maximum, but never back.
+
+    `setval` is not transactional: if the restore later fails and rolls back, the sequence keeps
+    the value set here. Rewinding it below rows that survive the rollback would make the next
+    insert collide (and an alert's event retry until dead), so a sequence only moves forward.
+    Gaps are harmless; seq is a cursor, not a count."""
     for col in cols:
         row = conn.execute(
             "SELECT pg_get_serial_sequence(%s, %s)", (f"app.{table}", col)
@@ -178,7 +187,8 @@ def _reset_sequences(conn: psycopg.Connection, table: str, cols: list[str]) -> N
         if row and row[0]:
             conn.execute(
                 sql.SQL(
-                    "SELECT setval(%s, coalesce((SELECT max({}) FROM app.{}), 0) + 1, false)"
+                    "SELECT setval(%s, greatest(coalesce((SELECT max({}) FROM app.{}), 0),"
+                    " coalesce(pg_sequence_last_value(%s::regclass), 0), 1))"
                 ).format(sql.Identifier(col), sql.Identifier(table)),
-                (row[0],),
+                (row[0], row[0]),
             )

@@ -27,6 +27,7 @@ from fastapi.sse import ServerSentEvent
 log = logging.getLogger(__name__)
 
 CHANNEL = "ecp:events"
+ALERT_CHANNEL = "ecp:alerts"  # wakes alert streams (ADR-0015)
 EVENT = "dataset_updated"
 RETRY_MS = 3000
 
@@ -35,10 +36,20 @@ def publish_dataset_updated(client: redis.Redis, dataset_version: int) -> bool:
     """Best effort, after the import committed. Returns False if Valkey was unreachable;
     streams still pick the version up by polling Postgres."""
     message = json.dumps({"type": EVENT, "dataset_version": dataset_version})
+    return _publish(client, CHANNEL, message)
+
+
+def publish_alerts_wakeup(client: redis.Redis) -> bool:
+    """Best effort, after a consumer pass committed. The alert log in Postgres is the stream;
+    this only makes waiting alert streams look now instead of at their next poll."""
+    return _publish(client, ALERT_CHANNEL, json.dumps({"type": "alerts_changed"}))
+
+
+def _publish(client: redis.Redis, channel: str, message: str) -> bool:
     try:
-        client.publish(CHANNEL, message)
+        client.publish(channel, message)
     except redis.RedisError as exc:
-        log.warning("could not publish %s for version %s: %s", EVENT, dataset_version, exc)
+        log.warning("could not publish to %s: %s", channel, exc)
         return False
     return True
 
@@ -49,8 +60,9 @@ class Wakeup:
     returns on a published message or after the timeout; while Valkey is unreachable it just
     sleeps, and resubscribes on the next call."""
 
-    def __init__(self, url: str | None) -> None:
+    def __init__(self, url: str | None, channel: str = CHANNEL) -> None:
         self._url = url
+        self._channel = channel
         self._client: aioredis.Redis | None = None
         self._pubsub: aioredis.client.PubSub | None = None
 
@@ -61,7 +73,7 @@ class Wakeup:
             if self._pubsub is None:
                 self._client = aioredis.Redis.from_url(self._url, socket_connect_timeout=0.25)
                 self._pubsub = self._client.pubsub()
-                await self._pubsub.subscribe(CHANNEL)
+                await self._pubsub.subscribe(self._channel)
         except (redis.RedisError, OSError) as exc:
             log.warning("event wake-up unavailable, polling Postgres: %s", type(exc).__name__)
             await self.close()
