@@ -9,6 +9,7 @@ const $ = sel => document.querySelector(sel)
 const state = {
     tab: 'curves', csrf: null, streams: {},
     alerts: new Map(), alertEpoch: null, alertCursor: null, alertRequest: 0, // event id -> alert
+    historyRequest: 0,
 }
 
 // Counts processed responses per loader, so browser tests can wait for one deterministically.
@@ -109,22 +110,30 @@ function historyParams() {
     return params
 }
 
+// Only the answer to the latest request is drawn: a slower answer for an earlier selection is
+// ignored. Heading and export link come from the answer itself, so they always match the chart.
 async function loadHistory() {
-    const params = historyParams()
-    $('[data-testid=export-history]').href = `/api/export/history.csv?${params}`
-    const title = `${params.get('curve_id')} ${params.get('position')}`
-    $('[data-testid=history-title]').textContent = title
+    const request = ++state.historyRequest
     const chart = $('#chart')
     chart.style.opacity = '0.5' // refetch keeps the frame
     try {
-        const body = await api(`/api/history/curves?${params}`)
+        const body = await api(`/api/history/curves?${historyParams()}`)
+        if (request !== state.historyRequest) return
+        const title = `${body.curve_id} ${body.position}`
+        const shown = new URLSearchParams()
+        for (const k of ['curve_id', 'position', 'start', 'end']) if (body[k]) shown.set(k, body[k])
+        $('[data-testid=history-title]').textContent = title
+        $('[data-testid=export-history]').href = `/api/export/history.csv?${shown}`
         lineChart(chart, body.points, { label: title })
         setRecords('history', body.points)
     } catch (e) {
+        if (request !== state.historyRequest) return
+        $('[data-testid=history-title]').textContent = ''
+        $('[data-testid=export-history]').removeAttribute('href')
         chart.replaceChildren(document.createTextNode(e.message))
         setRecords('history', [])
     } finally {
-        chart.style.opacity = '1'
+        if (request === state.historyRequest) chart.style.opacity = '1'
         processed('historyLoads')
     }
 }

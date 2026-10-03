@@ -250,3 +250,46 @@ def test_p2_1_a_delayed_alert_snapshot_never_erases_streamed_alerts(
         wait_processed(page, "alert-snapshots", before + 2)
         expect(page.locator("#grid-alerts")).to_contain_text("99.9900")
         total(page, "alerts").to_contain_text("of 1")
+
+
+def test_p2_2_a_late_history_response_never_replaces_the_current_selection(
+    page: Page, db: str
+) -> None:
+    """Finding P2-2: the answer for an earlier selection arriving after the current one must
+    not be drawn under the current heading or behind its export link."""
+    held: list[Any] = []
+
+    def hold_first(route: Any) -> None:
+        if held:
+            route.continue_()
+        else:
+            held.append(route)
+
+    def choose(curve: str, position: str) -> None:
+        form = page.get_by_test_id("history-filters")
+        form.locator("select[name=curve_id]").select_option(curve)
+        form.locator("select[name=position]").select_option(position)
+        form.get_by_role("button", name="Show").click()
+
+    with ui(page, db) as base:
+        tab(page, "History")
+        wait_processed(page, "history-loads", 1)  # the default selection
+        page.route("**/api/history/curves?*", hold_first)
+        choose("WTI", "Spot")  # held
+        while not held:
+            page.wait_for_timeout(20)
+        choose("BRENT", "C1")
+        wait_processed(page, "history-loads", 2)
+        held[0].continue_()  # the WTI Spot answer arrives late
+        wait_processed(page, "history-loads", 3)
+        prices = {
+            key: httpx.get(f"{base}/api/history/curves",
+                           params={"curve_id": key[0], "position": key[1]}).json()["points"][-1]
+            for key in (("WTI", "Spot"), ("BRENT", "C1"))
+        }  # fmt: skip
+        assert prices["WTI", "Spot"]["price"] != prices["BRENT", "C1"]["price"]
+        expect(page.get_by_test_id("history-title")).to_have_text("BRENT C1")
+        expect(page.locator("#grid-history")).to_contain_text(prices["BRENT", "C1"]["price"])
+        expect(page.locator("#grid-history")).not_to_contain_text(prices["WTI", "Spot"]["price"])
+        href = page.get_by_test_id("export-history").get_attribute("href") or ""
+        assert "curve_id=BRENT" in href and "position=C1" in href
