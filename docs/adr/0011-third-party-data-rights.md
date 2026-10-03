@@ -16,7 +16,7 @@ No explicit redistribution grant was found for either source (checked 2026-10-03
 Until rights are confirmed, treat these series as **not redistributable**:
 - The public repo contains no real price values. Test fixtures keep EIA's response structure with synthetic values, labelled synthetic.
 - Real data is fetched with the user's own API key into a git-ignored local cache. Hashes and row counts of that cache may be committed; prices may not.
-- Whether derived shape parameters (48 medians of log ratios) can be committed is an open question for the owner. Until it is decided they are generated locally.
+- **Derived parameters** (decided 2026-10-03): parameters estimated from real data stay local (`data/shape/`, git-ignored). The repository and every public output use parameters estimated from the synthetic source only. Each parameter set records its `origin`, and a run refuses parameters whose origin differs from the data it ingests.
 - The M6 public snapshot needs its own decision (PLAN.md R3).
 
 ## Consequences
