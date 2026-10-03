@@ -48,7 +48,7 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "S", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S311"]
 "scripts/**" = ["T201"]
 
 [tool.pytest.ini_options]
@@ -59,6 +59,7 @@ markers = [
     "integration: needs local Postgres and Redis",
     "browser: Playwright UI tests",
     "live: calls the real EIA API (opt-in)",
+    "realdata: checks a local cache of real EIA data (opt-in, ECP_REAL_DATA_DIR)",
 ]
 
 [tool.mypy]

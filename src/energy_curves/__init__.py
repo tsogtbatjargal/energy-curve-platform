@@ -2,4 +2,6 @@
 
 
 def main() -> None:
-    print("energy-curves: CLI arrives in milestone M2")
+    from energy_curves.cli import main as cli_main
+
+    raise SystemExit(cli_main())

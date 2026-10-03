@@ -18,7 +18,7 @@ Ingest public EIA oil prices, build short forward curves for WTI and Brent, publ
 | Brent | Brent spot | WTI futures history (borrowed, labelled) |
 | Brent − WTI | derived per tenor | — |
 
-Tenors M0–M4 only, because the data supports nothing further. Method: [ADR-0002](adr/0002-curve-method.md).
+Points are labelled `Spot, C1–C4` (contract positions). Real data supports nothing further, so the curves stop there. Every point is a modelled estimate. Method: [ADR-0002](adr/0002-curve-method.md).
 
 **App tabs:** Curves (today's curves, with the as-of date and data age), History, Alerts (threshold rules, live toasts), Pipeline health (runs, freshness, rejected rows, lineage).
 
