@@ -1,0 +1,31 @@
+name: dependency-audit
+
+# Vulnerability monitoring for the locked Python dependencies. Independent of Dependabot version
+# updates, which are suppressed for PySpark (pinned to the Glue runtime, ADR-0007).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1" # weekly, Monday 06:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          install_args: trivy
+      - name: fixable HIGH/CRITICAL vulnerabilities in uv.lock fail the check
+        run: trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 uv.lock
+      - name: full report (all severities, informational)
+        if: always()
+        run: trivy fs --scanners vuln --exit-code 0 uv.lock

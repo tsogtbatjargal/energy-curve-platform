@@ -5,7 +5,7 @@ description = "Energy price ingestion, forward-curve generation, and alerting on
 authors = [
     { name = "Tsogt Batjargal", email = "122837521+tsogtbatjargal@users.noreply.github.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.11"  # 3.11 = AWS Glue 5.1 runtime (ADR-0007)
 dependencies = [
     "boto3>=1.43.107",
     "fastapi>=0.142.2",
@@ -42,7 +42,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S", "SIM"]
@@ -54,12 +54,13 @@ select = ["E", "F", "I", "B", "UP", "S", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["scripts"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m 'not glue_compat'"
 markers = [
     "integration: needs local Postgres and Redis",
     "browser: Playwright UI tests",
     "live: calls the real EIA API (opt-in)",
     "realdata: checks a local cache of real EIA data (opt-in, ECP_REAL_DATA_DIR)",
+    "glue_compat: AWS Glue 5.1 runtime checks; run under Python 3.11 with Java 17 and PySpark 3.5.6",
 ]
 
 [tool.mypy]

@@ -14,6 +14,8 @@ cp .env.example .env          # add your EIA API key; .env is git-ignored
 uv sync
 uv run pre-commit install
 uv run pytest
+# AWS Glue 5.1 compatibility (Python 3.11, Java 17, PySpark 3.5.6), in a separate environment:
+UV_PROJECT_ENVIRONMENT=.venv-glue uv run --python 3.11 pytest -m ""
 ```
 
 Get a free EIA API key at <https://www.eia.gov/opendata/register.php>.

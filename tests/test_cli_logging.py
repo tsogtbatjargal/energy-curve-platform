@@ -96,21 +96,8 @@ def test_redacting_filter_scrubs_key_values_and_query_parameters() -> None:
     _ = json
 
 
-@pytest.fixture
-def restore_root_logging() -> Iterator[None]:
-    import logging
-
-    root = logging.getLogger()
-    handlers, level = root.handlers[:], root.level
-    httpx_level = logging.getLogger("httpx").level
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
-    logging.getLogger("httpx").setLevel(httpx_level)
-
-
 def test_filter_redacts_even_if_httpx_logging_is_re_enabled(
-    restore_root_logging: None, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     import logging
 
