@@ -47,5 +47,5 @@ uv run energy-curves db-status
 uv run energy-curves db-backup backups/$(date +%F)   # Postgres-owned app schema
 ```
 
-- `market` tables can be rebuilt from the published files at any time: `db-import --rebuild`.
+- `market` tables can be rebuilt from the published files at any time: `db-import --rebuild` (one transaction; a failure keeps the previous state).
 - `app` tables (outbox; alert rules and history from M3c) exist only in Postgres. Back them up with `db-backup` and restore with `db-restore`. See [ADR-0013](docs/adr/0013-m3-serving-architecture.md).
