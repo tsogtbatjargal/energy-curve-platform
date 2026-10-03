@@ -1,9 +1,14 @@
 """Response cache in Valkey, keyed by dataset version (ADR-0009, ADR-0014).
 
-A version's data never changes: an import adds a new version, a conflicting history is refused
-(ADR-0013, F2) and a rebuild re-derives identical rows. So entries are never invalidated; a new
-version simply uses new keys, and old ones expire. The key also carries the response name, its
-parameters and CACHE_SCHEMA, so a change to a response's shape never serves the old shape.
+An entry's identity is the dataset history it was read from, not just its version number: two
+databases (or a database reset and re-imported from another store) can both be at version 1 with
+different content, and may share one Valkey. The key therefore carries the version and its
+manifest SHA-256. Every served row comes from that version's hash-verified artifacts, which the
+manifest pins, so equal keys mean equal data. Within one database a recorded version never
+changes content (ADR-0013, F2) and a rebuild re-derives identical rows, so entries are never
+invalidated; a new version uses new keys, and old ones expire. The key also carries the response
+name, its parameters and CACHE_SCHEMA, so a change to a response's shape never serves the old
+shape.
 
 Valkey is an optimisation, never a dependency. Any Valkey error makes the caller read Postgres,
 and the cache is bypassed for `cooldown` seconds so an outage costs one timeout, not one per
@@ -23,7 +28,7 @@ import redis
 
 log = logging.getLogger(__name__)
 
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2  # 2: keys carry the manifest SHA-256
 HIT, MISS, BYPASS = "hit", "miss", "bypass"
 
 
@@ -49,22 +54,25 @@ class VersionCache:
         client = redis.Redis.from_url(url, socket_connect_timeout=0.25, socket_timeout=0.25)
         return cls(client, **kw)
 
-    def key(self, dataset_version: int, name: str, params: dict[str, Any]) -> str:
+    def key(
+        self, dataset_version: int, manifest_sha256: str, name: str, params: dict[str, Any]
+    ) -> str:
         digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:16]
-        return f"{self._prefix}:v{dataset_version}:{name}:{digest}"
+        return f"{self._prefix}:v{dataset_version}:{manifest_sha256}:{name}:{digest}"
 
     def get_or_load(
         self,
         dataset_version: int,
+        manifest_sha256: str,
         name: str,
         params: dict[str, Any],
         load: Callable[[], Any],
     ) -> tuple[Any, str]:
         """Return (value, hit | miss | bypass). `load` must return JSON-safe data read in the
-        same snapshot as `dataset_version`."""
+        same snapshot as the version and manifest."""
         if self._client is None or self._clock() < self._down_until:
             return load(), BYPASS
-        key = self.key(dataset_version, name, params)
+        key = self.key(dataset_version, manifest_sha256, name, params)
         try:
             cached = self._client.get(key)
         except redis.RedisError as exc:

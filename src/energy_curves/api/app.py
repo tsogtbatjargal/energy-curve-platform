@@ -1,10 +1,11 @@
 """Local read API: curves, history, health, CSV export and live events (ADR-0013, ADR-0014).
 
 Every data response carries `dataset_version`, its source (`synthetic` flag), the disclaimer,
-and per curve the actual as-of date and the data's age. Responses for a dataset version are
-cached in Valkey; the age is computed per request, so a cached response never reports a stale
-age. The app is local-only: `serve` binds 127.0.0.1, the Host header must name a loopback host
-(DNS-rebinding guard), a cross-origin Origin is refused, and there is no CORS.
+and per curve the actual as-of date and the data's age. Responses are cached in Valkey under the
+dataset version and its manifest hash; the age is computed per request, so a cached response
+never reports a stale age. The app is local-only: `serve` binds 127.0.0.1, the Host header must
+name a loopback host (DNS-rebinding guard), a cross-origin Origin is refused, and there is no
+CORS.
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ def create_app(
             if current is None:
                 raise HTTPException(503, "no dataset version imported yet")
             data, status = cache.get_or_load(
-                current.dataset_version, name, params, lambda: load(conn)
+                current.dataset_version, current.manifest_sha256, name, params, lambda: load(conn)
             )
         return current, data, status
 

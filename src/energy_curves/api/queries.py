@@ -41,6 +41,7 @@ class Current:
     source: str
     created_at: datetime
     imported_at: datetime
+    manifest_sha256: str  # identifies the history: every served row comes from this manifest
 
     @property
     def synthetic(self) -> bool:
@@ -59,8 +60,8 @@ class Current:
 
 def current(conn: psycopg.Connection) -> Current | None:
     row = conn.execute(
-        "SELECT dataset_version, source, created_at, imported_at FROM market.dataset_versions"
-        " ORDER BY dataset_version DESC LIMIT 1"
+        "SELECT dataset_version, source, created_at, imported_at, manifest_sha256"
+        " FROM market.dataset_versions ORDER BY dataset_version DESC LIMIT 1"
     ).fetchone()
     return Current(*row) if row else None
 

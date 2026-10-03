@@ -34,10 +34,11 @@ Verified on 2026-10-03 against the locked dependencies:
 ### One snapshot per response
 Each request reads the current version and its data in one `REPEATABLE READ, READ ONLY` transaction. An import that commits mid-request can therefore never put version N + 1 rows under a version N label, or into a version N cache key. A test commits version 2 between the two reads and asserts the response is entirely version 1. Under `READ COMMITTED` it fails.
 
-### Cache keyed by dataset version
-- **Key:** `ecp:api:<schema>:v<version>:<response>:<hash of parameters>`.
-- **Never invalidated.** A version's data never changes: F2 refuses different content for a recorded version, and a rebuild re-derives identical rows. A new version simply uses new keys, and old entries expire after a day.
-- **Shape changes.** `<schema>` is bumped when a response's shape changes, so an old shape is never served.
+### Cache keyed by dataset history
+- **Key:** `ecp:api:<schema>:v<version>:<manifest_sha256>:<response>:<hash of parameters>`.
+- **Why the manifest.** A version number is unique only within one database's history. Two databases can both be at version 1 with different content and share one Valkey; so can a database reset and re-imported from another store. Keyed by version alone, the second database was served the first one's cached prices under its own metadata (review finding P2). The current version's manifest SHA-256 pins every artifact behind the served rows, so equal keys mean equal data.
+- **Never invalidated.** Within one database a recorded version never changes content: F2 refuses different content, and a rebuild re-derives identical rows. A new version simply uses new keys, and old entries expire after a day.
+- **Shape changes.** `<schema>` is bumped when a response's shape or the key format changes, so an old entry is never served. It is now 2, since keys carry the manifest.
 - **Age is not cached.** It is computed per request from the cached as-of date.
 - **Valkey is optional.** Any Valkey error serves the request from Postgres (`X-Cache: bypass`) and skips the cache for 5 seconds. An outage then costs one 250 ms timeout, not one per request. `X-Cache` is `hit`, `miss` or `bypass`.
 - **Not cached:** Health. Its attempts and outbox state change without a new dataset version.

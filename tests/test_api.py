@@ -209,7 +209,9 @@ def test_csv_exports_carry_the_disclaimer_and_synthetic_marker(
 def test_real_data_exports_have_no_synthetic_marker() -> None:
     from datetime import UTC, datetime
 
-    current = queries.Current(7, "eia", datetime(2026, 1, 1, tzinfo=UTC), datetime.now(UTC))
+    current = queries.Current(
+        7, "eia", datetime(2026, 1, 1, tzinfo=UTC), datetime.now(UTC), "a" * 64
+    )
     body = api_app._csv(current, "x.csv", [{"a": 1}], "miss").body.decode()
     assert body.splitlines()[0] == f"# {queries.DISCLAIMER}"
     assert "SYNTHETIC" not in body
@@ -261,3 +263,61 @@ def test_cross_origin_preflight_is_refused(db: str, cache: VersionCache) -> None
         headers={"origin": "http://evil.example", "access-control-request-method": "GET"},
     )
     assert r.status_code == 403 and "access-control-allow-origin" not in r.headers
+
+
+# --- shared cache across dataset histories ------------------------------------------------------
+
+
+@pytest.fixture
+def other_db() -> Iterator[str]:
+    from db_support import fresh_database
+
+    for dsn in fresh_database():
+        migrate(dsn)
+        yield dsn
+
+
+Points = dict[tuple[str, str], tuple[str, str]]
+
+
+def curves_json(client: TestClient) -> Points:
+    return as_points(client.get("/api/curves").json())
+
+
+def curves_csv(client: TestClient) -> Points:
+    rows = [
+        line.split(",")
+        for line in client.get("/api/export/curves.csv").text.splitlines()
+        if not line.startswith("#")
+    ]
+    col = {name: i for i, name in enumerate(rows[0])}
+    return {
+        (r[col["curve_id"]], r[col["position"]]): (r[col["as_of"]], r[col["price"]])
+        for r in rows[1:]
+    }
+
+
+def history_json(client: TestClient) -> Points:
+    """The latest WTI Spot point, from the history endpoint."""
+    params = {"curve_id": "WTI", "position": "Spot", "start": "2024-01-29"}
+    last = client.get("/api/history/curves", params=params).json()["points"][-1]
+    return {("WTI", "Spot"): (last["as_of"], last["price"])}
+
+
+@pytest.mark.parametrize("read", [curves_json, curves_csv, history_json], ids=lambda f: f.__name__)
+def test_a_shared_cache_never_mixes_dataset_histories(
+    db: str, other_db: str, tmp_path: Path, cache: VersionCache, read
+) -> None:  # type: ignore[no-untyped-def]
+    """Two databases, each at version 1 but with different synthetic histories, share one
+    Valkey. Each must get its own prices, not the first database's cached ones under its
+    own metadata: the cache identity is the dataset history, not just the version number."""
+    store_a, store_b = tmp_path / "a", tmp_path / "b"
+    ingest(store_a, JAN, retrieved_at=T1)
+    ingest(store_b, JAN, retrieved_at=T2, overrides={("RWTC", date(2024, 1, 31)): "99.99"})
+    imp.import_pending(db, store_a)
+    imp.import_pending(other_db, store_b)
+    for name, dsn, store in (("database a", db, store_a), ("database b", other_db, store_b)):
+        expected = latest_points(store, 1)
+        got = read(make_client(dsn, cache))  # same Valkey, same prefix
+        assert got == {k: expected[k] for k in got}, name
+    assert latest_points(store_a, 1)[("WTI", "Spot")] != latest_points(store_b, 1)[("WTI", "Spot")]
