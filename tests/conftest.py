@@ -2,7 +2,7 @@ import logging
 from collections.abc import Iterator
 
 import pytest
-from db_support import fresh_database
+from db_support import fresh_database, valkey_url
 
 
 @pytest.fixture(autouse=True)
@@ -26,3 +26,9 @@ def restore_logging() -> Iterator[None]:
 def pg_dsn() -> Iterator[str]:
     """A fresh, empty Postgres database for one test, dropped afterwards."""
     yield from fresh_database()
+
+
+@pytest.fixture
+def redis_url() -> Iterator[str]:
+    """A reachable Valkey (local compose or the CI service container)."""
+    yield from valkey_url()

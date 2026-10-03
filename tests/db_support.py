@@ -31,6 +31,22 @@ def fresh_database() -> Iterator[str]:
         admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
 
 
+def valkey_url() -> Iterator[str]:
+    """REDIS_URL if Valkey answers; skip otherwise, or fail when ECP_REQUIRE_VALKEY is set."""
+    import redis
+
+    url = os.environ.get("REDIS_URL", "")
+    try:
+        if not url:
+            raise redis.ConnectionError("REDIS_URL not set")
+        redis.Redis.from_url(url, socket_connect_timeout=0.5).ping()
+    except redis.RedisError as exc:
+        if os.environ.get("ECP_REQUIRE_VALKEY"):
+            pytest.fail(f"ECP_REQUIRE_VALKEY is set but Valkey is unavailable: {exc}")
+        pytest.skip(f"Valkey unavailable (start it with: podman compose up -d): {exc}")
+    yield url
+
+
 # --- synthetic published stores for importer tests ---------------------------------------------
 
 from datetime import UTC, date, datetime  # noqa: E402
