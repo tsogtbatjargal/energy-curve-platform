@@ -174,6 +174,12 @@ function addAlert(alert, id) {
     return true
 }
 
+// Each new alert is announced once, whichever path (stream or snapshot) brings it first.
+function announceAlert(alert) {
+    toast(`Alert: ${alert.curve_id} ${alert.position} at ${alert.price} crossed ${alert.threshold}`)
+    if (state.tab === 'alerts') loadRules()
+}
+
 // A snapshot is merged into what the page already holds, never replaces it: a snapshot taken
 // before an alert fired can answer after the stream delivered that alert. A snapshot answering
 // after a newer one was requested is ignored. Only a new epoch (a restored log) drops alerts,
@@ -184,13 +190,22 @@ async function loadAlerts() {
         const body = await api('/api/alerts')
         if (request !== state.alertRequest) return
         const epoch = body.cursor.split('-')[0]
+        // Announce alerts this snapshot brings first (the stream's event for them may come later
+        // and is then de-duplicated), but not the history of a first load or a restored log.
+        const announce = epoch === state.alertEpoch
+        const fresh = []
         if (epoch !== state.alertEpoch) {
             for (const id of [...state.alerts.keys()]) if (!id.startsWith(`${epoch}-`)) state.alerts.delete(id)
             state.alertEpoch = epoch
         }
-        for (const a of body.alerts) state.alerts.set(`${epoch}-${a.seq}`, a)
+        for (const a of body.alerts) {
+            const id = `${epoch}-${a.seq}`
+            if (announce && !state.alerts.has(id)) fresh.push(a)
+            state.alerts.set(id, a)
+        }
         state.alertCursor ??= body.cursor
         renderAlerts()
+        for (const a of fresh) announceAlert(a)
     } finally {
         processed('alertSnapshots')
     }
@@ -287,10 +302,7 @@ async function main() {
     stream('alerts', `/api/alerts/events?after=${encodeURIComponent(state.alertCursor)}`, {
         alert_fired: e => {
             const alert = JSON.parse(e.data)
-            if (addAlert(alert, e.lastEventId)) {
-                toast(`Alert: ${alert.curve_id} ${alert.position} at ${alert.price} crossed ${alert.threshold}`)
-                if (state.tab === 'alerts') loadRules()
-            }
+            if (addAlert(alert, e.lastEventId)) announceAlert(alert)
         },
         alerts_reset: () => loadAlerts(),
     })

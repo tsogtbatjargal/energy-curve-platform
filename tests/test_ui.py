@@ -322,3 +322,25 @@ def test_p2_3_rule_changes_work_after_a_server_restart(page: Page, db: str) -> N
         page.goto("about:blank")
     expected = ("ERR_CONNECTION_REFUSED", "ERR_INCOMPLETE_CHUNKED_ENCODING", "403")
     assert [e for e in errors if not any(x in e for x in expected)] == []
+
+
+def test_p2_1b_an_alert_first_seen_in_a_snapshot_is_still_announced(
+    page: Page, db: str, store: Path
+) -> None:
+    """Found by CI after the P2-1 fix: when the post-import snapshot reaches the page before the
+    alert stream's event, the event is de-duplicated, so the alert was listed but never
+    announced. Here the alert stream is blocked, so the snapshot is the only way in."""
+    with psycopg.connect(db) as conn:
+        alerts.create_rule(conn, "WTI", "Spot", Decimal("95"))
+    errors: list[str] = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    page.route("**/api/alerts/events*", lambda route: route.abort())
+    with serve(db, None, poll_s=0.3) as base:
+        page.goto(f"{base}/")
+        expect(page.locator("body")).to_have_attribute("data-ready", "true")
+        tab(page, "Alerts")
+        replay(store, db, FEB_8, FEB_8, overrides=SPIKE)
+        expect(page.locator("#grid-alerts")).to_contain_text("99.9900")  # via the snapshot
+        expect(page.get_by_test_id("toast")).to_contain_text("WTI Spot at 99.9900 crossed 95.0000")
+        page.goto("about:blank")
+    assert [e for e in errors if "ERR_FAILED" not in e] == []  # only the blocked stream
