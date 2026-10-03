@@ -1,6 +1,6 @@
 """Strict parsing of EIA observation rows into typed values.
 
-EIA returns numbers as JSON strings ("96.16"). Valid numeric strings must parse; anything else
+EIA returns numbers as JSON strings ("61.25"). Valid numeric strings must parse; anything else
 is rejected with a reason rather than coerced. Non-positive prices are valid observations
 (WTI settled at -37.63 on 2020-04-20) and are kept; only shape estimation excludes them.
 """

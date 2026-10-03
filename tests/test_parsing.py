@@ -8,7 +8,7 @@ from energy_curves.pipeline.parsing import Rejected, parse_price, parse_row
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("96.16", "96.16"),
+        ("61.25", "61.25"),
         ("-37.63", "-37.63"),  # real WTI settlement on 2020-04-20; valid, kept
         ("0", "0"),
         ("100", "100"),
@@ -31,13 +31,13 @@ def test_valid_numeric_strings_parse(raw: object, expected: str) -> None:
         "Infinity",
         "-Infinity",
         "1e3",
-        " 96.16",
-        "96.16 ",
+        " 61.25",
+        "61.25 ",
         "+5",
         ".5",
         "5.",
         "01.5",
-        "96.16.1",
+        "61.25.1",
         "0x1A",
     ],
 )
@@ -46,7 +46,7 @@ def test_malformed_strings_rejected(raw: str) -> None:
         parse_price(raw)
 
 
-@pytest.mark.parametrize("raw", [None, True, 96.16, [1], {"v": 1}])
+@pytest.mark.parametrize("raw", [None, True, 61.25, [1], {"v": 1}])
 def test_non_string_values_rejected(raw: object) -> None:
     with pytest.raises(Rejected):
         parse_price(raw)
