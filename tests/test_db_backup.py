@@ -37,7 +37,7 @@ def app_state(dsn: str) -> list[tuple]:  # type: ignore[type-arg]
 def test_round_trip_restores_app_state_exactly(db: str, tmp_path: Path) -> None:
     before = app_state(db)
     manifest = bk.backup(db, tmp_path / "bk")
-    assert manifest["tables"]["outbox_events"]["rows"] == 3 and manifest["schema_version"] == 2
+    assert manifest["tables"]["outbox_events"]["rows"] == 3 and manifest["schema_version"] == 3
     with psycopg.connect(db) as conn:
         conn.execute("DELETE FROM app.outbox_events WHERE dataset_version = 3")
         conn.execute("UPDATE app.outbox_events SET status = 'dead'")

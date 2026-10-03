@@ -30,7 +30,13 @@ def q(dsn: str, query: str, params: tuple = ()) -> list[tuple]:  # type: ignore[
 def market_snapshot(dsn: str) -> dict[str, list[tuple]]:  # type: ignore[type-arg]
     return {
         t: q(dsn, f"SELECT * FROM market.{t} ORDER BY 1, 2, 3")  # noqa: S608
-        for t in ("observations", "revisions", "curve_points", "dataset_versions")
+        for t in (
+            "observations",
+            "revisions",
+            "curve_points",
+            "monitored_values",
+            "dataset_versions",
+        )
     }
 
 
@@ -281,7 +287,7 @@ def test_cli_end_to_end(
     assert main(["db-status"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status == {
-        "schema_version": 2,
+        "schema_version": 3,
         "dataset_version": 3,
         "outbox": {"pending": 3},
         "attempts": {"published": 3},

@@ -6,7 +6,8 @@ Each published version is imported in one transaction:
    under another version) and out-of-order versions (must be max + 1);
 3. read every artifact with its hash verified, COPY it into temporary staging tables, and validate
    staging against the manifest (row counts, key uniqueness, one source);
-4. replace the `market` tables from staging, record the version, and write a `dataset_imported`
+4. replace the `market` tables from staging, append the version's monitored values (latest
+   point per curve and position), record the version, and write a `dataset_imported`
    outbox event, all in the same commit. An event already recorded for the version must be for
    the same content (deterministic event_id, manifest_sha256, logical_input_id); it is never
    adopted for different content.
@@ -47,7 +48,8 @@ CURVE_COLUMNS = [
 
 # Children before parents, for deleting.
 MARKET_TABLES = (
-    "observations", "revisions", "curve_points", "pipeline_attempts", "dataset_versions",
+    "observations", "revisions", "curve_points", "monitored_values", "pipeline_attempts",
+    "dataset_versions",
 )  # fmt: skip
 
 STAGING = (
@@ -246,6 +248,13 @@ def _import(conn: psycopg.Connection, store: LocalArtifactStore, record: Pointer
             f" SELECT {columns}{', %s' if versioned else ''} FROM {stg}",
             (version,) if versioned else (),
         )
+    # Append-only, per version: what this version's outbox event is evaluated against.
+    conn.execute(
+        "INSERT INTO market.monitored_values (dataset_version, curve_id, position, as_of_date,"
+        " price, status) SELECT DISTINCT ON (curve_id, position) %s, curve_id, position,"
+        " as_of_date, price, status FROM stg_curves ORDER BY curve_id, position, as_of_date DESC",
+        (version,),
+    )
 
     return ImportResult(version, "imported")
 
