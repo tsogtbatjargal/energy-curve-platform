@@ -11,6 +11,8 @@ Each published version is imported in one transaction:
 
 Pipeline attempts (including failed and quarantined ones) are synced separately; their files are
 immutable, so the sync only inserts.
+
+A rebuild re-imports every version and attempt in one transaction, so it is all or nothing.
 """
 
 from __future__ import annotations
@@ -40,6 +42,11 @@ CURVE_COLUMNS = [
     "estimate_type", "shape_source", "method_version", "shape_method_version", "params_sha256",
 ]  # fmt: skip
 
+
+# Children before parents, for deleting.
+MARKET_TABLES = (
+    "observations", "revisions", "curve_points", "pipeline_attempts", "dataset_versions",
+)  # fmt: skip
 
 STAGING = (
     ("stg_observations", "observations", OBSERVATION_COLUMNS),
@@ -106,99 +113,106 @@ def _scalar(conn: psycopg.Connection, query: str, params: tuple[Any, ...] = ()) 
 def import_version(
     conn: psycopg.Connection, store: LocalArtifactStore, record: Pointer
 ) -> ImportResult:
-    version = record.dataset_version
+    """Import one version in its own transaction: it is published completely or not at all."""
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (IMPORT_LOCK_KEY,))
-        existing = conn.execute(
-            "SELECT manifest_sha256, logical_input_id FROM market.dataset_versions"
-            " WHERE dataset_version = %s",
-            (version,),
-        ).fetchone()
-        if existing is not None:
-            if existing[0] != record.manifest_sha256 or existing[1] != record.logical_input_id:
-                raise ConflictingDataset(
-                    f"version {version} is already imported with different content"
-                )
-            return ImportResult(version, "already_imported")
-        other = _scalar(
-            conn,
-            "SELECT dataset_version FROM market.dataset_versions WHERE logical_input_id = %s",
-            (record.logical_input_id,),
-        )
-        if other is not None:
+        return _import(conn, store, record)
+
+
+def _import(conn: psycopg.Connection, store: LocalArtifactStore, record: Pointer) -> ImportResult:
+    """The import steps; the caller holds the import lock inside an open transaction."""
+    version = record.dataset_version
+    existing = conn.execute(
+        "SELECT manifest_sha256, logical_input_id FROM market.dataset_versions"
+        " WHERE dataset_version = %s",
+        (version,),
+    ).fetchone()
+    if existing is not None:
+        if existing[0] != record.manifest_sha256 or existing[1] != record.logical_input_id:
             raise ConflictingDataset(
-                f"logical input {record.logical_input_id} is already imported as version {other}"
+                f"version {version} is already imported with different content"
             )
-        expected = int(
-            _scalar(
-                conn, "SELECT coalesce(max(dataset_version), 0) + 1 FROM market.dataset_versions"
-            )
+        return ImportResult(version, "already_imported")
+    other = _scalar(
+        conn,
+        "SELECT dataset_version FROM market.dataset_versions WHERE logical_input_id = %s",
+        (record.logical_input_id,),
+    )
+    if other is not None:
+        raise ConflictingDataset(
+            f"logical input {record.logical_input_id} is already imported as version {other}"
         )
-        if version != expected:
-            raise OutOfOrderImport(f"version {version} cannot be imported before {expected}")
+    expected = int(
+        _scalar(conn, "SELECT coalesce(max(dataset_version), 0) + 1 FROM market.dataset_versions")
+    )
+    if version != expected:
+        raise OutOfOrderImport(f"version {version} cannot be imported before {expected}")
 
-        manifest = read_manifest(store, record)  # verifies the manifest hash
-        if manifest["dataset_version"] != version:
-            raise ConflictingDataset(f"manifest says version {manifest['dataset_version']}")
-        current = conform(read_artifact(store, manifest, "gold_current"), GOLD_SCHEMA)
-        revisions = conform(read_artifact(store, manifest, "gold_revisions"), REVISION_SCHEMA)
-        has_curves = "gold_curves" in manifest["artifacts"]
-        curves = read_artifact(store, manifest, "gold_curves") if has_curves else None
+    manifest = read_manifest(store, record)  # verifies the manifest hash
+    if manifest["dataset_version"] != version:
+        raise ConflictingDataset(f"manifest says version {manifest['dataset_version']}")
+    current = conform(read_artifact(store, manifest, "gold_current"), GOLD_SCHEMA)
+    revisions = conform(read_artifact(store, manifest, "gold_revisions"), REVISION_SCHEMA)
+    has_curves = "gold_curves" in manifest["artifacts"]
+    curves = read_artifact(store, manifest, "gold_curves") if has_curves else None
 
-        sources = set(current["source"].unique().to_list())
-        known = {r[0] for r in conn.execute("SELECT DISTINCT source FROM market.dataset_versions")}
-        if len(sources) > 1 or (known and known != sources):
-            raise MixedSourceImport(f"dataset sources {sorted(sources)}, database {sorted(known)}")
+    sources = set(current["source"].unique().to_list())
+    known = {r[0] for r in conn.execute("SELECT DISTINCT source FROM market.dataset_versions")}
+    if len(sources) > 1 or (known and known != sources):
+        raise MixedSourceImport(f"dataset sources {sorted(sources)}, database {sorted(known)}")
 
-        # Column-only staging copies: no constraints, no dataset_version (set on publication).
-        for stg, table, cols in STAGING:
-            conn.execute(
-                f"CREATE TEMP TABLE {stg} ON COMMIT DROP AS"  # noqa: S608 - fixed identifiers
-                f" SELECT {', '.join(cols)} FROM market.{table} WITH NO DATA"
-            )
-        _copy(conn, "stg_observations", OBSERVATION_COLUMNS, current)
-        _copy(conn, "stg_revisions", REVISION_COLUMNS, revisions)
-        if curves is not None:
-            _copy(
-                conn,
-                "stg_curves",
-                CURVE_COLUMNS,
-                curves.with_columns(pl.col("position").cast(pl.Utf8)),
-            )
-        _validate(conn, manifest, has_curves)
-
+    # Column-only staging copies: no constraints, no dataset_version (set on publication).
+    # A rebuild imports every version in one transaction, so ON COMMIT DROP alone would leave
+    # the previous version's staging tables in place.
+    for stg, table, cols in STAGING:
+        conn.execute(f"DROP TABLE IF EXISTS {stg}")
         conn.execute(
-            "INSERT INTO market.dataset_versions (dataset_version, logical_input_id,"
-            " manifest_sha256, source, created_at, observations, revisions, curve_points,"
-            " price_changes) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                version, record.logical_input_id, record.manifest_sha256, sources.pop(),
-                manifest.get("created_at") or datetime.now(UTC), current.height,
-                revisions.height, 0 if curves is None else curves.height,
-                int(manifest.get("merge", {}).get("price_changes", 0)),
-            ),
-        )  # fmt: skip
-        for stg, table, cols in STAGING:
-            columns = ", ".join(cols)
-            versioned = table != "revisions"  # revisions carry their own version columns
-            conn.execute(f"DELETE FROM market.{table}")  # noqa: S608 - fixed identifiers
-            conn.execute(
-                f"INSERT INTO market.{table} ({columns}{', dataset_version' if versioned else ''})"  # noqa: S608
-                f" SELECT {columns}{', %s' if versioned else ''} FROM {stg}",
-                (version,) if versioned else (),
-            )
+            f"CREATE TEMP TABLE {stg} ON COMMIT DROP AS"  # noqa: S608 - fixed identifiers
+            f" SELECT {', '.join(cols)} FROM market.{table} WITH NO DATA"
+        )
+    _copy(conn, "stg_observations", OBSERVATION_COLUMNS, current)
+    _copy(conn, "stg_revisions", REVISION_COLUMNS, revisions)
+    if curves is not None:
+        _copy(
+            conn,
+            "stg_curves",
+            CURVE_COLUMNS,
+            curves.with_columns(pl.col("position").cast(pl.Utf8)),
+        )
+    _validate(conn, manifest, has_curves)
 
+    conn.execute(
+        "INSERT INTO market.dataset_versions (dataset_version, logical_input_id,"
+        " manifest_sha256, source, created_at, observations, revisions, curve_points,"
+        " price_changes) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            version, record.logical_input_id, record.manifest_sha256, sources.pop(),
+            manifest.get("created_at") or datetime.now(UTC), current.height,
+            revisions.height, 0 if curves is None else curves.height,
+            int(manifest.get("merge", {}).get("price_changes", 0)),
+        ),
+    )  # fmt: skip
+    for stg, table, cols in STAGING:
+        columns = ", ".join(cols)
+        versioned = table != "revisions"  # revisions carry their own version columns
+        conn.execute(f"DELETE FROM market.{table}")  # noqa: S608 - fixed identifiers
         conn.execute(
-            "INSERT INTO app.outbox_events (event_id, event_type, dataset_version, payload)"
-            " VALUES (%s, 'dataset_imported', %s, %s)"
-            " ON CONFLICT (event_type, dataset_version) DO NOTHING",
-            (
-                event_id("dataset_imported", version, record.manifest_sha256),
-                version,
-                Jsonb({"dataset_version": version, "logical_input_id": record.logical_input_id,
-                       "manifest_sha256": record.manifest_sha256}),
-            ),
-        )  # fmt: skip
+            f"INSERT INTO market.{table} ({columns}{', dataset_version' if versioned else ''})"  # noqa: S608
+            f" SELECT {columns}{', %s' if versioned else ''} FROM {stg}",
+            (version,) if versioned else (),
+        )
+
+    conn.execute(
+        "INSERT INTO app.outbox_events (event_id, event_type, dataset_version, payload)"
+        " VALUES (%s, 'dataset_imported', %s, %s)"
+        " ON CONFLICT (event_type, dataset_version) DO NOTHING",
+        (
+            event_id("dataset_imported", version, record.manifest_sha256),
+            version,
+            Jsonb({"dataset_version": version, "logical_input_id": record.logical_input_id,
+                   "manifest_sha256": record.manifest_sha256}),
+        ),
+    )  # fmt: skip
     return ImportResult(version, "imported")
 
 
@@ -262,11 +276,18 @@ def import_pending(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
 
 
 def rebuild_market(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
-    """Discard the rebuildable `market` schema and re-import it. The `app` schema is untouched;
-    outbox events for already-imported versions already exist and are not duplicated."""
+    """Re-import the rebuildable `market` schema from the published versions, all or nothing.
+
+    One transaction holds the import lock, deletes `market` and re-imports every version and
+    attempt, so any failure (tampered artifact, conflict, staging validation, out-of-order
+    version) rolls back to the previous `market`. DELETE rather than TRUNCATE: readers keep
+    seeing the previous rows until the commit instead of blocking on an exclusive lock.
+    The `app` schema is untouched."""
+    store = LocalArtifactStore(data_dir)
     with psycopg.connect(dsn) as conn, conn.transaction():
-        conn.execute(
-            "TRUNCATE market.observations, market.revisions, market.curve_points,"
-            " market.pipeline_attempts, market.dataset_versions"
-        )
-    return import_pending(dsn, data_dir)
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (IMPORT_LOCK_KEY,))
+        for table in MARKET_TABLES:
+            conn.execute(f"DELETE FROM market.{table}")  # noqa: S608 - fixed identifiers
+        results = [_import(conn, store, record) for record in published_versions(store)]
+        attempts = sync_attempts(conn, store)
+    return results, attempts

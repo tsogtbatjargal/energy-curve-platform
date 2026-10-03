@@ -264,7 +264,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status").set_defaults(func=cmd_status)
     sub.add_parser("db-migrate").set_defaults(func=cmd_db_migrate)
     p = sub.add_parser("db-import", help="import published versions into Postgres")
-    p.add_argument("--rebuild", action="store_true", help="truncate market and re-import all")
+    p.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="re-import market from the published versions, all or nothing",
+    )
     p.set_defaults(func=cmd_db_import)
     sub.add_parser("db-status").set_defaults(func=cmd_db_status)
     p = sub.add_parser("db-backup", help="back up the app schema (rules, alerts, outbox)")
