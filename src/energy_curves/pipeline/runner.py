@@ -138,7 +138,12 @@ def _run(
         "requests": [
             [list(r.series_ids), r.start.isoformat(), r.end.isoformat()] for r in requests
         ],
-        "bronze_sha256": page_hashes,
+        # Content plus retrieval time: only an exact replay of the same retrieval is a
+        # duplicate. A later retrieval with identical content is new evidence for ordering.
+        "bronze": [
+            [digest, page.retrieved_at.isoformat()]
+            for digest, (_, page) in zip(page_hashes, pages, strict=True)
+        ],
         "transform_version": TRANSFORM_VERSION,
         "shape_params_sha256": shape.params_sha256 if shape else None,
     }
@@ -263,13 +268,13 @@ def _run_identified(
     current, revisions, stats, stale_notes = merge_gold(
         prev.current, prev.revisions, silver, dataset_version=version, logical_input_id=logical_id
     )
-    merge = stats.__dict__
+    merge = stats.as_dict()
     if stale_notes:
         quality.warnings.extend(stale_notes)
         store.put(f"{prefix}/quality.json", dumps(quality.to_dict()))
     prev_shape = (prev.manifest or {}).get("identity", {}).get("shape_params_sha256")
     shape_changed = shape is not None and shape.params_sha256 != prev_shape
-    if not stats.changed and not shape_changed:
+    if not stats.state_changed and not shape_changed:
         return _finish(
             store,
             prefix,

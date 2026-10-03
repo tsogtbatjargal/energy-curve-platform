@@ -38,8 +38,12 @@ REJECTED_SCHEMA: dict[str, Any] = {
     "row_json": pl.Utf8,
     "reason": pl.Utf8,
 }
+# Gold current: Silver columns plus the latest retrieval time at which the observation was seen.
+# `retrieved_at` stays the retrieval that established the current price (lineage);
+# `last_seen_at` advances whenever a later retrieval confirms or changes it (ordering).
+GOLD_SCHEMA: dict[str, Any] = {**SILVER_SCHEMA, "last_seen_at": pl.Datetime("us", "UTC")}
 REVISION_SCHEMA: dict[str, Any] = {
-    **SILVER_SCHEMA,
+    **GOLD_SCHEMA,
     "superseded_at_version": pl.Int64,
     "superseded_by_logical_input_id": pl.Utf8,
 }
@@ -236,10 +240,26 @@ class MergeStats:
     revised: int
     unchanged: int
     stale: int = 0
+    seen: int = 0  # same price, later retrieval: watermark advanced, no revision
 
     @property
-    def changed(self) -> bool:
-        return self.inserted > 0 or self.revised > 0
+    def price_changes(self) -> int:
+        """Inserted or revised prices: the only changes that may drive revisions or alerts."""
+        return self.inserted + self.revised
+
+    @property
+    def state_changed(self) -> bool:
+        return self.price_changes > 0 or self.seen > 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {**self.__dict__, "price_changes": self.price_changes}
+
+
+def with_last_seen(df: pl.DataFrame) -> pl.DataFrame:
+    """Gold written before `last_seen_at` existed: its best watermark is `retrieved_at`."""
+    if "last_seen_at" in df.columns:
+        return df
+    return df.with_columns(pl.col("retrieved_at").alias("last_seen_at"))
 
 
 def merge_gold(
@@ -250,37 +270,55 @@ def merge_gold(
     dataset_version: int,
     logical_input_id: str,
 ) -> tuple[pl.DataFrame, pl.DataFrame, MergeStats, list[str]]:
-    """Apply Silver to Gold. Revision ordering is per observation: a different price replaces the
-    current one only if it was retrieved strictly later. An older or equally old retrieval with a
-    different price is stale and leaves the current value alone, whatever the run's identity.
+    """Apply Silver to Gold with per-observation retrieval ordering.
+
+    Ordering compares each incoming retrieval with the observation's `last_seen_at`: the latest
+    retrieval that has seen it, whether or not the price changed. Content deduplication (exact
+    replays) happens earlier, on the run identity, and is independent of this.
+
+    - new key: inserted
+    - later retrieval, different price: revised (old row to revisions)
+    - later retrieval, same price: watermark advanced only (no revision, no price change)
+    - not-later retrieval, different price: stale, current kept
+    - not-later retrieval, same price: unchanged
     """
+    current, revisions = with_last_seen(current), with_last_seen(revisions)
     joined = silver.join(
-        current.select([*KEY, "price", "retrieved_at"]), on=KEY, how="left", suffix="_old"
+        current.select([*KEY, "price", "last_seen_at"]), on=KEY, how="left", suffix="_old"
     )
-    exists, differs = pl.col("price_old").is_not_null(), pl.col("price") != pl.col("price_old")
-    newer = pl.col("retrieved_at") > pl.col("retrieved_at_old")
-    drop = ["price_old", "retrieved_at_old"]
+    exists = pl.col("price_old").is_not_null()
+    differs = pl.col("price") != pl.col("price_old")
+    later = pl.col("retrieved_at") > pl.col("last_seen_at")
+    drop = ["price_old", "last_seen_at"]
     new_rows = joined.filter(~exists).drop(drop)
-    changed = joined.filter(exists & differs & newer).drop(drop)
-    stale = joined.filter(exists & differs & ~newer)
-    unchanged = joined.height - new_rows.height - changed.height - stale.height
+    changed = joined.filter(exists & differs & later).drop(drop)
+    seen = joined.filter(exists & ~differs & later).select([*KEY, "retrieved_at"])
+    stale = joined.filter(exists & differs & ~later)
+    unchanged = joined.height - new_rows.height - changed.height - seen.height - stale.height
 
     superseded = current.join(changed.select(KEY), on=KEY, how="semi").with_columns(
         pl.lit(dataset_version, pl.Int64).alias("superseded_at_version"),
         pl.lit(logical_input_id).alias("superseded_by_logical_input_id"),
     )
-    new_current = (
-        pl.concat([current.join(changed.select(KEY), on=KEY, how="anti"), changed, new_rows])
-        .select(list(SILVER_SCHEMA))
-        .sort(KEY)
+    kept = current.join(changed.select(KEY), on=KEY, how="anti")
+    kept = (
+        kept.join(seen.rename({"retrieved_at": "seen_at"}), on=KEY, how="left")
+        .with_columns(pl.coalesce("seen_at", "last_seen_at").alias("last_seen_at"))
+        .drop("seen_at")
     )
+    incoming = pl.concat([changed, new_rows]).with_columns(
+        pl.col("retrieved_at").alias("last_seen_at")
+    )
+    new_current = pl.concat(
+        [kept.select(list(GOLD_SCHEMA)), incoming.select(list(GOLD_SCHEMA))]
+    ).sort(KEY)
     new_revisions = pl.concat([revisions, superseded.select(list(REVISION_SCHEMA))]).sort(
         [*KEY, "superseded_at_version"]
     )
-    stats = MergeStats(new_rows.height, changed.height, unchanged, stale.height)
+    stats = MergeStats(new_rows.height, changed.height, unchanged, stale.height, seen.height)
     stale_notes = [
-        f"{r['series_id']} {r['observation_date']}: retrieval {r['retrieved_at']} is not newer "
-        f"than current {r['retrieved_at_old']}; kept current value"
+        f"{r['series_id']} {r['observation_date']}: retrieval {r['retrieved_at']} is not later "
+        f"than last seen {r['last_seen_at']}; kept current value"
         for r in stale.head(20).iter_rows(named=True)
     ]
     return new_current, new_revisions, stats, stale_notes

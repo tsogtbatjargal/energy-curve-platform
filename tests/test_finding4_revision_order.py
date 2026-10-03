@@ -53,7 +53,7 @@ def test_same_timestamp_with_a_different_value_does_not_overwrite(tmp_path: Path
     result = ingest(tmp_path, JAN, SyntheticSource({("RWTC", DAY): "99.99"}, retrieved_at=T1))
     assert result.merge["stale"] == 1 and result.merge["revised"] == 0
     assert price_on(tmp_path, DAY) != Decimal("99.99")
-    assert any("not newer" in w for w in result.quality["warnings"])
+    assert any("not later" in w for w in result.quality["warnings"])
 
 
 def test_older_retrieval_mixed_with_new_dates_publishes_only_the_new_dates(tmp_path: Path) -> None:

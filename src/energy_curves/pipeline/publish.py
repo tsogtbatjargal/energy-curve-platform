@@ -16,7 +16,7 @@ from typing import Any
 
 import polars as pl
 
-from energy_curves.pipeline.medallion import REVISION_SCHEMA, SILVER_SCHEMA, empty
+from energy_curves.pipeline.medallion import GOLD_SCHEMA, REVISION_SCHEMA, empty
 from energy_curves.storage.artifacts import ArtifactStore, sha256
 
 POINTER_KEY = "published/current.json"
@@ -86,7 +86,7 @@ class Published:
 def load_published(store: ArtifactStore) -> Published:
     pointer = read_pointer(store)
     if pointer is None:
-        return Published(None, None, empty(SILVER_SCHEMA), empty(REVISION_SCHEMA))
+        return Published(None, None, empty(GOLD_SCHEMA), empty(REVISION_SCHEMA))
     manifest = read_manifest(store, pointer)
     return Published(
         pointer,

@@ -70,6 +70,8 @@ def test_same_data_in_a_different_window_publishes_nothing(tmp_path: Path) -> No
         "revised": 0,
         "unchanged": 42,
         "stale": 0,
+        "seen": 0,  # same retrieval time: the watermark does not move
+        "price_changes": 0,
     }  # 21 weekdays x 2
     assert read_pointer(LocalArtifactStore(tmp_path)).dataset_version == 1  # type: ignore[union-attr]
 
