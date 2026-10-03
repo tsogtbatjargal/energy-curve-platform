@@ -18,13 +18,31 @@ function processed(name) {
     data[name] = String(Number(data[name] || 0) + 1)
 }
 
-async function api(path, options = {}) {
-    const response = await fetch(path, options)
+async function parse(response) {
     if (!response.ok) {
         const body = await response.json().catch(() => ({}))
         throw new Error(typeof body.detail === 'string' ? body.detail : `HTTP ${response.status}`)
     }
     return response.status === 204 ? null : response.json()
+}
+
+async function api(path, options = {}) {
+    return parse(await fetch(path, options))
+}
+
+// The CSRF token belongs to the server process, so after a server restart the page's token is
+// stale. A change refused for its token fetches the current one and is sent once more.
+async function mutate(path, options) {
+    const send = () => fetch(path, { ...options, headers: { ...options.headers, 'x-csrf-token': state.csrf } })
+    let response = await send()
+    if (response.status === 403) {
+        const detail = (await response.clone().json().catch(() => ({}))).detail
+        if (typeof detail === 'string' && detail.includes('CSRF')) {
+            state.csrf = (await api('/api/csrf')).token
+            response = await send()
+        }
+    }
+    return parse(response)
 }
 
 const safe = row => Object.fromEntries(
@@ -241,9 +259,9 @@ async function main() {
         const form = new FormData(e.target)
         $('[data-testid=rule-error]').textContent = ''
         try {
-            await api('/api/alerts/rules', {
+            await mutate('/api/alerts/rules', {
                 method: 'POST',
-                headers: { 'content-type': 'application/json', 'x-csrf-token': state.csrf },
+                headers: { 'content-type': 'application/json' },
                 body: JSON.stringify(Object.fromEntries(form)),
             })
             e.target.threshold.value = ''
@@ -255,8 +273,13 @@ async function main() {
     $('[data-testid=delete-rule]').addEventListener('click', async () => {
         const [id] = grids.rules.getSelection()
         if (!id) return
-        await api(`/api/alerts/rules/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'x-csrf-token': state.csrf } })
-        await loadRules()
+        $('[data-testid=rule-error]').textContent = ''
+        try {
+            await mutate(`/api/alerts/rules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+            await loadRules()
+        } catch (err) {
+            $('[data-testid=rule-error]').textContent = err.message
+        }
     })
     await loadCurves()
     await loadAlerts()

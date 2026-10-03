@@ -293,3 +293,32 @@ def test_p2_2_a_late_history_response_never_replaces_the_current_selection(
         expect(page.locator("#grid-history")).not_to_contain_text(prices["WTI", "Spot"]["price"])
         href = page.get_by_test_id("export-history").get_attribute("href") or ""
         assert "curve_id=BRENT" in href and "position=C1" in href
+
+
+def test_p2_3_rule_changes_work_after_a_server_restart(page: Page, db: str) -> None:
+    """Finding P2-3: the CSRF token is per server process. After a restart the page must still
+    create and delete rules without a reload."""
+    errors: list[str] = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    port = free_port()
+    with serve(db, None, poll_s=0.3, port=port) as base:
+        page.goto(f"{base}/")
+        expect(page.locator("body")).to_have_attribute("data-ready", "true")
+        tab(page, "Alerts")
+        page.evaluate("window.notReloaded = true")
+    with serve(db, None, poll_s=0.3, port=port):  # a new process, so a new token
+        add_rule(page, "WTI", "Spot", "95")
+        try:
+            total(page, "rules").to_contain_text("of 1")
+        except AssertionError:
+            shown = page.get_by_test_id("rule-error").inner_text()
+            raise AssertionError(f"the rule was not created; the page says {shown!r}") from None
+        page.locator("#grid-rules").get_by_text("95.0000").click()
+        page.get_by_test_id("delete-rule").click()
+        total(page, "rules").not_to_contain_text("of 1")
+        with psycopg.connect(db) as conn:
+            assert alerts.list_rules(conn) == []
+        assert page.evaluate("window.notReloaded") is True
+        page.goto("about:blank")
+    expected = ("ERR_CONNECTION_REFUSED", "ERR_INCOMPLETE_CHUNKED_ENCODING", "403")
+    assert [e for e in errors if not any(x in e for x in expected)] == []
