@@ -253,10 +253,13 @@ def _run_identified(
         )
 
     version = prev.version + 1
-    current, revisions, stats = merge_gold(
+    current, revisions, stats, stale_notes = merge_gold(
         prev.current, prev.revisions, silver, dataset_version=version, logical_input_id=logical_id
     )
     merge = stats.__dict__
+    if stale_notes:
+        quality.warnings.extend(stale_notes)
+        store.put(f"{prefix}/quality.json", dumps(quality.to_dict()))
     prev_shape = (prev.manifest or {}).get("identity", {}).get("shape_params_sha256")
     shape_changed = shape is not None and shape.params_sha256 != prev_shape
     if not stats.changed and not shape_changed:

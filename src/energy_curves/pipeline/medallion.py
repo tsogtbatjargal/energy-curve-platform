@@ -185,6 +185,7 @@ class MergeStats:
     inserted: int
     revised: int
     unchanged: int
+    stale: int = 0
 
     @property
     def changed(self) -> bool:
@@ -198,13 +199,21 @@ def merge_gold(
     *,
     dataset_version: int,
     logical_input_id: str,
-) -> tuple[pl.DataFrame, pl.DataFrame, MergeStats]:
-    joined = silver.join(current.select([*KEY, "price"]), on=KEY, how="left", suffix="_old")
-    new_rows = joined.filter(pl.col("price_old").is_null()).drop("price_old")
-    changed = joined.filter(
-        pl.col("price_old").is_not_null() & (pl.col("price") != pl.col("price_old"))
-    ).drop("price_old")
-    unchanged = joined.height - new_rows.height - changed.height
+) -> tuple[pl.DataFrame, pl.DataFrame, MergeStats, list[str]]:
+    """Apply Silver to Gold. Revision ordering is per observation: a different price replaces the
+    current one only if it was retrieved strictly later. An older or equally old retrieval with a
+    different price is stale and leaves the current value alone, whatever the run's identity.
+    """
+    joined = silver.join(
+        current.select([*KEY, "price", "retrieved_at"]), on=KEY, how="left", suffix="_old"
+    )
+    exists, differs = pl.col("price_old").is_not_null(), pl.col("price") != pl.col("price_old")
+    newer = pl.col("retrieved_at") > pl.col("retrieved_at_old")
+    drop = ["price_old", "retrieved_at_old"]
+    new_rows = joined.filter(~exists).drop(drop)
+    changed = joined.filter(exists & differs & newer).drop(drop)
+    stale = joined.filter(exists & differs & ~newer)
+    unchanged = joined.height - new_rows.height - changed.height - stale.height
 
     superseded = current.join(changed.select(KEY), on=KEY, how="semi").with_columns(
         pl.lit(dataset_version, pl.Int64).alias("superseded_at_version"),
@@ -218,7 +227,13 @@ def merge_gold(
     new_revisions = pl.concat([revisions, superseded.select(list(REVISION_SCHEMA))]).sort(
         [*KEY, "superseded_at_version"]
     )
-    return new_current, new_revisions, MergeStats(new_rows.height, changed.height, unchanged)
+    stats = MergeStats(new_rows.height, changed.height, unchanged, stale.height)
+    stale_notes = [
+        f"{r['series_id']} {r['observation_date']}: retrieval {r['retrieved_at']} is not newer "
+        f"than current {r['retrieved_at_old']}; kept current value"
+        for r in stale.head(20).iter_rows(named=True)
+    ]
+    return new_current, new_revisions, stats, stale_notes
 
 
 def empty(schema: dict[str, Any]) -> pl.DataFrame:

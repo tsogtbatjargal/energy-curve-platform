@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from energy_curves.storage.artifacts import LocalArtifactStore
 SPOT_JAN = [FetchRequest(("RBRTE", "RWTC"), date(2024, 1, 1), date(2024, 1, 31))]
 SPOT_FEB = [FetchRequest(("RBRTE", "RWTC"), date(2024, 2, 1), date(2024, 2, 29))]
 BUSINESS_KEY = ["source", "series_id", "observation_date", "price"]
+LATER = datetime(2026, 2, 1, tzinfo=UTC)  # after the synthetic source's default retrieval time
 
 
 def ingest(data_dir: Path, requests=SPOT_JAN, source=None, **kw):  # type: ignore[no-untyped-def]
@@ -64,7 +65,12 @@ def test_same_data_in_a_different_window_publishes_nothing(tmp_path: Path) -> No
     narrower = [FetchRequest(("RBRTE", "RWTC"), date(2024, 1, 2), date(2024, 1, 30))]
     result = ingest(tmp_path, narrower)
     assert result.status == "no_new_data"
-    assert result.merge == {"inserted": 0, "revised": 0, "unchanged": 42}  # 21 weekdays x 2
+    assert result.merge == {
+        "inserted": 0,
+        "revised": 0,
+        "unchanged": 42,
+        "stale": 0,
+    }  # 21 weekdays x 2
     assert read_pointer(LocalArtifactStore(tmp_path)).dataset_version == 1  # type: ignore[union-attr]
 
 
@@ -80,7 +86,7 @@ def test_new_data_appends(tmp_path: Path) -> None:
 
 def test_revision_changes_current_once_and_keeps_previous(tmp_path: Path) -> None:
     first = ingest(tmp_path)
-    revised = SyntheticSource({("RWTC", date(2024, 1, 10)): "99.99"})
+    revised = SyntheticSource({("RWTC", date(2024, 1, 10)): "99.99"}, retrieved_at=LATER)
     second = ingest(tmp_path, source=revised)
     third = ingest(tmp_path, source=revised)
     published = load_published(LocalArtifactStore(tmp_path))
@@ -100,7 +106,9 @@ def test_revision_changes_current_once_and_keeps_previous(tmp_path: Path) -> Non
 
 def test_resending_an_older_retrieval_does_not_revert(tmp_path: Path) -> None:
     ingest(tmp_path)
-    ingest(tmp_path, source=SyntheticSource({("RWTC", date(2024, 1, 10)): "99.99"}))
+    ingest(
+        tmp_path, source=SyntheticSource({("RWTC", date(2024, 1, 10)): "99.99"}, retrieved_at=LATER)
+    )
     stale = ingest(tmp_path)  # the original January retrieval again
     assert stale.status == "already_published"
     cur = load_published(LocalArtifactStore(tmp_path)).current

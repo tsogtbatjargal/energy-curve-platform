@@ -60,9 +60,15 @@ def synthetic_price(series_id: str, d: date) -> Decimal | None:
 class SyntheticSource:
     """Drop-in replacement for EiaClient.fetch()."""
 
-    def __init__(self, overrides: dict[tuple[str, date], Any] | None = None) -> None:
-        # overrides lets tests inject revisions or malformed values for specific rows.
+    def __init__(
+        self,
+        overrides: dict[tuple[str, date], Any] | None = None,
+        retrieved_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+    ) -> None:
+        # overrides lets tests inject revisions or malformed values for specific rows;
+        # retrieved_at lets them order retrievals in time.
         self._overrides = overrides or {}
+        self._retrieved_at = retrieved_at
 
     def _rows(self, series_ids: list[str], start: date, end: date) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -110,7 +116,7 @@ class SyntheticSource:
             yield Page(
                 body=json.dumps(body, sort_keys=True, separators=(",", ":")).encode(),
                 params=params,
-                retrieved_at=datetime(2026, 1, 1, tzinfo=UTC),
+                retrieved_at=self._retrieved_at,
                 rows=chunk,
                 total=total,
             )
