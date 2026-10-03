@@ -207,3 +207,46 @@ def test_mobile_smoke(browser: Any, db: str) -> None:
             assert overflow <= 0, f"{name}: the page scrolls sideways by {overflow}px"
             expect(page.get_by_test_id("disclaimer")).to_be_in_viewport()
     context.close()
+
+
+# --- review findings (PR #8) ----------------------------------------------------------------------
+
+
+def processed(page: Page, name: str) -> int:
+    return int(page.locator("body").get_attribute(f"data-{name}") or 0)
+
+
+def wait_processed(page: Page, name: str, count: int) -> None:
+    expect(page.locator("body")).to_have_attribute(f"data-{name}", str(count))
+
+
+def test_p2_1_a_delayed_alert_snapshot_never_erases_streamed_alerts(
+    page: Page, db: str, store: Path
+) -> None:
+    """Finding P2-1: an alert snapshot taken before an alert fired, but answered after the
+    stream delivered that alert, must not erase it from the page."""
+    with psycopg.connect(db) as conn:
+        alerts.create_rule(conn, "WTI", "Spot", Decimal("95"))
+    held: list[Any] = []
+
+    def hold_first(route: Any) -> None:
+        if held:
+            route.continue_()
+        else:
+            held.append((route, route.fetch()))  # the snapshot is taken now, before the alert
+
+    with ui(page, db):
+        before = processed(page, "alert-snapshots")
+        page.route("**/api/alerts", hold_first)
+        tab(page, "Alerts")  # requests a snapshot, which is held
+        while not held:
+            page.wait_for_timeout(20)
+        replay(store, db, FEB_8, FEB_8, overrides=SPIKE)
+        expect(page.get_by_test_id("toast")).to_contain_text("WTI Spot at 99.9900")
+        expect(page.locator("#grid-alerts")).to_contain_text("99.9900")
+        wait_processed(page, "alert-snapshots", before + 1)  # the refresh after the new version
+        route, stale = held[0]
+        route.fulfill(response=stale)  # the old snapshot arrives last
+        wait_processed(page, "alert-snapshots", before + 2)
+        expect(page.locator("#grid-alerts")).to_contain_text("99.9900")
+        total(page, "alerts").to_contain_text("of 1")

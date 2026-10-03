@@ -6,7 +6,16 @@ import { lineChart } from './chart.js'
 
 const STALE_DAYS = 4
 const $ = sel => document.querySelector(sel)
-const state = { tab: 'curves', csrf: null, alertIds: new Set(), alertCursor: null, streams: {} }
+const state = {
+    tab: 'curves', csrf: null, streams: {},
+    alerts: new Map(), alertEpoch: null, alertCursor: null, alertRequest: 0, // event id -> alert
+}
+
+// Counts processed responses per loader, so browser tests can wait for one deterministically.
+function processed(name) {
+    const data = document.body.dataset
+    data[name] = String(Number(data[name] || 0) + 1)
+}
 
 async function api(path, options = {}) {
     const response = await fetch(path, options)
@@ -116,6 +125,7 @@ async function loadHistory() {
         setRecords('history', [])
     } finally {
         chart.style.opacity = '1'
+        processed('historyLoads')
     }
 }
 
@@ -123,20 +133,40 @@ async function loadRules() {
     setRecords('rules', (await api('/api/alerts/rules')).rules, 'rule_id')
 }
 
+function renderAlerts() {
+    const rows = [...state.alerts].map(([id, a]) => ({ recid: id, ...safe(a) }))
+    grids.alerts.records = rows.sort((a, b) => b.seq - a.seq) // newest first
+    grids.alerts.total = rows.length
+    grids.alerts.refresh()
+}
+
 function addAlert(alert, id) {
-    if (state.alertIds.has(id)) return false // de-duplicated by event id
-    state.alertIds.add(id)
-    grids.alerts.add({ recid: id, ...safe(alert) }, true)
+    if (state.alerts.has(id)) return false // de-duplicated by event id
+    state.alerts.set(id, alert)
+    renderAlerts()
     return true
 }
 
+// A snapshot is merged into what the page already holds, never replaces it: a snapshot taken
+// before an alert fired can answer after the stream delivered that alert. A snapshot answering
+// after a newer one was requested is ignored. Only a new epoch (a restored log) drops alerts,
+// and then only those of other epochs.
 async function loadAlerts() {
-    const body = await api('/api/alerts')
-    state.alertIds.clear()
-    grids.alerts.clear()
-    const epoch = body.cursor.split('-')[0]
-    for (const a of body.alerts) addAlert(a, `${epoch}-${a.seq}`)
-    state.alertCursor = body.cursor
+    const request = ++state.alertRequest
+    try {
+        const body = await api('/api/alerts')
+        if (request !== state.alertRequest) return
+        const epoch = body.cursor.split('-')[0]
+        if (epoch !== state.alertEpoch) {
+            for (const id of [...state.alerts.keys()]) if (!id.startsWith(`${epoch}-`)) state.alerts.delete(id)
+            state.alertEpoch = epoch
+        }
+        for (const a of body.alerts) state.alerts.set(`${epoch}-${a.seq}`, a)
+        state.alertCursor ??= body.cursor
+        renderAlerts()
+    } finally {
+        processed('alertSnapshots')
+    }
 }
 
 async function loadHealth() {
