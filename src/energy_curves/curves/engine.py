@@ -50,6 +50,10 @@ CURVE_SCHEMA: dict[str, Any] = {
 }
 
 
+class MixedSourceError(ValueError):
+    """Curve inputs come from more than one source."""
+
+
 @dataclass(frozen=True)
 class CurveConfig:
     method_version: str
@@ -84,6 +88,9 @@ def build_curves(
     config: CurveConfig | None = None,
 ) -> pl.DataFrame:
     """Curve points for every date that has at least one anchor spot."""
+    sources = current["source"].unique().to_list() if "source" in current.columns else []
+    if len(sources) > 1:
+        raise MixedSourceError(f"curve inputs come from several sources: {sorted(sources)}")
     config = config or load_config()
     factors = shape_factors(params)
     anchors = {c["anchor"] for c in config.outrights}

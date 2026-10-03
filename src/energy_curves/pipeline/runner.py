@@ -68,6 +68,10 @@ class ShapeInput:
     origin: str  # source the parameters were estimated from: "synthetic" or "eia"
 
 
+class MixedSourceError(ValueError):
+    """A run would add observations from a second source to a single-source store."""
+
+
 class ShapeOriginMismatch(ValueError):
     """Shape parameters estimated from one source applied to data from another."""
 
@@ -186,6 +190,14 @@ def _run_identified(
     logical_id: str,
 ) -> RunResult:
     prefix = f"runs/{logical_id}"
+    prev = load_published(store)
+    # A store holds one source. Mixing synthetic and EIA observations would let curves and shape
+    # estimation silently combine them, so refuse before anything is written.
+    stored_sources = set(prev.current["source"].unique().to_list())
+    if stored_sources - {source_name}:
+        raise MixedSourceError(
+            f"store holds {sorted(stored_sources)} data; refusing to add {source_name!r} data"
+        )
     already = published_logical_ids(store)
     if logical_id in already:
         return _finish(
@@ -215,7 +227,6 @@ def _run_identified(
         bronze.append(BronzePage(key, digest, page.retrieved_at, page.rows))
     fault("after_bronze")
 
-    prev = load_published(store)
     silver, rejected = to_silver(bronze, source=source_name, logical_input_id=logical_id)
     requested = sorted({s for r in requests for s in r.series_ids})
     window_end = max(r.end for r in requests)
