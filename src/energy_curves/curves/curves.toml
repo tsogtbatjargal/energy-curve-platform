@@ -1,0 +1,18 @@
+# Curve definitions (ADR-0002). Every output point is a modelled estimate, not a market quote.
+method_version = "curve-v1"
+
+[[outright]]
+id = "WTI"
+anchor = "RWTC"
+shape_source = "WTI futures C1-C4 (RCLC1-RCLC4)"
+
+[[outright]]
+id = "BRENT"
+anchor = "RBRTE"
+shape_source = "WTI futures C1-C4 (borrowed; no Brent futures in EIA)"
+
+# Spread = displayed long minus displayed short, position by position.
+[[spread]]
+id = "BRENT_WTI"
+long = "BRENT"
+short = "WTI"

@@ -1,0 +1,22 @@
+{
+  "description": "Hashes and counts of the real EIA inputs used for shape estimation. Contains no prices (ADR-0011).",
+  "source": "EIA API v2: petroleum/pri/spt (RWTC), petroleum/pri/fut (RCLC1-RCLC4)",
+  "retrieved": "2026-10-03",
+  "method_version": "shape-v1",
+  "window": [
+    "2014-01-01",
+    "2024-04-05"
+  ],
+  "rows_per_series": {
+    "RCLC1": 2589,
+    "RCLC2": 2589,
+    "RCLC3": 2589,
+    "RCLC4": 2589,
+    "RWTC": 2576
+  },
+  "excluded_dates": [
+    "2020-04-20"
+  ],
+  "input_sha256": "b8479d7f9c31c29a2d47d405936ecd016bb348ac851fe06f83993a05676c8fbf",
+  "params_sha256": "4d4eec4b3e7df73c39bd4806b96ebcb50a2005ae495a7e9222dc873782ef962d"
+}
