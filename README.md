@@ -56,3 +56,11 @@ uv run energy-curves db-backup backups/$(date +%F)   # Postgres-owned app schema
 - `db-import` notifies open event streams after each commit.
 
 See [ADR-0014](docs/adr/0014-m3b-api-cache-events.md).
+
+**Alerts.** Threshold rules fire when a curve position crosses upward, and re-arm once it is back at or below the threshold. New rules take a baseline instead of firing ([ADR-0013](docs/adr/0013-m3-serving-architecture.md), [ADR-0015](docs/adr/0015-m3c-alerts.md)).
+- **Evaluation** runs after each `db-import`, from `energy-curves process-events`, and in the background of `serve`.
+- **Endpoints:**
+  - `/api/alerts/rules`: rule changes need the token from `/api/csrf` in `X-CSRF-Token`;
+  - `/api/alerts`: the fired-alert history and a cursor;
+  - `/api/alerts/events`: the alert stream, which resumes exactly after the last alert seen (`Last-Event-ID` or `?after=`).
+- **Retention:** `energy-curves alerts-prune --keep-days N` deletes old alerts.
