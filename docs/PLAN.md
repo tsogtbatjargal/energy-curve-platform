@@ -35,17 +35,17 @@ Points are labelled `Spot, C1–C4` (contract positions). Real data supports not
 | Glue (PySpark) | Historical backfill and seasonal-shape estimation, run on demand |
 | Redshift Serverless | Curve and price history, analytical queries; on only for sessions |
 | S3 | Bronze / Silver / Gold, run manifests, GitHub Pages snapshot source |
-| Postgres | App state: runs, quality results, prices, curves, alerts (audit) |
-| Redis | Response cache scoped to dataset version, Pub/Sub for alerts and updates |
+| Postgres 17 | `market` schema (rebuildable from published artifacts: versions, prices, revisions, curves, attempts) and `app` schema (owned by Postgres: outbox, alert rules/state/history, notifications; backed up separately) — [ADR-0013](adr/0013-m3-serving-architecture.md) |
+| Valkey (Redis-compatible) | Response cache scoped to dataset version, Pub/Sub for alerts and updates |
 | FastAPI + w2ui | API, server-sent events, UI |
 
 **Profiles ([ADR-0004](adr/0004-network-profiles.md)):**
 
-- **local:** app, Postgres and Redis run in podman compose; filesystem artifact store; offline fixtures.
+- **local:** app, Postgres and Valkey run in podman compose (ports bound to 127.0.0.1); filesystem artifact store; offline fixtures.
 - **batch (always on):** no VPC for Lambda; Fargate in public subnets with no inbound rules; S3 gateway endpoint; no NAT.
 - **demo-day (about 48 h, then destroyed):**
   - API on Fargate behind an ALB.
-  - RDS Postgres and ElastiCache Redis in private subnets.
+  - RDS Postgres 17 and ElastiCache Valkey 9.1 in private subnets.
   - One NAT gateway.
   - Bastion with no inbound ports, reached through SSM Session Manager.
 
@@ -145,7 +145,7 @@ So a hash of the plan JSON alone would not change when the actions changed.
 | M0 | Identity Center admin, budget, Terraform state bucket, GitHub OIDC role | 2–3 |
 | M1 | CI (lint, Pytest, gitleaks, conftest, trivy, actionlint), Rego policies | 2–3 |
 | M2 | EIA ingestion, Bronze/Silver/Gold on local filesystem, curve engine, tests | 6–8 |
-| M3 | Postgres, Redis, FastAPI, SSE, w2ui tabs, alerts, replay CLI, Playwright | 6–8 |
+| M3 | Four PRs reviewed one at a time (ADR-0013). M3a: compose, migrations, importer, outbox, backup/restore. M3b: API, cache, SSE. M3c: crossing alerts via the outbox. M3d: w2ui, replay, Playwright (including mobile smoke) | 20–28 (revisable) |
 | M4 | AWS batch: S3, Lambda, Fargate, Step Functions, Scheduler, alarm | 5–7 |
 | M5 | Glue PySpark backfill and shape estimation, Polars parity test, Redshift load and queries | 5–7 |
 | M6 | Demo-day stack, video, teardown; GitHub Pages snapshot | 4–6 |
