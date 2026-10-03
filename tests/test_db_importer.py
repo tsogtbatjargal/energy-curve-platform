@@ -364,3 +364,85 @@ def test_readers_keep_the_previous_market_during_a_rebuild(
     monkeypatch.setattr(imp, "sync_attempts", sync_then_read)
     imp.rebuild_market(db, store)
     assert seen == [(JAN_ROWS + FEB_ROWS,)]
+
+
+# --- finding 2: history recorded in app must match the store ------------------------------------
+
+
+def republish_first_version(store_dir: Path, db: str) -> None:
+    """A different store: the same January data published again, so a different manifest."""
+    ingest(store_dir.parent / "other", JAN, retrieved_at=T1)
+    import shutil
+
+    shutil.rmtree(store_dir)
+    (store_dir.parent / "other").rename(store_dir)
+
+
+def relabel_logical_input(store_dir: Path, db: str) -> None:
+    record = json.loads(_record_path(store_dir, 2).read_bytes())
+    _record_path(store_dir, 2).write_bytes(dumps({**record, "logical_input_id": "f" * 32}))
+
+
+def replace_event_id(store_dir: Path, db: str) -> None:
+    with psycopg.connect(db) as conn:
+        conn.execute(
+            "UPDATE app.outbox_events SET event_id = gen_random_uuid() WHERE dataset_version = 2"
+        )
+
+
+HISTORY_MISMATCHES = {
+    "different_manifest": (republish_first_version, "version 1"),
+    "different_logical_input": (relabel_logical_input, "version 2"),
+    "non_deterministic_event_id": (replace_event_id, "version 2"),
+}
+
+
+@pytest.mark.parametrize("case", HISTORY_MISMATCHES)
+def test_rebuild_refuses_history_that_differs_from_the_recorded_events(
+    db: str, tmp_path: Path, case: str
+) -> None:
+    """Finding 2: a rebuild compares each version with its recorded dataset_imported event
+    (manifest_sha256, logical_input_id, deterministic event_id) and refuses any mismatch,
+    instead of adopting an event (here already done) that belongs to other content."""
+    store = three_version_store(tmp_path / "store")
+    imp.import_pending(db, store)
+    with psycopg.connect(db) as conn:
+        conn.execute("UPDATE app.outbox_events SET status = 'done'")
+    mismatch, where = HISTORY_MISMATCHES[case]
+    mismatch(store, db)
+    before = serving_state(db)
+    with pytest.raises(imp.IncompatibleHistory, match=where):
+        imp.rebuild_market(db, store)
+    assert serving_state(db) == before
+
+
+def test_rebuild_refuses_a_store_behind_the_recorded_history(db: str, tmp_path: Path) -> None:
+    """Finding 2: app has an event for version 3, so a store publishing only versions 1-2
+    cannot rebuild market; version 3's event would refer to data market no longer has."""
+    store_dir = three_version_store(tmp_path / "store")
+    imp.import_pending(db, store_dir)
+    store = LocalArtifactStore(store_dir)
+    unpublish(store_dir, 3)
+    store.put("published/current.json", dumps(imp.published_versions(store)[-1].__dict__))
+    before = serving_state(db)
+    with pytest.raises(imp.IncompatibleHistory, match="version 3"):
+        imp.rebuild_market(db, store_dir)
+    assert serving_state(db) == before
+
+
+def test_import_never_adopts_an_event_recorded_for_other_content(db: str, tmp_path: Path) -> None:
+    """Finding 2, normal import: an existing event for the version (from a different
+    publication, already done) is refused, not silently reused."""
+    store = three_version_store(tmp_path / "store")
+    other = imp.event_id("dataset_imported", 1, "0" * 64)
+    with psycopg.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO app.outbox_events (event_id, event_type, dataset_version, payload,"
+            " status) VALUES (%s, 'dataset_imported', 1, %s, 'done')",
+            (other, json.dumps({"dataset_version": 1, "logical_input_id": "a" * 32,
+                                "manifest_sha256": "0" * 64})),
+        )  # fmt: skip
+    before = serving_state(db)
+    with pytest.raises(imp.IncompatibleHistory, match="version 1"):
+        imp.import_pending(db, store)
+    assert serving_state(db) == before

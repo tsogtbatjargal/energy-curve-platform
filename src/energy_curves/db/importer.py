@@ -7,7 +7,9 @@ Each published version is imported in one transaction:
 3. read every artifact with its hash verified, COPY it into temporary staging tables, and validate
    staging against the manifest (row counts, key uniqueness, one source);
 4. replace the `market` tables from staging, record the version, and write a `dataset_imported`
-   outbox event, all in the same commit.
+   outbox event, all in the same commit. An event already recorded for the version must be for
+   the same content (deterministic event_id, manifest_sha256, logical_input_id); it is never
+   adopted for different content.
 
 Pipeline attempts (including failed and quarantined ones) are synced separately; their files are
 immutable, so the sync only inserts.
@@ -63,6 +65,10 @@ class ConflictingDataset(DatasetImportError):
     pass
 
 
+class IncompatibleHistory(ConflictingDataset):
+    """The published store disagrees with the history recorded in `app`."""
+
+
 class OutOfOrderImport(DatasetImportError):
     pass
 
@@ -96,6 +102,42 @@ def published_versions(store: LocalArtifactStore) -> list[Pointer]:
 
 def event_id(event_type: str, dataset_version: int, manifest_sha256: str) -> uuid.UUID:
     return uuid.uuid5(EVENT_NAMESPACE, f"{event_type}:{dataset_version}:{manifest_sha256}")
+
+
+def ensure_import_event(
+    conn: psycopg.Connection, dataset_version: int, logical_input_id: str, manifest_sha256: str
+) -> bool:
+    """Make sure the version's `dataset_imported` event exists for exactly this content.
+
+    A missing event is created `pending` with the deterministic id and payload; returns True if
+    it was created. An event recorded for other content (a different id, manifest or logical
+    input) is refused: adopting it would mark new content as already processed."""
+    expected_id = event_id("dataset_imported", dataset_version, manifest_sha256)
+    payload = {
+        "dataset_version": dataset_version,
+        "logical_input_id": logical_input_id,
+        "manifest_sha256": manifest_sha256,
+    }
+    row = conn.execute(
+        "SELECT event_id, payload FROM app.outbox_events"
+        " WHERE event_type = 'dataset_imported' AND dataset_version = %s FOR UPDATE",
+        (dataset_version,),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO app.outbox_events (event_id, event_type, dataset_version, payload)"
+            " VALUES (%s, 'dataset_imported', %s, %s)",
+            (expected_id, dataset_version, Jsonb(payload)),
+        )
+        return True
+    if row[0] != expected_id or row[1] != payload:
+        raise IncompatibleHistory(
+            f"version {dataset_version}: the recorded dataset_imported event {row[0]}"
+            f" (manifest {row[1].get('manifest_sha256')}, logical input"
+            f" {row[1].get('logical_input_id')}) is for different content than manifest"
+            f" {manifest_sha256}, logical input {logical_input_id}"
+        )
+    return False
 
 
 def _copy(conn: psycopg.Connection, table: str, columns: list[str], df: pl.DataFrame) -> None:
@@ -132,6 +174,7 @@ def _import(conn: psycopg.Connection, store: LocalArtifactStore, record: Pointer
             raise ConflictingDataset(
                 f"version {version} is already imported with different content"
             )
+        ensure_import_event(conn, version, record.logical_input_id, record.manifest_sha256)
         return ImportResult(version, "already_imported")
     other = _scalar(
         conn,
@@ -147,6 +190,8 @@ def _import(conn: psycopg.Connection, store: LocalArtifactStore, record: Pointer
     )
     if version != expected:
         raise OutOfOrderImport(f"version {version} cannot be imported before {expected}")
+    # Before any artifact is read: the version must match the history recorded in app.
+    ensure_import_event(conn, version, record.logical_input_id, record.manifest_sha256)
 
     manifest = read_manifest(store, record)  # verifies the manifest hash
     if manifest["dataset_version"] != version:
@@ -202,17 +247,6 @@ def _import(conn: psycopg.Connection, store: LocalArtifactStore, record: Pointer
             (version,) if versioned else (),
         )
 
-    conn.execute(
-        "INSERT INTO app.outbox_events (event_id, event_type, dataset_version, payload)"
-        " VALUES (%s, 'dataset_imported', %s, %s)"
-        " ON CONFLICT (event_type, dataset_version) DO NOTHING",
-        (
-            event_id("dataset_imported", version, record.manifest_sha256),
-            version,
-            Jsonb({"dataset_version": version, "logical_input_id": record.logical_input_id,
-                   "manifest_sha256": record.manifest_sha256}),
-        ),
-    )  # fmt: skip
     return ImportResult(version, "imported")
 
 
@@ -282,12 +316,23 @@ def rebuild_market(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
     attempt, so any failure (tampered artifact, conflict, staging validation, out-of-order
     version) rolls back to the previous `market`. DELETE rather than TRUNCATE: readers keep
     seeing the previous rows until the commit instead of blocking on an exclusive lock.
-    The `app` schema is untouched."""
+    Every version must match its recorded `dataset_imported` event, and the store must reach
+    the newest recorded version (IncompatibleHistory otherwise); `app` is otherwise untouched."""
     store = LocalArtifactStore(data_dir)
     with psycopg.connect(dsn) as conn, conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (IMPORT_LOCK_KEY,))
         for table in MARKET_TABLES:
             conn.execute(f"DELETE FROM market.{table}")  # noqa: S608 - fixed identifiers
         results = [_import(conn, store, record) for record in published_versions(store)]
+        rebuilt = max((r.dataset_version for r in results), default=0)
+        recorded = _scalar(
+            conn,
+            "SELECT max(dataset_version) FROM app.outbox_events"
+            " WHERE event_type = 'dataset_imported'",
+        )
+        if recorded is not None and recorded > rebuilt:
+            raise IncompatibleHistory(
+                f"app records version {recorded}, but the store publishes only up to {rebuilt}"
+            )
         attempts = sync_attempts(conn, store)
     return results, attempts
