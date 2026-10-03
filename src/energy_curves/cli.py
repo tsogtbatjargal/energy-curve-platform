@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
 import tempfile
 from datetime import date
@@ -25,6 +24,7 @@ from energy_curves.config import Settings
 from energy_curves.curves import engine, shape
 from energy_curves.ingestion.eia import EiaClient
 from energy_curves.ingestion.synthetic import SyntheticSource
+from energy_curves.logging_setup import configure_logging
 from energy_curves.pipeline.publish import dumps, load_published, parquet_bytes, read_artifact
 from energy_curves.pipeline.runner import FetchRequest, ShapeInput, Source, run_ingest
 from energy_curves.storage.artifacts import LocalArtifactStore
@@ -187,7 +187,9 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    settings = Settings()
+    key = settings.eia_api_key.get_secret_value() if settings.eia_api_key else ""
+    configure_logging(settings.log_level, secrets=[key])
     parser = argparse.ArgumentParser(prog="energy-curves")
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("ingest")
@@ -207,4 +209,4 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-dir", help="default: the packaged parameter directory")
     p.set_defaults(func=cmd_write_synthetic_params)
     args = parser.parse_args(argv)
-    return int(args.func(args, Settings()))
+    return int(args.func(args, settings))

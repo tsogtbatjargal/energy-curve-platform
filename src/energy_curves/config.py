@@ -14,3 +14,4 @@ class Settings(BaseSettings):
     eia_api_key: SecretStr | None = None
     eia_base_url: str = "https://api.eia.gov/v2"
     data_dir: Path = Path("data")
+    log_level: str = "INFO"
