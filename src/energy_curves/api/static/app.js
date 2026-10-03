@@ -180,29 +180,26 @@ function announceAlert(alert) {
     if (state.tab === 'alerts') loadRules()
 }
 
-// A snapshot is merged into what the page already holds, never replaces it: a snapshot taken
-// before an alert fired can answer after the stream delivered that alert. A snapshot answering
-// after a newer one was requested is ignored. Only a new epoch (a restored log) drops alerts,
-// and then only those of other epochs.
+// Reconciling a snapshot with what the page holds (ADR-0015 cursors are <epoch>-<seq>):
+// - an answer to a superseded request is ignored;
+// - the snapshot is the truth for its epoch up to its head: alerts of other epochs, and alerts
+//   at or below the head that it no longer lists (pruned), are dropped;
+// - alerts above its head arrived from the stream after it was taken, and are kept;
+// - alerts it brings first are announced, except the history of a first load or a new epoch.
 async function loadAlerts() {
     const request = ++state.alertRequest
     try {
         const body = await api('/api/alerts')
         if (request !== state.alertRequest) return
-        const epoch = body.cursor.split('-')[0]
-        // Announce alerts this snapshot brings first (the stream's event for them may come later
-        // and is then de-duplicated), but not the history of a first load or a restored log.
+        const [epoch, head] = [body.cursor.split('-')[0], Number(body.cursor.split('-')[1])]
         const announce = epoch === state.alertEpoch
-        const fresh = []
-        if (epoch !== state.alertEpoch) {
-            for (const id of [...state.alerts.keys()]) if (!id.startsWith(`${epoch}-`)) state.alerts.delete(id)
-            state.alertEpoch = epoch
+        const listed = new Map(body.alerts.map(a => [`${epoch}-${a.seq}`, a]))
+        for (const [id, a] of [...state.alerts]) {
+            if (!id.startsWith(`${epoch}-`) || (a.seq <= head && !listed.has(id))) state.alerts.delete(id)
         }
-        for (const a of body.alerts) {
-            const id = `${epoch}-${a.seq}`
-            if (announce && !state.alerts.has(id)) fresh.push(a)
-            state.alerts.set(id, a)
-        }
+        const fresh = [...listed].filter(([id]) => announce && !state.alerts.has(id)).map(([, a]) => a)
+        for (const [id, a] of listed) state.alerts.set(id, a)
+        state.alertEpoch = epoch
         state.alertCursor ??= body.cursor
         renderAlerts()
         for (const a of fresh) announceAlert(a)
@@ -230,7 +227,8 @@ async function refresh() {
 function show(tab) {
     state.tab = tab
     for (const name of Object.keys(loaders)) $(`#panel-${name}`).hidden = name !== tab
-    for (const g of Object.values(grids)) g.resize()
+    // A grid filled while its panel was hidden is drawn only now (w2grid skips hidden boxes).
+    for (const g of Object.values(grids)) g.refresh()
     loaders[tab]()
 }
 

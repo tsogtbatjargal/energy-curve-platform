@@ -344,3 +344,87 @@ def test_p2_1b_an_alert_first_seen_in_a_snapshot_is_still_announced(
         expect(page.get_by_test_id("toast")).to_contain_text("WTI Spot at 99.9900 crossed 95.0000")
         page.goto("about:blank")
     assert [e for e in errors if "ERR_FAILED" not in e] == []  # only the blocked stream
+
+
+FEB_9, FEB_12 = date(2024, 2, 9), date(2024, 2, 12)
+
+
+def prune_all(db: str) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    with psycopg.connect(db) as conn:
+        assert alerts.prune(conn, datetime.now(UTC) + timedelta(seconds=1)) > 0
+
+
+def test_p2_4_a_snapshot_drops_pruned_alerts_but_keeps_newer_streamed_ones(
+    page: Page, db: str, store: Path
+) -> None:
+    """Finding P2-4: snapshots only ever added, so alerts pruned on the server stayed on the
+    page. A snapshot is the truth for its epoch up to its head: it removes what it no longer
+    lists, and keeps alerts the stream delivered after it was taken (seq above its head).
+    Alert 1 is as of 2024-02-08; alert 2, fired after the snapshot was taken, 2024-02-12."""
+    with psycopg.connect(db) as conn:
+        alerts.create_rule(conn, "WTI", "Spot", Decimal("95"))
+    replay(store, db, FEB_8, FEB_8, overrides=SPIKE)  # alert 1
+    held: list[Any] = []
+    mode = {"hold": False}
+
+    def router(route: Any) -> None:
+        if not mode["hold"]:
+            route.continue_()
+        elif not held:
+            held.append((route, route.fetch()))  # taken now: after the prune, before alert 2
+        else:
+            held.append((route, None))  # later snapshots never answer: the page keeps its state
+
+    page.route("**/api/alerts", router)
+    with ui(page, db):
+        tab(page, "Alerts")
+        expect(page.locator("#grid-alerts")).to_contain_text("2024-02-08")
+        prune_all(db)
+        mode["hold"] = True
+        tab(page, "Curves")
+        tab(page, "Alerts")  # requests the snapshot that is held
+        while not held:
+            page.wait_for_timeout(20)
+        tab(page, "Curves")  # dataset refreshes on Curves do not request alert snapshots
+        replay(store, db, FEB_9, FEB_12, overrides={("RWTC", FEB_12): "99.99"})  # alert 2
+        expect(page.get_by_test_id("toast")).to_contain_text("WTI Spot at 99.9900")  # streamed
+        before = processed(page, "alert-snapshots")
+        route, snapshot = held[0]
+        route.fulfill(response=snapshot)
+        wait_processed(page, "alert-snapshots", before + 1)
+        tab(page, "Alerts")  # its new snapshot is held forever: the grid shows the page's state
+        grid = page.locator("#grid-alerts")
+        expect(grid).to_contain_text("2024-02-12")
+        expect(grid).not_to_contain_text("2024-02-08")
+
+
+def test_p2_4_an_expired_cursor_reset_drops_pruned_alerts(page: Page, db: str, store: Path) -> None:
+    """Finding P2-4: while the page is away, a new alert fires and every alert is pruned. On
+    reconnect its cursor is below the floor (expired), and the empty history after the reset
+    must replace what the page held."""
+    with psycopg.connect(db) as conn:
+        alerts.create_rule(conn, "WTI", "Spot", Decimal("95"))
+    replay(store, db, FEB_8, FEB_8, overrides=SPIKE)  # alert 1, seen by the page
+    errors: list[str] = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    port = free_port()
+    with serve(db, None, poll_s=0.3, port=port) as base:
+        page.goto(f"{base}/")
+        expect(page.locator("body")).to_have_attribute("data-ready", "true")
+        tab(page, "Alerts")
+        expect(page.locator("#grid-alerts")).to_contain_text("2024-02-08")
+    replay(store, db, FEB_9, FEB_12, overrides={("RWTC", FEB_12): "99.99"})  # alert 2, missed
+    with psycopg.connect(db) as conn:
+        seen = alerts.alerts_after(conn, 0)[0]["seq"]  # the page's cursor points at alert 1
+    prune_all(db)
+    with psycopg.connect(db) as conn:
+        assert alerts.log_state(conn).floor > seen  # so the page's cursor is expired
+    with serve(db, None, poll_s=0.3, port=port):
+        grid = page.locator("#grid-alerts")
+        expect(grid).not_to_contain_text("2024-02-08", timeout=15_000)
+        expect(page.get_by_test_id("live-status")).to_have_text("live")
+        page.goto("about:blank")
+    network = ("ERR_CONNECTION_REFUSED", "ERR_INCOMPLETE_CHUNKED_ENCODING")
+    assert [e for e in errors if not any(n in e for n in network)] == []
