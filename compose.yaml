@@ -1,0 +1,35 @@
+# Local serving stack for M3 (ADR-0013). Every published port binds to loopback only.
+# Images are pinned by digest: Postgres 17.11 (an RDS-supported minor) and Valkey 9.1.2
+# (ElastiCache supports the Valkey 9.1 family in ca-central-1).
+name: energy-curves
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+    environment:
+      POSTGRES_USER: ecp
+      POSTGRES_PASSWORD: ${ECP_PG_PASSWORD:-ecp}  # local-only default, matches .env.example
+      POSTGRES_DB: ecp
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecp -d ecp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  valkey:
+    image: docker.io/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

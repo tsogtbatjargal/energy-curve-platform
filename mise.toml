@@ -8,6 +8,7 @@ gitleaks = "8.30.1"
 trivy = "0.72.0"
 actionlint = "1.7.12"
 java = "temurin-17.0.20+101"  # local PySpark only; Glue runs its own runtime
+"pipx:podman-compose" = "1.6.0"  # provider for `podman compose` (local Postgres + Valkey)
 
 [env]
 _.file = ".env"

@@ -1,5 +1,10 @@
 """energy-curves command line.
 
+  db-migrate        apply numbered SQL migrations (locked, checksummed, transactional)
+  db-import         import published versions into Postgres (--rebuild: re-import market)
+  db-status         migration version, dataset version, outbox and attempt counts
+  db-backup DIR     back up the Postgres-owned app schema; db-restore DIR restores it
+
 ingest            fetch -> Bronze/Silver/Gold (+ curves when shape parameters exist) -> publish
 estimate-shape    estimate s[k, m] from the published Gold history
 verify-shape      re-estimate and compare with the stored parameters (tolerance, not bytes)
@@ -186,6 +191,58 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_db_migrate(args: argparse.Namespace, settings: Settings) -> int:
+    from energy_curves.db.migrate import migrate
+
+    print(json.dumps({"applied": migrate(settings.database_url)}))
+    return 0
+
+
+def cmd_db_import(args: argparse.Namespace, settings: Settings) -> int:
+    from energy_curves.db import importer
+
+    run = importer.rebuild_market if args.rebuild else importer.import_pending
+    results, attempts = run(settings.database_url, settings.data_dir)
+    print(json.dumps({"versions": [r.__dict__ for r in results], "attempts_synced": attempts}))
+    return 0
+
+
+def cmd_db_status(args: argparse.Namespace, settings: Settings) -> int:
+    import psycopg
+
+    from energy_curves.db.migrate import current_version
+    from energy_curves.db.outbox import counts
+
+    with psycopg.connect(settings.database_url) as conn:
+        row = conn.execute("SELECT max(dataset_version) FROM market.dataset_versions").fetchone()
+        attempts = conn.execute(
+            "SELECT status, count(*) FROM market.pipeline_attempts GROUP BY status"
+        ).fetchall()
+        doc = {
+            "schema_version": current_version(conn),
+            "dataset_version": row[0] if row else None,
+            "outbox": counts(conn),
+            "attempts": {status: n for status, n in attempts},
+        }
+    print(json.dumps(doc, indent=2))
+    return 0
+
+
+def cmd_db_backup(args: argparse.Namespace, settings: Settings) -> int:
+    from energy_curves.db.backup import backup
+
+    manifest = backup(settings.database_url, Path(args.target))
+    print(json.dumps({t: m["rows"] for t, m in manifest["tables"].items()}))
+    return 0
+
+
+def cmd_db_restore(args: argparse.Namespace, settings: Settings) -> int:
+    from energy_curves.db.backup import restore
+
+    print(json.dumps(restore(settings.database_url, Path(args.source))))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     settings = Settings()
     key = settings.eia_api_key.get_secret_value() if settings.eia_api_key else ""
@@ -205,6 +262,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out")
     p.set_defaults(func=cmd_export_curves)
     sub.add_parser("status").set_defaults(func=cmd_status)
+    sub.add_parser("db-migrate").set_defaults(func=cmd_db_migrate)
+    p = sub.add_parser("db-import", help="import published versions into Postgres")
+    p.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="re-import market from the published versions, all or nothing",
+    )
+    p.set_defaults(func=cmd_db_import)
+    sub.add_parser("db-status").set_defaults(func=cmd_db_status)
+    p = sub.add_parser("db-backup", help="back up the app schema (rules, alerts, outbox)")
+    p.add_argument("target")
+    p.set_defaults(func=cmd_db_backup)
+    p = sub.add_parser("db-restore", help="restore the app schema from a db-backup directory")
+    p.add_argument("source")
+    p.set_defaults(func=cmd_db_restore)
     p = sub.add_parser("write-synthetic-params")
     p.add_argument("--out-dir", help="default: the packaged parameter directory")
     p.set_defaults(func=cmd_write_synthetic_params)

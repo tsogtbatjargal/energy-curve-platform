@@ -213,6 +213,11 @@ checksum = "sha256:25406f7c6e147d687fd7fd546f835bafa160a6242c605ee94a23ba6cd7bcc
 url = "https://github.com/open-policy-agent/opa/releases/download/v1.21.1/opa_windows_amd64.exe"
 url_api = "https://api.github.com/repos/open-policy-agent/opa/releases/assets/599034307"
 
+[[tools."pipx:podman-compose"]]
+version = "1.6.0"
+backend = "pipx:podman-compose"
+specifiers = ["1.6.0"]
+
 [[tools.python]]
 version = "3.12.15"
 backend = "core:python"

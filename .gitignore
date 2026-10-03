@@ -39,3 +39,6 @@ playwright-report/
 
 # Backend config contains the account ID
 backend.hcl
+
+# Local db-backup output (may contain real alert history)
+backups/
