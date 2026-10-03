@@ -5,6 +5,12 @@ history, and notification intents) exists only in Postgres, so it is backed up h
 table via COPY, plus a manifest with row counts, SHA-256 per file, and the migration version.
 Restore verifies every checksum and the migration version first, then replaces all `app` tables
 in a single transaction, so it either fully succeeds or changes nothing.
+
+`market` is the ledger of imported versions, and every imported version needs its
+`dataset_imported` event. In the same transaction, restore therefore re-creates a missing event
+(a backup older than the import) as `pending` with its deterministic id and payload. It refuses
+an event recorded for other content, and an event for a version `market` has not imported (run
+`db-import` first).
 """
 
 from __future__ import annotations
@@ -19,6 +25,11 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+from energy_curves.db.importer import (
+    IMPORT_LOCK_KEY,
+    IncompatibleHistory,
+    ensure_import_event,
+)
 from energy_curves.db.migrate import current_version
 
 MANIFEST = "manifest.json"
@@ -98,6 +109,7 @@ def restore(dsn: str, source: Path) -> dict[str, int]:
         payloads[table] = data
     restored = {}
     with psycopg.connect(dsn) as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (IMPORT_LOCK_KEY,))  # no import meanwhile
         if current_version(conn) != manifest["schema_version"]:
             raise BackupError(
                 f"backup is for schema version {manifest['schema_version']}, "
@@ -127,7 +139,34 @@ def restore(dsn: str, source: Path) -> dict[str, int]:
                     f"app.{table}: restored {restored[table]} rows, "
                     f"backup has {manifest['tables'][table]['rows']}"
                 )
+        restored["recreated_events"] = _reconcile_events(conn)
     return restored
+
+
+def _reconcile_events(conn: psycopg.Connection) -> int:
+    """Give every imported version its `dataset_imported` event; return how many were created."""
+    versions = conn.execute(
+        "SELECT dataset_version, logical_input_id, manifest_sha256 FROM market.dataset_versions"
+        " ORDER BY dataset_version"
+    ).fetchall()
+    try:
+        created = sum(ensure_import_event(conn, *version) for version in versions)
+    except IncompatibleHistory as exc:
+        raise BackupError(f"backup conflicts with market: {exc}") from exc
+    ahead = [
+        r[0]
+        for r in conn.execute(
+            "SELECT dataset_version FROM app.outbox_events WHERE event_type = 'dataset_imported'"
+            " AND dataset_version NOT IN (SELECT dataset_version FROM market.dataset_versions)"
+            " ORDER BY dataset_version"
+        )
+    ]
+    if ahead:
+        raise BackupError(
+            f"backup has events for versions {ahead} that market has not imported;"
+            " run db-import first"
+        )
+    return created
 
 
 def _reset_sequences(conn: psycopg.Connection, table: str, cols: list[str]) -> None:
