@@ -55,7 +55,17 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest
+      # Playwright's pinned Chromium for the browser tests (ADR-0016); the version follows uv.lock.
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest --tracing retain-on-failure --output test-results
+      # Traces only on failure. Browser tests use synthetic data only (ADR-0011).
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
 
   secrets-scan:
     runs-on: ubuntu-24.04
@@ -138,7 +148,9 @@ jobs:
           install_args: java uv
       - run: uv sync --locked --python 3.11
       - run: uv run --python 3.11 python --version
-      - run: uv run --python 3.11 pytest -m ""
+      # Everything, glue_compat included, except the browser tests: this job is about the
+      # Glue runtime, and the python job runs the UI tests (ADR-0016).
+      - run: uv run --python 3.11 pytest -m "not browser"
 
   terraform-plan:
     needs: [python, iac-static]
