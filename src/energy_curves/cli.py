@@ -7,6 +7,7 @@
   process-events    evaluate pending dataset_imported events for alerts (db-import runs it too)
   alerts-prune      delete fired alerts older than --keep-days (raises the alert log's floor)
   serve             local API, CSV export and live events on 127.0.0.1 (--port, default 8000)
+  replay            step through synthetic business days into a synthetic store and database
 
 ingest            fetch -> Bronze/Silver/Gold (+ curves when shape parameters exist) -> publish
 estimate-shape    estimate s[k, m] from the published Gold history
@@ -265,6 +266,30 @@ def cmd_alerts_prune(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_replay(args: argparse.Namespace, settings: Settings) -> int:
+    import redis
+
+    from energy_curves.api.events import publish_alerts_wakeup, publish_dataset_updated
+    from energy_curves.replay import parse_override, replay
+
+    client = redis.Redis.from_url(
+        settings.redis_url, socket_connect_timeout=0.5, socket_timeout=0.5
+    )
+    steps = replay(
+        Path(args.store),
+        settings.database_url,
+        args.start,
+        args.end,
+        warmup_days=args.warmup_days,
+        interval_s=args.interval,
+        overrides=dict(parse_override(o) for o in args.override),
+        on_committed=lambda v: publish_dataset_updated(client, v),
+        on_events_done=lambda: publish_alerts_wakeup(client),
+        on_step=lambda s: print(json.dumps({**s.__dict__, "day": s.day.isoformat()}), flush=True),
+    )
+    return 0 if steps else 1
+
+
 def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
     import uvicorn
 
@@ -353,6 +378,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("alerts-prune", help="delete fired alerts older than --keep-days")
     p.add_argument("--keep-days", type=int, required=True)
     p.set_defaults(func=cmd_alerts_prune)
+    p = sub.add_parser("replay", help="step through synthetic business days (live demo)")
+    p.add_argument("--store", required=True, help="a synthetic store directory (not data/)")
+    p.add_argument("--start", type=date.fromisoformat, required=True)
+    p.add_argument("--end", type=date.fromisoformat, required=True)
+    p.add_argument("--warmup-days", type=int, default=20)
+    p.add_argument("--interval", type=float, default=5.0, help="seconds between days")
+    p.add_argument("--override", action="append", default=[], help="SERIES=YYYY-MM-DD:PRICE")
+    p.set_defaults(func=cmd_replay)
     p = sub.add_parser("serve", help="serve the local API on 127.0.0.1")
     p.add_argument("--port", type=int, default=settings.api_port)
     p.set_defaults(func=cmd_serve)
