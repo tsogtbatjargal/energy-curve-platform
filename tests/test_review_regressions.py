@@ -61,10 +61,13 @@ def test_crash_between_version_record_and_pointer_is_not_treated_as_published(
     finally:
         publish_mod_runner.publish = original
     assert store.get("published/current.json") == pointer_v1
+    assert store.exists("published/versions/00000002.json")  # the orphaned version record
+    assert load_published(store).version == 1  # readers still see the old dataset
 
     retry = ingest(tmp_path, FEB)
     assert (retry.status, retry.dataset_version) == ("published", 2)
     assert read_pointer(store).dataset_version == 2  # type: ignore[union-attr]
+    assert load_published(store).version == 2  # readers now see the retried publication
 
 
 def test_price_beyond_silver_precision_is_rejected_not_a_crash() -> None:
