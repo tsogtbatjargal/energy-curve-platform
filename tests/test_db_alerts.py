@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -287,3 +288,43 @@ def test_f1_a_failed_restore_does_not_rewind_the_alert_sequence(db: str, tmp_pat
     assert stats.errors == []
     assert (stats.retried, stats.dead) == (0, 0)
     assert [v for v, _, _ in fired(db)] == [2, 4, 6]
+
+
+@pytest.fixture
+def fresh_db() -> Iterator[str]:
+    from db_support import fresh_database
+
+    for dsn in fresh_database():
+        migrate(dsn)
+        yield dsn
+
+
+@pytest.mark.parametrize("target", ["same_database", "fresh_database"])
+def test_f2_after_restoring_an_empty_pruned_log_new_alerts_stay_above_the_floor(
+    db: str, fresh_db: str, tmp_path: Path, target: str
+) -> None:
+    """Finding F2: the restored log is empty but its floor says seq up to N were pruned.
+    A new alert must get a seq above the floor, or every cursor (which starts at the floor)
+    skips it and it is never streamed."""
+    from energy_curves.db import backup as bk
+
+    prices = ["65", "72", "60", "72"]  # alerts at versions 2 and 4
+    walk(db, prices)
+    with psycopg.connect(db) as conn:
+        assert alerts.prune(conn, datetime.now(UTC) + timedelta(seconds=1)) == 2
+        floor = alerts.log_state(conn).floor
+    bk.backup(db, tmp_path / "bk")
+    dsn = db if target == "same_database" else fresh_db
+    if dsn == fresh_db:  # the same imported history, so the restore's reconciliation accepts it
+        for version, price in enumerate(prices, start=1):
+            seed(dsn, version, {KEY: price})
+    bk.restore(dsn, tmp_path / "bk")
+    seed(dsn, 5, {KEY: "60"})
+    seed(dsn, 6, {KEY: "72"})
+    run(dsn)
+    with psycopg.connect(dsn) as conn:
+        state = alerts.log_state(conn)
+        visible = alerts.alerts_after(conn, state.floor)
+    assert state.floor == floor
+    assert [a["dataset_version"] for a in visible] == [6]
+    assert visible[0]["seq"] > floor and state.head == visible[0]["seq"]

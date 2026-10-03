@@ -252,6 +252,18 @@ def prune(conn: psycopg.Connection, before: datetime) -> int:
         return deleted
 
 
+def keep_sequence_above_floor(conn: psycopg.Connection) -> None:
+    """After a restore, the next seq must exceed the floor (the highest pruned seq) as well as
+    every retained alert: a cursor starts at the floor, so an alert below it is never streamed.
+    The log can be empty while its floor is not, and a fresh database's sequence starts at 1."""
+    conn.execute(
+        "SELECT setval(s.name, greatest((SELECT floor FROM app.alert_log),"
+        " coalesce((SELECT max(seq) FROM app.fired_alerts), 0),"
+        " coalesce(pg_sequence_last_value(s.name::regclass), 0), 1))"
+        " FROM (SELECT pg_get_serial_sequence('app.fired_alerts', 'seq') AS name) s"
+    )
+
+
 def rotate_epoch(conn: psycopg.Connection) -> None:
     """A restored log may reuse seq values clients have seen: invalidate every old cursor."""
     conn.execute("UPDATE app.alert_log SET epoch = gen_random_uuid()")

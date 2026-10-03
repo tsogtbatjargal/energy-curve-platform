@@ -26,7 +26,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from energy_curves.db.alerts import rotate_epoch
+from energy_curves.db.alerts import keep_sequence_above_floor, rotate_epoch
 from energy_curves.db.importer import (
     IMPORT_LOCK_KEY,
     IncompatibleHistory,
@@ -142,6 +142,7 @@ def restore(dsn: str, source: Path) -> dict[str, int]:
                     f"backup has {manifest['tables'][table]['rows']}"
                 )
         restored["recreated_events"] = _reconcile_events(conn)
+        keep_sequence_above_floor(conn)  # an empty, pruned log still has its floor
         rotate_epoch(conn)  # the restored alert log may reuse seq values clients have seen
     return restored
 
