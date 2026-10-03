@@ -255,11 +255,16 @@ class MergeStats:
         return {**self.__dict__, "price_changes": self.price_changes}
 
 
-def with_last_seen(df: pl.DataFrame) -> pl.DataFrame:
-    """Gold written before `last_seen_at` existed: its best watermark is `retrieved_at`."""
-    if "last_seen_at" in df.columns:
-        return df
-    return df.with_columns(pl.col("retrieved_at").alias("last_seen_at"))
+def conform(df: pl.DataFrame, schema: dict[str, Any]) -> pl.DataFrame:
+    """Bring stored Gold (current or revisions) to `schema`: exact column order and types.
+
+    Gold written before `last_seen_at` existed lacks the column; its best watermark is
+    `retrieved_at`. Adding the column appends it last, but REVISION_SCHEMA places it before the
+    superseded_* columns, and Polars concatenates by position, so always select in schema order.
+    """
+    if "last_seen_at" not in df.columns:
+        df = df.with_columns(pl.col("retrieved_at").alias("last_seen_at"))
+    return df.select([pl.col(name).cast(dtype) for name, dtype in schema.items()])
 
 
 def merge_gold(
@@ -282,7 +287,7 @@ def merge_gold(
     - not-later retrieval, different price: stale, current kept
     - not-later retrieval, same price: unchanged
     """
-    current, revisions = with_last_seen(current), with_last_seen(revisions)
+    current, revisions = conform(current, GOLD_SCHEMA), conform(revisions, REVISION_SCHEMA)
     joined = silver.join(
         current.select([*KEY, "price", "last_seen_at"]), on=KEY, how="left", suffix="_old"
     )

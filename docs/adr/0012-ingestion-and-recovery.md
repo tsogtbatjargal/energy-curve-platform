@@ -46,7 +46,7 @@ So T1=50, T2=60, T3=50 ends at 50. And T1=50, T3=50, then a delayed T2=60 stays 
 
 Runs report `merge.price_changes` (inserted + revised). A run that only advances `last_seen_at` publishes a new dataset version with `price_changes = 0`. Revisions and, from M3, alerts are driven only by price changes, so watermark-only runs produce neither.
 
-Gold written before `last_seen_at` existed takes `retrieved_at` as its watermark.
+Gold written before `last_seen_at` existed takes `retrieved_at` as its watermark. Both stored tables are then conformed to the exact `GOLD_SCHEMA` and `REVISION_SCHEMA` column order and types before any concat, because Polars concatenates by position. Tests cover pre-change stores with both empty and populated revision history.
 
 **Completeness.** Within each multi-series request, the dates on which the *other* requested series returned data are evidence that the source published. A series is **incomplete**, and the batch quarantined, if either:
 - it lacks more of those dates than `max(3, 10%)`, or
