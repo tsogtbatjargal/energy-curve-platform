@@ -15,7 +15,8 @@ from typing import Any
 
 from energy_curves.catalog import SERIES
 
-PRICE_SCALE = 6  # Silver contract: Decimal(18, 6)
+PRICE_PRECISION, PRICE_SCALE = 18, 6  # Silver contract: Decimal(18, 6)
+MAX_INTEGER_DIGITS = PRICE_PRECISION - PRICE_SCALE
 _NUMERIC = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?$")
 
 
@@ -51,6 +52,8 @@ def parse_price(value: Any) -> Decimal:
     exponent = price.as_tuple().exponent
     if isinstance(exponent, int) and -exponent > PRICE_SCALE:
         raise Rejected(f"more than {PRICE_SCALE} decimal places: {text!r}")
+    if price != 0 and price.adjusted() >= MAX_INTEGER_DIGITS:
+        raise Rejected(f"{text!r} exceeds Decimal({PRICE_PRECISION}, {PRICE_SCALE})")
     return price
 
 

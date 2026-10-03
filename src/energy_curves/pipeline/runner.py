@@ -65,6 +65,11 @@ class ShapeInput:
     params: pl.DataFrame
     params_sha256: str
     method_version: str
+    origin: str  # source the parameters were estimated from: "synthetic" or "eia"
+
+
+class ShapeOriginMismatch(ValueError):
+    """Shape parameters estimated from one source applied to data from another."""
 
 
 @dataclass
@@ -92,6 +97,10 @@ def run_ingest(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> RunResult:
     """Run under the single-writer lock. `fault(stage)` lets tests simulate crashes."""
+    if shape is not None and shape.origin != source_name:
+        raise ShapeOriginMismatch(
+            f"shape parameters come from {shape.origin!r} data; this run ingests {source_name!r}"
+        )
     with single_writer(data_dir / ".pipeline.lock"):
         return _run(
             LocalArtifactStore(data_dir), source, requests, source_name, shape, fault, clock
@@ -109,6 +118,10 @@ def _run(
 ) -> RunResult:
     started = time.monotonic()
     attempt_id = uuid.uuid4().hex
+    requests = sorted(
+        (FetchRequest(tuple(sorted(r.series_ids)), r.start, r.end) for r in requests),
+        key=lambda r: (r.route, r.series_ids, r.start, r.end),
+    )
 
     pages: list[tuple[FetchRequest, Page]] = [
         (req, page)
@@ -144,7 +157,7 @@ def _run(
         )
     except Exception as exc:
         store.put(
-            f"runs/{logical_id}/attempts/{attempt_id}.json",
+            f"attempts/{logical_id}/{attempt_id}.json",
             dumps(
                 {
                     "status": "failed",
@@ -282,8 +295,10 @@ def _run_identified(
 
 
 def _finish(store: LocalArtifactStore, prefix: str, result: RunResult, started: float) -> RunResult:
+    # Attempt records live outside runs/<id>/ so re-running a published input never writes into
+    # its run prefix.
     store.put(
-        f"{prefix}/attempts/{result.attempt_id}.json",
+        f"attempts/{result.logical_input_id}/{result.attempt_id}.json",
         dumps(
             {
                 **result.__dict__,

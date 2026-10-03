@@ -207,7 +207,7 @@ def test_crash_leaves_previous_dataset_usable_and_retry_completes(
     during = load_published(store)  # still readable, hashes verified
     assert during.version == 1
     assert business(during.current) == business(before.current)
-    failed = list((tmp_path / "runs").glob("*/attempts/*.json"))
+    failed = list((tmp_path / "attempts").glob("*/*.json"))
     assert any(json.loads(f.read_text())["status"] == "failed" for f in failed)
 
     retry = ingest(tmp_path, SPOT_FEB)

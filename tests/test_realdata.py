@@ -29,3 +29,4 @@ def test_local_inputs_match_recorded_hashes() -> None:
     record = json.loads(RECORD.read_text())
     assert meta["input_sha256"] == record["input_sha256"]
     assert meta["params_sha256"] == record["params_sha256"]
+    assert meta["origin"] == "eia"

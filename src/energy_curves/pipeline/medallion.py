@@ -46,6 +46,10 @@ REVISION_SCHEMA: dict[str, Any] = {
 STALE_BUSINESS_DAYS = 5
 
 
+class SilverIntegrityError(RuntimeError):
+    """A typed Silver frame lost values during construction."""
+
+
 @dataclass(frozen=True)
 class BronzePage:
     key: str
@@ -110,6 +114,10 @@ def to_silver(
                 }
             )
     silver = pl.DataFrame(accepted, schema=SILVER_SCHEMA)
+    # Polars' row constructor turns values that do not fit a Decimal type into null instead of
+    # raising. parse_price rejects such values first; this guards against any other path.
+    if silver["price"].null_count():
+        raise SilverIntegrityError(f"{silver['price'].null_count()} prices became null in Silver")
     rejected_df = pl.DataFrame(rejected, schema=REJECTED_SCHEMA)
 
     # Same key twice in one batch: identical values collapse; conflicting values are rejected.

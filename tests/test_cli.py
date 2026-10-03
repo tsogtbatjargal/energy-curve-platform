@@ -43,11 +43,14 @@ def test_offline_demo_from_clean_checkout(
 
 
 def test_export_without_curves_explains(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import date
+
+    from energy_curves.ingestion.synthetic import SyntheticSource
+    from energy_curves.pipeline.runner import FetchRequest, run_ingest
+
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    assert (
-        main(["ingest", "--source", "synthetic", "--start", "2024-01-01", "--end", "2024-01-31"])
-        == 0
-    )
+    req = [FetchRequest(("RWTC",), date(2024, 1, 1), date(2024, 1, 31))]
+    run_ingest(tmp_path, SyntheticSource(), req, source_name="synthetic", shape=None)
     assert main(["export-curves"]) == 2
 
 

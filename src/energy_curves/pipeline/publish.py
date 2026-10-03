@@ -97,14 +97,20 @@ def load_published(store: ArtifactStore) -> Published:
 
 
 def published_logical_ids(store: ArtifactStore) -> dict[str, int]:
-    """logical_input_id -> dataset_version, for every version ever published."""
+    """logical_input_id -> dataset_version for versions up to the current pointer.
+
+    publish() writes the version record before the pointer, so a crash between the two leaves a
+    record for a version that was never published. Records above the pointer are ignored.
+    """
+    pointer = read_pointer(store)
     root = store.path("published/versions")
-    if not root.is_dir():
+    if pointer is None or not root.is_dir():
         return {}
     out = {}
     for f in root.glob("*.json"):
         p = json.loads(f.read_bytes())
-        out[p["logical_input_id"]] = p["dataset_version"]
+        if p["dataset_version"] <= pointer.dataset_version:
+            out[p["logical_input_id"]] = p["dataset_version"]
     return out
 
 

@@ -147,6 +147,7 @@ class EiaClient:
     def _get_with_retry(self, route: str, params: dict[str, Any]) -> Page:
         url = f"{self._base}/{route.strip('/')}/data/"
         for attempt in range(self._retry.max_attempts):
+            resp: httpx.Response | None = None
             try:
                 resp = self._http.get(url, params={**params, "api_key": self._key})
             except httpx.TransportError as exc:
@@ -159,15 +160,16 @@ class EiaClient:
                         raise EiaRequestError(f"HTTP {resp.status_code} from {route}")
                     return self._page(resp.content, params)
                 reason = f"HTTP {resp.status_code}"
-                retry_after = resp.headers.get("Retry-After", "")
-                if retry_after.isdigit():
-                    wait = min(float(retry_after), self._retry.max_delay)
-                    log.warning("eia retry", extra={"route": route, "reason": reason})
-                    self._sleep(wait)
-                    continue
-            if attempt + 1 < self._retry.max_attempts:
-                log.warning("eia retry", extra={"route": route, "reason": reason})
-                self._sleep(self._retry.delay(attempt, self._rng))
+            if attempt + 1 >= self._retry.max_attempts:
+                break
+            retry_after = "" if resp is None else resp.headers.get("Retry-After", "")
+            wait = (
+                min(float(retry_after), self._retry.max_delay)
+                if retry_after.isdigit()
+                else self._retry.delay(attempt, self._rng)
+            )
+            log.warning("eia retry", extra={"route": route, "reason": reason})
+            self._sleep(wait)
         raise EiaTransientError(f"{route}: gave up after {self._retry.max_attempts} attempts")
 
     def _page(self, raw: bytes, params: dict[str, Any]) -> Page:

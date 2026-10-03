@@ -10,11 +10,12 @@ status            show the published dataset and its quality summary
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import sys
+import tempfile
 from datetime import date
+from importlib import resources
 from pathlib import Path
 
 import polars as pl
@@ -38,19 +39,64 @@ def _source(name: str, settings: Settings) -> Source:
     return EiaClient(key, settings.eia_base_url)
 
 
-def load_shape(data_dir: Path) -> ShapeInput | None:
+PACKAGED_PARAMS = "synthetic-shape-v1"
+
+
+def packaged_params_dir() -> Path:
+    return Path(str(resources.files("energy_curves.curves").joinpath("params")))
+
+
+def load_shape(data_dir: Path, source: str) -> ShapeInput | None:
+    """Local parameters if estimated; otherwise the packaged synthetic set for synthetic runs.
+
+    Real-derived parameters exist only in the local data directory (ADR-0011). The repository
+    ships parameters estimated from the synthetic source.
+    """
     store = LocalArtifactStore(data_dir)
-    if not store.exists(f"{SHAPE_DIR}/meta.json"):
+    if store.exists(f"{SHAPE_DIR}/meta.json"):
+        meta = json.loads(store.get(f"{SHAPE_DIR}/meta.json"))
+        params = pl.read_parquet(store.path(f"{SHAPE_DIR}/params.parquet"))
+    elif source == "synthetic":
+        base = packaged_params_dir()
+        meta = json.loads((base / f"{PACKAGED_PARAMS}.json").read_text())
+        params = shape.params_from_csv((base / f"{PACKAGED_PARAMS}.csv").read_text())
+    else:
         return None
-    meta = json.loads(store.get(f"{SHAPE_DIR}/meta.json"))
-    params = pl.read_parquet(store.path(f"{SHAPE_DIR}/params.parquet"))
-    if meta["params_sha256"] != _params_sha(params):
+    if meta["params_sha256"] != shape.params_sha256(params):
         raise SystemExit("shape parameters do not match their recorded hash")
-    return ShapeInput(params, meta["params_sha256"], meta["method_version"])
+    return ShapeInput(params, meta["params_sha256"], meta["method_version"], meta["origin"])
 
 
-def _params_sha(params: pl.DataFrame) -> str:
-    return hashlib.sha256(shape.canonical_params_text(params).encode()).hexdigest()
+def synthetic_params(work_dir: Path) -> tuple[shape.ShapeResult, dict[str, object]]:
+    """Estimate shape parameters from the synthetic source only."""
+    lo, hi = shape.WINDOW
+    run_ingest(
+        work_dir,
+        SyntheticSource(),
+        [FetchRequest(SPOT_SERIES[:1], lo, hi), FetchRequest(WTI_FUTURES, lo, hi)],
+        source_name="synthetic",
+    )
+    result = shape.estimate_shape(load_published(LocalArtifactStore(work_dir)).current)
+    meta = {
+        "origin": "synthetic",
+        "generated_by": "energy-curves write-synthetic-params",
+        "method_version": result.method_version,
+        "window": [d.isoformat() for d in result.window],
+        "input_sha256": result.input_sha256,
+        "params_sha256": result.params_sha256,
+    }
+    return result, meta
+
+
+def cmd_write_synthetic_params(args: argparse.Namespace, settings: Settings) -> int:
+    out = Path(args.out_dir) if args.out_dir else packaged_params_dir()
+    with tempfile.TemporaryDirectory() as tmp:
+        result, meta = synthetic_params(Path(tmp))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{PACKAGED_PARAMS}.csv").write_text(shape.params_to_csv(result.params))
+    (out / f"{PACKAGED_PARAMS}.json").write_text(json.dumps(meta, indent=2) + "\n")
+    print(json.dumps(meta, indent=2))
+    return 0
 
 
 def cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
@@ -65,7 +111,7 @@ def cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
         _source(args.source, settings),
         requests,
         source_name=args.source,
-        shape=load_shape(settings.data_dir),
+        shape=load_shape(settings.data_dir, args.source),
     )
     print(json.dumps(result.__dict__, indent=2, default=str))
     return 0 if result.status != "quarantined" else 1
@@ -74,7 +120,8 @@ def cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
 def cmd_estimate_shape(args: argparse.Namespace, settings: Settings) -> int:
     store = LocalArtifactStore(settings.data_dir)
     published = load_published(store)
-    result = shape.estimate_shape(published.current)
+    result = shape.estimate_shape(published.current)  # refuses mixed sources
+    origin = published.current["source"].unique().to_list()
     store.put(f"{SHAPE_DIR}/params.parquet", parquet_bytes(result.params))
     store.put(f"{SHAPE_DIR}/excluded.parquet", parquet_bytes(result.excluded))
     meta = {
@@ -84,7 +131,7 @@ def cmd_estimate_shape(args: argparse.Namespace, settings: Settings) -> int:
         "params_sha256": result.params_sha256,
         "excluded_rows": result.excluded.height,
         "source_dataset_version": published.version,
-        "sources": sorted(set(published.current["source"].to_list())),
+        "origin": origin[0] if len(origin) == 1 else "mixed",
     }
     store.put(f"{SHAPE_DIR}/meta.json", dumps(meta))
     print(json.dumps(meta, indent=2))
@@ -92,7 +139,7 @@ def cmd_estimate_shape(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_verify_shape(args: argparse.Namespace, settings: Settings) -> int:
-    stored = load_shape(settings.data_dir)
+    stored = load_shape(settings.data_dir, "local-only")
     if stored is None:
         print("no stored shape parameters", file=sys.stderr)
         return 2
@@ -156,5 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out")
     p.set_defaults(func=cmd_export_curves)
     sub.add_parser("status").set_defaults(func=cmd_status)
+    p = sub.add_parser("write-synthetic-params")
+    p.add_argument("--out-dir", help="default: the packaged parameter directory")
+    p.set_defaults(func=cmd_write_synthetic_params)
     args = parser.parse_args(argv)
     return int(args.func(args, Settings()))

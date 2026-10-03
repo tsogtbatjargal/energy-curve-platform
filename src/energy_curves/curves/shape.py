@@ -76,6 +76,17 @@ def estimate_shape(
 ) -> ShapeResult:
     """`observations` needs series_id, observation_date, price (Decimal)."""
     start, end = window
+    if "source" in observations.columns:
+        sources = (
+            observations.filter(
+                pl.col("series_id").is_in(["RWTC", *WTI_FUTURES])
+                & pl.col("observation_date").is_between(start, end)
+            )["source"]
+            .unique()
+            .to_list()
+        )
+        if len(sources) > 1:
+            raise ShapeEstimationError(f"inputs come from more than one source: {sorted(sources)}")
     obs = observations.filter(
         pl.col("series_id").is_in(["RWTC", *WTI_FUTURES])
         & pl.col("observation_date").is_between(start, end)
@@ -135,6 +146,30 @@ def estimate_shape(
         params_sha256=hashlib.sha256(canonical_params_text(params).encode()).hexdigest(),
         window=window,
     )
+
+
+CSV_HEADER = "position,month,s,n_obs\n"
+
+
+def params_to_csv(params: pl.DataFrame) -> str:
+    return CSV_HEADER + canonical_params_text(params)
+
+
+def params_from_csv(text: str) -> pl.DataFrame:
+    lines = text.splitlines()
+    if not lines or lines[0] + "\n" != CSV_HEADER:
+        raise ShapeEstimationError("unexpected shape parameter CSV header")
+    rows = []
+    for line in lines[1:]:
+        position, month, s, n_obs = line.split(",")
+        rows.append(
+            {"position": position, "month": int(month), "s": Decimal(s), "n_obs": int(n_obs)}
+        )
+    return pl.DataFrame(rows, schema=PARAMS_SCHEMA)
+
+
+def params_sha256(params: pl.DataFrame) -> str:
+    return hashlib.sha256(canonical_params_text(params).encode()).hexdigest()
 
 
 def compare_params(

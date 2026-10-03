@@ -1,0 +1,11 @@
+{
+  "origin": "synthetic",
+  "generated_by": "energy-curves write-synthetic-params",
+  "method_version": "shape-v1",
+  "window": [
+    "2014-01-01",
+    "2024-04-05"
+  ],
+  "input_sha256": "458580a29c56ac0e80a4c4ca87e75339b0434a398e73811df1e37e74ba72c984",
+  "params_sha256": "4a111aa831712d152a387c8c8dcd9687132241ea0488a05dbdc925eacf253af4"
+}
