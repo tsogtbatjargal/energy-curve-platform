@@ -44,6 +44,10 @@ REVISION_SCHEMA: dict[str, Any] = {
     "superseded_by_logical_input_id": pl.Utf8,
 }
 STALE_BUSINESS_DAYS = 5
+# Completeness (calibrated on real WTI/Brent history, where holiday differences reach 2 missing
+# days in 5-10 day windows, 3 in 30 days, and 5 = ~8% in 90 days).
+INCOMPLETE_MIN_DAYS = 3
+INCOMPLETE_SHARE = 0.10
 
 
 class SilverIntegrityError(RuntimeError):
@@ -65,10 +69,11 @@ class QualityReport:
     reasons: dict[str, int] = field(default_factory=dict)
     last_observation: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    incomplete: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
-        return self.rejected == 0
+        return self.rejected == 0 and not self.incomplete
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +83,7 @@ class QualityReport:
             "reasons": dict(sorted(self.reasons.items())),
             "last_observation": dict(sorted(self.last_observation.items())),
             "warnings": self.warnings,
+            "incomplete": self.incomplete,
         }
 
 
@@ -148,14 +154,58 @@ def _row_json(row: dict[str, Any]) -> str:
     return json.dumps(row, sort_keys=True, default=str)
 
 
+def completeness_issues(
+    silver: pl.DataFrame, requests: list[tuple[tuple[str, ...], date, date]]
+) -> list[str]:
+    """Series that are missing from a batch, judged within each request.
+
+    Evidence is the set of dates on which any other series in the same request returned data
+    (inside this series' active period). A series is incomplete when it lacks more of those dates
+    than legitimate calendar differences explain, or returns nothing while the others returned
+    at least INCOMPLETE_MIN_DAYS dates. A request where nothing returned data is a calendar gap,
+    not an incomplete batch. Single-series requests carry no cross-evidence; staleness warnings
+    cover them.
+    """
+    issues = []
+    for series_ids, start, end in requests:
+        if len(series_ids) < 2:
+            continue
+        rows = silver.filter(
+            pl.col("series_id").is_in(series_ids)
+            & pl.col("observation_date").is_between(start, end)
+        )
+        dates = {
+            sid: set(rows.filter(pl.col("series_id") == sid)["observation_date"].to_list())
+            for sid in series_ids
+        }
+        for sid in sorted(series_ids):
+            active_until = min(end, SERIES[sid].discontinued or end)
+            evidence = {
+                d for other in series_ids if other != sid for d in dates[other] if d <= active_until
+            }
+            if not evidence:
+                continue
+            missing = len(evidence - dates[sid])
+            allowed = max(INCOMPLETE_MIN_DAYS, INCOMPLETE_SHARE * len(evidence))
+            absent = not dates[sid] and len(evidence) >= INCOMPLETE_MIN_DAYS
+            if missing > allowed or absent:
+                issues.append(
+                    f"{sid}: no rows on {missing} of {len(evidence)} dates with data from other "
+                    "requested series"
+                )
+    return issues
+
+
 def quality_check(
     silver: pl.DataFrame,
     rejected: pl.DataFrame,
     requested_series: list[str],
     window_end: date,
     previous_current: pl.DataFrame,
+    requests: list[tuple[tuple[str, ...], date, date]] | None = None,
 ) -> QualityReport:
     report = QualityReport(accepted=silver.height, rejected=rejected.height)
+    report.incomplete = completeness_issues(silver, requests or [])
     report.reasons = dict(Counter(rejected["reason"].to_list()))
     known = pl.concat([previous_current.select(silver.columns), silver])
     for sid in sorted(requested_series):

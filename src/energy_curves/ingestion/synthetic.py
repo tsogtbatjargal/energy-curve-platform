@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
@@ -64,17 +64,21 @@ class SyntheticSource:
         self,
         overrides: dict[tuple[str, date], Any] | None = None,
         retrieved_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+        omit: Callable[[str, date], bool] | None = None,
     ) -> None:
         # overrides lets tests inject revisions or malformed values for specific rows;
         # retrieved_at lets them order retrievals in time.
         self._overrides = overrides or {}
         self._retrieved_at = retrieved_at
+        self._omit = omit or (lambda _sid, _d: False)  # simulate rows the source never returns
 
     def _rows(self, series_ids: list[str], start: date, end: date) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         d = start
         while d <= end:
             for sid in sorted(series_ids):
+                if self._omit(sid, d):
+                    continue
                 value: Any = synthetic_price(sid, d)
                 if (sid, d) in self._overrides:
                     value = self._overrides[(sid, d)]

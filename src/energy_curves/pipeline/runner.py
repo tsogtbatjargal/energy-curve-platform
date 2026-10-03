@@ -230,7 +230,14 @@ def _run_identified(
     silver, rejected = to_silver(bronze, source=source_name, logical_input_id=logical_id)
     requested = sorted({s for r in requests for s in r.series_ids})
     window_end = max(r.end for r in requests)
-    quality = quality_check(silver, rejected, requested, window_end, prev.current)
+    quality = quality_check(
+        silver,
+        rejected,
+        requested,
+        window_end,
+        prev.current,
+        [(r.series_ids, r.start, r.end) for r in requests],
+    )
     artifacts: dict[str, dict[str, Any]] = {}
 
     def put_parquet(name: str, key: str, df: pl.DataFrame) -> None:
