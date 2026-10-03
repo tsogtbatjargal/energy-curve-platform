@@ -73,7 +73,7 @@ The serving tables (`observations`, `curve_points`) hold only the latest snapsho
 - **Consumer API.** `energy_curves.db.monitored.monitored_values(conn, dataset_version)` returns the values of the event's own version. It refuses an unknown version. It also refuses a version imported before migration 0003; run `db-import --rebuild` to fix that.
 - **Evaluation pair.** Alert evaluation compares version `v` with version `v - 1`, both read through this API.
 
-### Alerts (M3c)
+### Alerts (M3c; details in ADR-0015)
 - **Upward crossing:** fires when `previous <= threshold` and `current > threshold`. It re-arms once a value is `<= threshold` again.
 - **New rules** establish a baseline without firing.
 - **Missing values** (gaps) neither fire nor re-arm.
