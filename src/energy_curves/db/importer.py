@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -307,18 +308,29 @@ def sync_attempts(conn: psycopg.Connection, store: LocalArtifactStore) -> int:
     return added
 
 
-def import_pending(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
-    """Import every published version not yet in Postgres, oldest first; sync attempts."""
+OnCommitted = Callable[[int], None]
+
+
+def import_pending(
+    dsn: str, data_dir: Path, on_committed: OnCommitted | None = None
+) -> tuple[list[ImportResult], int]:
+    """Import every published version not yet in Postgres, oldest first; sync attempts.
+    `on_committed(version)` runs after each newly imported version has committed."""
     store = LocalArtifactStore(data_dir)
     results = []
     with psycopg.connect(dsn) as conn:
         for record in published_versions(store):
-            results.append(import_version(conn, store, record))
+            result = import_version(conn, store, record)
+            results.append(result)
+            if on_committed and result.status == "imported":
+                on_committed(result.dataset_version)
         attempts = sync_attempts(conn, store)
     return results, attempts
 
 
-def rebuild_market(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
+def rebuild_market(
+    dsn: str, data_dir: Path, on_committed: OnCommitted | None = None
+) -> tuple[list[ImportResult], int]:
     """Re-import the rebuildable `market` schema from the published versions, all or nothing.
 
     One transaction holds the import lock, deletes `market` and re-imports every version and
@@ -326,7 +338,8 @@ def rebuild_market(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
     version) rolls back to the previous `market`. DELETE rather than TRUNCATE: readers keep
     seeing the previous rows until the commit instead of blocking on an exclusive lock.
     Every version must match its recorded `dataset_imported` event, and the store must reach
-    the newest recorded version (IncompatibleHistory otherwise); `app` is otherwise untouched."""
+    the newest recorded version (IncompatibleHistory otherwise); `app` is otherwise untouched.
+    `on_committed(version)` runs once after the commit, with the newest version."""
     store = LocalArtifactStore(data_dir)
     with psycopg.connect(dsn) as conn, conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (IMPORT_LOCK_KEY,))
@@ -344,4 +357,6 @@ def rebuild_market(dsn: str, data_dir: Path) -> tuple[list[ImportResult], int]:
                 f"app records version {recorded}, but the store publishes only up to {rebuilt}"
             )
         attempts = sync_attempts(conn, store)
+    if on_committed and results:
+        on_committed(max(r.dataset_version for r in results))
     return results, attempts

@@ -20,6 +20,8 @@ jobs:
     env:
       DATABASE_URL: postgresql://ecp:ecp@localhost:5432/ecp
       ECP_REQUIRE_POSTGRES: "1" # database tests fail rather than skip when Postgres is missing
+      REDIS_URL: redis://localhost:6379/0
+      ECP_REQUIRE_VALKEY: "1" # cache and event tests fail rather than skip when Valkey is missing
     services:
       postgres:
         image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
@@ -31,6 +33,15 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U ecp -d ecp"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      valkey:
+        image: docker.io/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
@@ -93,6 +104,8 @@ jobs:
       UV_PYTHON: "3.11"
       DATABASE_URL: postgresql://ecp:ecp@localhost:5432/ecp
       ECP_REQUIRE_POSTGRES: "1"
+      REDIS_URL: redis://localhost:6379/0
+      ECP_REQUIRE_VALKEY: "1"
     services:
       postgres:
         image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
@@ -104,6 +117,15 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U ecp -d ecp"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      valkey:
+        image: docker.io/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30

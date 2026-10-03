@@ -81,7 +81,7 @@ The serving tables (`observations`, `curve_points`) hold only the latest snapsho
 - **Silence.** Watermark-only updates leave monitored values unchanged, so they can never cross.
 - **Atomicity.** Evaluation consumes the outbox event. Alert state, fired alerts and notification intents commit atomically with marking the event done.
 
-### API and UI (M3b, M3d)
+### API and UI (M3b, M3d; M3b details in ADR-0014)
 - **Labels.** Curves are labelled "latest available", with their actual observation date and the data's age.
 - **Health tab:** published versions; failed and quarantined attempts; dead outbox events.
 - **Local-only HTTP protection:** bind to `127.0.0.1`; validate `Host` and `Origin`; CSRF tokens on state-changing endpoints; no permissive CORS.
