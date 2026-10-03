@@ -79,20 +79,51 @@ A check after deployment would find unsafe permissions only once they are live, 
 - For workload stacks, an IAM policy whose JSON is unknown at plan time is a gate **failure**, not a warning.
 - **The only exception** is an approval committed through a reviewed PR in `policy/approvals/iam_unknown.json`, recording:
   - stack and resource address
-  - SHA-256 of the policy's *configuration expression* from the plan JSON `configuration` section, which is known at plan time
-  - reviewer, date and reason
+  - a **fingerprint** of the policy, its dependencies and its inputs (below)
+  - reviewer, approval date and an expiry date, at most 30 days later
+  - reason
 
-  If the expression changes, the hash changes and the approval no longer applies.
-- **Reviewer checklist:**
-  - Actions and principals are constant values.
-  - The only unknown parts are resource ARNs of resources in the same stack.
-  - There is no `*` action and no `*` resource paired with a write action.
-- The apply job also needs approval in the protected `prod` environment, before any change is made.
-- Post-apply checks (re-plan, Access Analyzer `validate-policy`) are optional defence in depth, not the gate.
-- **Tests:**
-  - an unknown policy with no approval fails
-  - an approval with a stale hash fails
-  - an approval with a matching hash passes
+  The gate recomputes the fingerprint on every plan. Any mismatch, or an expired approval, fails the gate.
+
+**Why the policy expression alone is not enough.** A probe of `terraform show -json` (Terraform 1.15) found:
+- A policy set from a data source shows up only as a reference, e.g. `["data.aws_iam_policy_document.p.json"]`, so the policy's statements are not in that expression.
+- `locals` are absent from the plan JSON.
+- Literal values inside function calls are absent too: for `jsonencode({... Action = [...] ...})`, only the references survive.
+
+So a hash of the plan JSON alone would not change when the actions changed.
+
+**The fingerprint** is the SHA-256 of a canonical JSON document containing:
+1. **Identity:** stack, resource address, resource type, attribute name, and the fingerprint format version.
+2. **Dependency closure from the plan JSON.** Start at the policy attribute's `references` and follow them transitively through `configuration`. Include the full `expressions` of every resource and data source reached (for example the `aws_iam_policy_document` statements), and every module call reached (`source`, `version_constraint`, input `expressions`).
+3. **Inputs:**
+   - the plan's `variables` values for every `var.*` in the closure
+   - each module call's input expressions
+   - the exact resolved version of every registry module in the closure, from `.terraform/modules/modules.json`
+4. **Source:** the SHA-256 of every `*.tf` and `*.tf.json` file in the stack root and in every local module directory in the closure, plus `.terraform.lock.hcl`. This covers locals, literals inside function calls, and provider versions, which the plan JSON omits. It is deliberately conservative: any edit to the stack's Terraform invalidates its approvals, and re-approving is cheap.
+
+**Gate rules beyond the fingerprint:**
+- A **sensitive** variable anywhere in the closure fails the gate outright. IAM policies must not depend on secrets, and their values are not hashed into approvals.
+- Every unknown value in the closure must be an `arn`, `id` or `name` attribute of a resource in the same stack. The check uses the plan's `relevant_attributes`; anything else fails.
+- Plan JSON can hold sensitive values in plain text (`variables`), so plans and fingerprint inputs are never uploaded as CI artifacts or written to logs.
+
+**Reviewer checklist:** read the source diff for the closure files. Actions and principals are constants, there is no `*` action, and there is no `*` resource paired with a write action.
+
+**Approval flow:** the approval PR is reviewed and merged first. Then the apply job runs in the protected `prod` environment, which needs a reviewer's approval before any change is made. Post-apply checks (re-plan, Access Analyzer `validate-policy`) are optional defence in depth, not the gate.
+
+**Tests.** Each case below changes one input and must fail the gate, unless marked "passes":
+- an unknown policy with no approval
+- the matching fingerprint (passes)
+- a changed `aws_iam_policy_document` statement
+- a changed local
+- a changed literal inside `jsonencode`
+- a changed module source or resolved module version
+- a changed input variable value feeding the policy
+- a changed provider lock
+- an edit to any file in the stack (conservative by design)
+- a sensitive variable in the closure, even with an approval
+- an unknown value that is not a same-stack `arn`, `id` or `name`
+- an expired approval
+- an approval recorded for a different stack or address
 
 **R2. A permissions boundary on everything the deploy role creates (ADR-0010).**
 - A managed policy `ecp-workload-boundary` exists.
