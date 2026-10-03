@@ -12,6 +12,7 @@ from energy_curves.db.migrate import migrate
 from energy_curves.storage.artifacts import LocalArtifactStore, sha256
 
 pytestmark = pytest.mark.postgres
+NO_ALERTS = {"alert_log": 1, "alert_rules": 0, "fired_alerts": 0}
 
 
 @pytest.fixture
@@ -37,11 +38,15 @@ def app_state(dsn: str) -> list[tuple]:  # type: ignore[type-arg]
 def test_round_trip_restores_app_state_exactly(db: str, tmp_path: Path) -> None:
     before = app_state(db)
     manifest = bk.backup(db, tmp_path / "bk")
-    assert manifest["tables"]["outbox_events"]["rows"] == 3 and manifest["schema_version"] == 3
+    assert manifest["tables"]["outbox_events"]["rows"] == 3 and manifest["schema_version"] == 4
     with psycopg.connect(db) as conn:
         conn.execute("DELETE FROM app.outbox_events WHERE dataset_version = 3")
         conn.execute("UPDATE app.outbox_events SET status = 'dead'")
-    assert bk.restore(db, tmp_path / "bk") == {"outbox_events": 3, "recreated_events": 0}
+    assert bk.restore(db, tmp_path / "bk") == {
+        **NO_ALERTS,
+        "outbox_events": 3,
+        "recreated_events": 0,
+    }
     assert app_state(db) == before
 
 
@@ -127,7 +132,7 @@ def test_restoring_an_older_backup_recreates_missing_events_as_pending(
     ]  # fmt: skip
     restored = bk.restore(pg_dsn, tmp_path / "bk")
     assert events(pg_dsn) == expected
-    assert restored == {"outbox_events": 1, "recreated_events": 2}
+    assert restored == {**NO_ALERTS, "outbox_events": 1, "recreated_events": 2}
 
 
 def test_restore_refuses_an_event_that_conflicts_with_market(db: str, tmp_path: Path) -> None:
@@ -170,3 +175,18 @@ def test_restore_refuses_events_for_versions_market_has_not_imported(
     with pytest.raises(bk.BackupError, match="db-import"):
         bk.restore(other, tmp_path / "bk")
     assert app_state(other) == current
+
+
+def test_restore_rotates_the_alert_log_epoch(db: str, tmp_path: Path) -> None:
+    """ADR-0015: a restored log may reuse seq values clients have seen, so every cursor issued
+    before the restore must become unknown."""
+    from energy_curves.db import alerts
+
+    with psycopg.connect(db) as conn:
+        before = alerts.log_state(conn)
+    bk.backup(db, tmp_path / "bk")
+    bk.restore(db, tmp_path / "bk")
+    with psycopg.connect(db) as conn:
+        after = alerts.log_state(conn)
+    assert after.epoch != before.epoch
+    assert alerts.resolve(after, before.cursor()).reset == "unknown_cursor"

@@ -4,6 +4,8 @@
   db-import         import published versions into Postgres (--rebuild: re-import market)
   db-status         migration version, dataset version, outbox and attempt counts
   db-backup DIR     back up the Postgres-owned app schema; db-restore DIR restores it
+  process-events    evaluate pending dataset_imported events for alerts (db-import runs it too)
+  alerts-prune      delete fired alerts older than --keep-days (raises the alert log's floor)
   serve             local API, CSV export and live events on 127.0.0.1 (--port, default 8000)
 
 ingest            fetch -> Bronze/Silver/Gold (+ curves when shape parameters exist) -> publish
@@ -22,6 +24,7 @@ import tempfile
 from datetime import date
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -216,15 +219,49 @@ def cmd_db_import(args: argparse.Namespace, settings: Settings) -> int:
 
     run = importer.rebuild_market if args.rebuild else importer.import_pending
     results, attempts = run(settings.database_url, settings.data_dir, notify)
+    # Evaluate alerts right away; a failure leaves the events pending for the next pass.
+    events = _process_events(settings, client)
     print(
         json.dumps(
             {
                 "versions": [r.__dict__ for r in results],
                 "attempts_synced": attempts,
                 "notified": notified,
+                "events": events,
             }
         )
     )
+    return 0
+
+
+def _process_events(settings: Settings, client: Any) -> dict[str, int]:
+    from energy_curves.api.events import publish_alerts_wakeup
+    from energy_curves.db.alerts import process_events
+
+    stats = process_events(settings.database_url, lambda: publish_alerts_wakeup(client))
+    return {"done": stats.done, "retried": stats.retried, "dead": stats.dead}
+
+
+def cmd_process_events(args: argparse.Namespace, settings: Settings) -> int:
+    import redis
+
+    client = redis.Redis.from_url(
+        settings.redis_url, socket_connect_timeout=0.5, socket_timeout=0.5
+    )
+    print(json.dumps(_process_events(settings, client)))
+    return 0
+
+
+def cmd_alerts_prune(args: argparse.Namespace, settings: Settings) -> int:
+    from datetime import UTC, datetime, timedelta
+
+    import psycopg
+
+    from energy_curves.db.alerts import prune
+
+    before = datetime.now(UTC) - timedelta(days=args.keep_days)
+    with psycopg.connect(settings.database_url) as conn:
+        print(json.dumps({"pruned": prune(conn, before)}))
     return 0
 
 
@@ -309,6 +346,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.set_defaults(func=cmd_db_import)
     sub.add_parser("db-status").set_defaults(func=cmd_db_status)
+    sub.add_parser(
+        "process-events", help="evaluate pending dataset_imported events (alerts)"
+    ).set_defaults(func=cmd_process_events)
+    p = sub.add_parser("alerts-prune", help="delete fired alerts older than --keep-days")
+    p.add_argument("--keep-days", type=int, required=True)
+    p.set_defaults(func=cmd_alerts_prune)
     p = sub.add_parser("serve", help="serve the local API on 127.0.0.1")
     p.add_argument("--port", type=int, default=settings.api_port)
     p.set_defaults(func=cmd_serve)

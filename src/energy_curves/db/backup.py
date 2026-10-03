@@ -10,7 +10,8 @@ in a single transaction, so it either fully succeeds or changes nothing.
 `dataset_imported` event. In the same transaction, restore therefore re-creates a missing event
 (a backup older than the import) as `pending` with its deterministic id and payload. It refuses
 an event recorded for other content, and an event for a version `market` has not imported (run
-`db-import` first).
+`db-import` first). It also rotates the alert log's epoch, so every alert-stream cursor issued
+before the restore is unknown and its client re-fetches (ADR-0015).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+from energy_curves.db.alerts import rotate_epoch
 from energy_curves.db.importer import (
     IMPORT_LOCK_KEY,
     IncompatibleHistory,
@@ -140,6 +142,7 @@ def restore(dsn: str, source: Path) -> dict[str, int]:
                     f"backup has {manifest['tables'][table]['rows']}"
                 )
         restored["recreated_events"] = _reconcile_events(conn)
+        rotate_epoch(conn)  # the restored alert log may reuse seq values clients have seen
     return restored
 
 

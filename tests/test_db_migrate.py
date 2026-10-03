@@ -15,7 +15,7 @@ def applied(dsn: str) -> list[tuple[int, str]]:
         return conn.execute("SELECT version, name FROM schema_migrations ORDER BY 1").fetchall()
 
 
-SHIPPED = [(1, "market_schema"), (2, "app_schema"), (3, "monitored_values")]
+SHIPPED = [(1, "market_schema"), (2, "app_schema"), (3, "monitored_values"), (4, "alerts")]
 VERSIONS = [v for v, _ in SHIPPED]
 
 
@@ -62,15 +62,15 @@ def test_concurrent_runners_apply_each_migration_exactly_once(pg_dsn: str) -> No
 
 def test_failed_migration_rolls_back_and_reruns_after_fix(pg_dsn: str, tmp_path: Path) -> None:
     d = copy_migrations(tmp_path)
-    broken = d / "0004_broken.sql"
+    broken = d / "0005_broken.sql"
     broken.write_text("CREATE TABLE app.partial (id int);\nSELECT 1 / 0;\n")
-    with pytest.raises(m.MigrationFailed, match="0004_broken"):
+    with pytest.raises(m.MigrationFailed, match="0005_broken"):
         m.migrate(pg_dsn, d)
-    assert applied(pg_dsn) == SHIPPED  # the shipped ones committed; 0004 left nothing
+    assert applied(pg_dsn) == SHIPPED  # the shipped ones committed; 0005 left nothing
     with psycopg.connect(pg_dsn) as conn:
         assert conn.execute("SELECT to_regclass('app.partial')").fetchone() == (None,)
     broken.write_text("CREATE TABLE app.partial (id int);\n")
-    assert m.migrate(pg_dsn, d) == [4]
+    assert m.migrate(pg_dsn, d) == [5]
 
 
 def test_edited_applied_migration_is_refused(pg_dsn: str, tmp_path: Path) -> None:
@@ -85,14 +85,14 @@ def test_edited_applied_migration_is_refused(pg_dsn: str, tmp_path: Path) -> Non
 def test_missing_applied_migration_is_refused(pg_dsn: str, tmp_path: Path) -> None:
     d = copy_migrations(tmp_path)
     m.migrate(pg_dsn, d)
-    (d / "0003_monitored_values.sql").unlink()
-    with pytest.raises(m.MissingMigration, match="0003"):
+    (d / "0004_alerts.sql").unlink()
+    with pytest.raises(m.MissingMigration, match="0004"):
         m.migrate(pg_dsn, d)
 
 
 def test_numbering_gaps_are_refused(tmp_path: Path) -> None:
     d = copy_migrations(tmp_path)
-    (d / "0005_skipped_four.sql").write_text("SELECT 1;")
+    (d / "0006_skipped_five.sql").write_text("SELECT 1;")
     with pytest.raises(m.MigrationError, match="without gaps"):
         m.load(d)
 
