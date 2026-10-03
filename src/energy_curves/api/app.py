@@ -17,19 +17,23 @@ import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import psycopg
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from starlette.datastructures import Headers
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from energy_curves.api import queries
 from energy_curves.api.alerts import alerts_router
 from energy_curves.api.cache import BYPASS, VersionCache
 from energy_curves.api.events import Wakeup, dataset_events, parse_last_event_id
+from energy_curves.catalog import POSITIONS
+from energy_curves.db.alerts import curve_ids
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +65,39 @@ class LocalOnly:
                 await refusal(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    " font-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self';"
+    " frame-ancestors 'none'"
+)
+SECURITY_HEADERS = [
+    (b"content-security-policy", CSP.encode()),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+]
+STATIC = Path(__file__).parent / "static"
+
+
+class SecurityHeaders:
+    """CSP and friends on every HTTP response, refusals included (ADR-0016). Scripts load from
+    this origin only; inline styles are allowed because w2ui sets them."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [*message.get("headers", []), *SECURITY_HEADERS]
+            await send(message)
+
+        await self.app(scope, receive, with_headers)
 
 
 def _today() -> date:
@@ -107,6 +144,18 @@ def create_app(
         lifespan=lifespan,
     )
     app.add_middleware(LocalOnly, port=port)
+    app.add_middleware(SecurityHeaders)  # added last: outermost, so refusals carry it too
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/catalog")
+    def catalog() -> dict[str, list[str]]:
+        """The curves and positions a rule or a history query can name."""
+        return {"curves": sorted(curve_ids()), "positions": list(POSITIONS)}
+
     app.include_router(alerts_router(database_url=database_url, redis_url=redis_url, poll_s=poll_s))
 
     @contextmanager

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Energy curves (local)</title>
+  <link rel="stylesheet" href="/static/vendor/w2ui-2.0.0/w2ui-2.0.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header>
+    <div class="banner" data-testid="disclaimer">Modelled estimate, not market quotes</div>
+    <div class="status">
+      <span class="badge" data-testid="synthetic-badge" hidden>SYNTHETIC DATA</span>
+      <span data-testid="dataset-version">no data yet</span>
+      <span class="live" data-testid="live-status">connecting</span>
+    </div>
+    <div class="stale" data-testid="stale-banner" role="status" hidden></div>
+  </header>
+  <nav id="tabs" data-testid="tabs"></nav>
+  <main>
+    <section id="panel-curves" data-testid="panel-curves">
+      <div class="row">
+        <span class="label" data-testid="curves-label">latest available</span>
+        <a href="/api/export/curves.csv" download data-testid="export-curves">Export CSV</a>
+      </div>
+      <div id="grid-curves" class="grid"></div>
+    </section>
+    <section id="panel-history" data-testid="panel-history" hidden>
+      <form class="row filters" data-testid="history-filters">
+        <label>Curve <select name="curve_id"></select></label>
+        <label>Position <select name="position"></select></label>
+        <label>From <input type="date" name="start"></label>
+        <label>To <input type="date" name="end"></label>
+        <button type="submit">Show</button>
+        <a data-testid="export-history" download>Export CSV</a>
+      </form>
+      <h2 data-testid="history-title"></h2>
+      <div id="chart" class="chart"></div>
+      <div id="grid-history" class="grid"></div>
+    </section>
+    <section id="panel-alerts" data-testid="panel-alerts" hidden>
+      <form class="row filters" data-testid="rule-form">
+        <label>Curve <select name="curve_id"></select></label>
+        <label>Position <select name="position"></select></label>
+        <label>Above <input name="threshold" inputmode="decimal" required placeholder="70.00"></label>
+        <button type="submit">Add rule</button>
+        <span class="error" data-testid="rule-error" role="alert"></span>
+      </form>
+      <h2>Rules</h2>
+      <div id="grid-rules" class="grid small"></div>
+      <div class="row"><button type="button" data-testid="delete-rule">Delete selected rule</button></div>
+      <h2>Fired alerts</h2>
+      <div id="grid-alerts" class="grid"></div>
+    </section>
+    <section id="panel-health" data-testid="panel-health" hidden>
+      <p data-testid="outbox-counts"></p>
+      <h2>Published versions</h2>
+      <div id="grid-versions" class="grid small"></div>
+      <h2>Failed and quarantined attempts</h2>
+      <div id="grid-attempts" class="grid small"></div>
+      <h2>Dead events</h2>
+      <div id="grid-dead" class="grid small"></div>
+    </section>
+  </main>
+  <div class="toast" data-testid="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

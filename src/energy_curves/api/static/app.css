@@ -1,0 +1,33 @@
+/* Local UI (ADR-0016). Text in ink colours; the one series colour lives in chart.js. */
+:root { --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781; --line: #e1e0d9; --surface: #fcfcfb; }
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font: 14px/1.4 system-ui, sans-serif; color: var(--ink); background: var(--surface); }
+header { position: sticky; top: 0; z-index: 10; background: var(--surface); border-bottom: 1px solid var(--line); }
+.banner { padding: 6px 12px; font-weight: 600; background: #f3f2ee; }
+.status { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 6px 12px; color: var(--ink-2); }
+.badge { padding: 2px 8px; border: 2px solid var(--ink); font-weight: 700; letter-spacing: .04em; }
+.live::before { content: "\25CF "; color: var(--muted); }
+.live.on::before { color: #2a7d3b; }
+.stale { padding: 6px 12px; background: #fff4d6; border-top: 1px solid #e8d49a; }
+#tabs { height: 36px; }
+main { padding: 8px 12px 24px; }
+section h2 { font-size: 15px; margin: 16px 0 6px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 6px 0; }
+.filters label { display: flex; gap: 6px; align-items: center; }
+.grid { height: 360px; width: 100%; }
+.grid.small { height: 200px; }
+.label { color: var(--ink-2); }
+.error { color: #b3261e; }
+.chart { position: relative; width: 100%; margin: 6px 0 12px; }
+.chart svg:focus { outline: 2px solid var(--ink); outline-offset: 2px; }
+.chart-tooltip { position: absolute; padding: 4px 8px; background: #fff; border: 1px solid var(--line); border-radius: 4px; pointer-events: none; font-size: 12px; color: var(--ink-2); }
+.chart-tooltip strong { color: var(--ink); }
+.toast { position: fixed; right: 12px; bottom: 12px; max-width: calc(100vw - 24px); padding: 8px 12px; background: var(--ink); color: #fff; border-radius: 4px; }
+
+@media (max-width: 700px) {
+  .filters { flex-direction: column; align-items: stretch; }
+  .filters label { justify-content: space-between; }
+  .grid { height: 300px; }
+  .w2ui-tabs .w2ui-tab { padding: 6px 8px; }
+}
