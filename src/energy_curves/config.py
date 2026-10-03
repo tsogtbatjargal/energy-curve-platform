@@ -15,3 +15,4 @@ class Settings(BaseSettings):
     eia_base_url: str = "https://api.eia.gov/v2"
     data_dir: Path = Path("data")
     log_level: str = "INFO"
+    database_url: str = "postgresql://ecp:ecp@127.0.0.1:5432/ecp"  # local compose default

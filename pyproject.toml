@@ -53,13 +53,14 @@ select = ["E", "F", "I", "B", "UP", "S", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "tests"]
 addopts = "-ra --strict-markers -m 'not glue_compat'"
 markers = [
     "integration: needs local Postgres and Redis",
     "browser: Playwright UI tests",
     "live: calls the real EIA API (opt-in)",
     "realdata: checks a local cache of real EIA data (opt-in, ECP_REAL_DATA_DIR)",
+    "postgres: needs DATABASE_URL (local compose or the CI service container)",
     "glue_compat: AWS Glue 5.1 runtime checks; run under Python 3.11 with Java 17 and PySpark 3.5.6",
 ]
 

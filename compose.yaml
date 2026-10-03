@@ -8,7 +8,7 @@ services:
     image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
     environment:
       POSTGRES_USER: ecp
-      POSTGRES_PASSWORD: ${ECP_PG_PASSWORD:-ecp-local-dev}
+      POSTGRES_PASSWORD: ${ECP_PG_PASSWORD:-ecp}  # local-only default, matches .env.example
       POSTGRES_DB: ecp
     ports:
       - "127.0.0.1:5432:5432"

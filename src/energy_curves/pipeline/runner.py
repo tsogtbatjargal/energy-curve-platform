@@ -174,6 +174,7 @@ def _run(
                     "attempt_id": attempt_id,
                     "error": f"{type(exc).__name__}: {exc}",
                     "duration_s": round(time.monotonic() - started, 3),
+                    "finished_at": datetime.now(UTC),
                 }
             ),
         )
@@ -329,6 +330,7 @@ def _finish(store: LocalArtifactStore, prefix: str, result: RunResult, started: 
             {
                 **result.__dict__,
                 "duration_s": round(time.monotonic() - started, 3),
+                "finished_at": datetime.now(UTC),
             }
         ),
     )
