@@ -49,3 +49,10 @@ uv run energy-curves db-backup backups/$(date +%F)   # Postgres-owned app schema
 
 - `market` tables can be rebuilt from the published files at any time: `db-import --rebuild` (one transaction; a failure keeps the previous state).
 - `app` tables (outbox; alert rules and history from M3c) exist only in Postgres. Back them up with `db-backup` and restore with `db-restore`. See [ADR-0013](docs/adr/0013-m3-serving-architecture.md).
+
+**Local API.** `uv run energy-curves serve` serves on `http://127.0.0.1:8000`:
+- endpoints: `/api/curves`, `/api/history/curves`, `/api/history/prices`, `/api/health`, the CSV exports under `/api/export/`, and live `dataset_updated` events at `/api/events`;
+- responses are cached in Valkey by dataset version, and are still served from Postgres if Valkey is down;
+- `db-import` notifies open event streams after each commit.
+
+See [ADR-0014](docs/adr/0014-m3b-api-cache-events.md).
