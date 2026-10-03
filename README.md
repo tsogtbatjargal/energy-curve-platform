@@ -64,3 +64,24 @@ See [ADR-0014](docs/adr/0014-m3b-api-cache-events.md).
   - `/api/alerts`: the fired-alert history and a cursor;
   - `/api/alerts/events`: the alert stream, which resumes exactly after the last alert seen (`Last-Event-ID` or `?after=`).
 - **Retention:** `energy-curves alerts-prune --keep-days N` deletes old alerts.
+
+**UI.** Open `http://127.0.0.1:8000/` while `serve` runs. It has four tabs:
+- **Curves:** the latest available curves.
+- **History:** a table and a chart, with filters and CSV export.
+- **Alerts:** rules and live alerts.
+- **Health:** published versions, failed attempts and dead events.
+
+The banner always reads "Modelled estimate, not market quotes". A **SYNTHETIC DATA** badge shows for synthetic data, and a notice appears when data is more than 4 days old. w2ui 2.0.0 is vendored, so the page loads nothing from other origins ([ADR-0016](docs/adr/0016-m3d-ui-replay-playwright.md)).
+
+**Replay demo** (synthetic only, so use a separate store and database, not `data/`):
+```bash
+podman exec energy-curves_postgres_1 createdb -U ecp ecp_demo
+DEMO=postgresql://ecp:ecp@127.0.0.1:5432/ecp_demo   # set it per command: mise's .env would win
+DATABASE_URL=$DEMO uv run energy-curves db-migrate
+DATABASE_URL=$DEMO uv run energy-curves serve &      # open http://127.0.0.1:8000/
+DATABASE_URL=$DEMO uv run energy-curves replay --store /tmp/ecp-demo \
+  --start 2024-02-01 --end 2024-02-29 --interval 5 --override RWTC=2024-02-14:99.99
+```
+Replay refuses a database or store that holds real data, so pointing it at the wrong one fails safely.
+
+**Browser tests:** `uv run playwright install chromium` once, then `uv run pytest -m browser`.
