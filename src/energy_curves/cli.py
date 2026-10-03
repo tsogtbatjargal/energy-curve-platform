@@ -276,6 +276,7 @@ def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
         cache=VersionCache.from_url(settings.redis_url),
         redis_url=settings.redis_url,
         port=args.port,
+        consumer_interval_s=5.0,  # alert evaluation and retries (ADR-0015)
     )
     # Loopback only, by design (ADR-0013): there is no --host option.
     uvicorn.run(app, host="127.0.0.1", port=args.port, server_header=False, proxy_headers=False)

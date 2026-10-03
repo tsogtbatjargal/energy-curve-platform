@@ -220,6 +220,22 @@ def alerts_after(conn: psycopg.Connection, seq: int, limit: int = 100) -> list[d
     )
 
 
+def latest_alerts(conn: psycopg.Connection, limit: int) -> list[dict[str, Any]]:
+    """The newest `limit` alerts, oldest first (seq can have gaps, so this is not a range)."""
+    return list(
+        reversed(
+            _rows(
+                conn.execute(
+                    "SELECT seq, alert_id, rule_id, dataset_version, curve_id, position, as_of,"
+                    " price, previous_price, threshold, fired_at FROM app.fired_alerts"
+                    " ORDER BY seq DESC LIMIT %s",
+                    (limit,),
+                )
+            )
+        )
+    )
+
+
 def prune(conn: psycopg.Connection, before: datetime) -> int:
     """Delete alerts fired before `before`, as a prefix of the log, and raise the floor, in one
     transaction. Returns how many were deleted."""

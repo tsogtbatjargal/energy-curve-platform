@@ -13,8 +13,9 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
@@ -26,6 +27,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from energy_curves.api import queries
+from energy_curves.api.alerts import alerts_router
 from energy_curves.api.cache import BYPASS, VersionCache
 from energy_curves.api.events import Wakeup, dataset_events, parse_last_event_id
 
@@ -73,14 +75,39 @@ def create_app(
     port: int,
     today: Callable[[], date] = _today,
     poll_s: float = 5.0,
+    consumer_interval_s: float | None = None,
 ) -> FastAPI:
+    """`consumer_interval_s` runs the alert consumer in a background thread (ADR-0015), so
+    retries proceed without an import; `serve` turns it on, tests drive passes themselves."""
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        stop = threading.Event()
+        thread = None
+        if consumer_interval_s:
+            thread = threading.Thread(
+                target=_consume,
+                args=(database_url, redis_url, consumer_interval_s, stop),
+                name="alert-consumer",
+                daemon=True,
+            )
+            thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if thread:
+                thread.join(10)
+
     app = FastAPI(
         title="energy-curves (local)",
         docs_url=None,  # the docs UI loads scripts from a CDN
         redoc_url=None,
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
     app.add_middleware(LocalOnly, port=port)
+    app.include_router(alerts_router(database_url=database_url, redis_url=redis_url, poll_s=poll_s))
 
     @contextmanager
     def snapshot() -> Iterator[psycopg.Connection]:
@@ -233,6 +260,27 @@ def create_app(
             await wakeup.close()
 
     return app
+
+
+def _consume(dsn: str, redis_url: str | None, interval_s: float, stop: threading.Event) -> None:
+    import redis
+
+    from energy_curves.api.events import publish_alerts_wakeup
+    from energy_curves.db.alerts import process_events
+
+    client = (
+        redis.Redis.from_url(redis_url, socket_connect_timeout=0.25, socket_timeout=0.25)
+        if redis_url
+        else None
+    )
+    wake = (lambda: publish_alerts_wakeup(client)) if client else None
+    while True:
+        try:
+            process_events(dsn, wake)
+        except Exception:  # noqa: BLE001 - keep consuming; events stay pending and are retried
+            log.exception("alert consumer pass failed")
+        if stop.wait(interval_s):
+            return
 
 
 def _str(params: dict[str, Any]) -> dict[str, Any]:

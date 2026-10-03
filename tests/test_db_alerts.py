@@ -6,6 +6,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from db_support import FEB, JAN, T1, T2, ingest
+from db_support import seed_version as seed
 
 from energy_curves.db import alerts, outbox
 from energy_curves.db import importer as imp
@@ -22,25 +23,6 @@ KEY = ("WTI", "Spot")
 def db(pg_dsn: str) -> str:
     migrate(pg_dsn)
     return pg_dsn
-
-
-def seed(
-    dsn: str, version: int, values: dict[tuple[str, str], str | None], changes: int = 1
-) -> None:
-    """A dataset version with exactly these monitored values (None = gap) and its event."""
-    with psycopg.connect(dsn) as conn:
-        conn.execute(
-            "INSERT INTO market.dataset_versions VALUES (%s, %s, %s, 'synthetic', now(), now(),"
-            " 0, 0, %s, %s)",
-            (version, f"lid-{version}", f"{version:064d}", len(values), changes),
-        )
-        for (curve, position), price in values.items():
-            conn.execute(
-                "INSERT INTO market.monitored_values VALUES (%s, %s, %s, %s, %s, %s)",
-                (version, curve, position, date(2024, 1, version), price,
-                 "ok" if price is not None else "gap"),
-            )  # fmt: skip
-        imp.ensure_import_event(conn, version, f"lid-{version}", f"{version:064d}")
 
 
 def rule(dsn: str, threshold: str, key: tuple[str, str] = KEY) -> uuid.UUID:

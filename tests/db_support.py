@@ -89,3 +89,25 @@ def weekdays(start: date, end: date) -> int:
 
 JAN_ROWS = 2 * weekdays(date(2024, 1, 1), date(2024, 1, 31))  # two series
 FEB_ROWS = 2 * weekdays(date(2024, 2, 1), date(2024, 2, 29))
+
+
+def seed_version(
+    dsn: str, version: int, values: dict[tuple[str, str], str | None], changes: int = 1
+) -> None:
+    """A dataset version with exactly these monitored values (None = gap) and its event, for
+    alert tests that need full control of values (ADR-0015)."""
+    from energy_curves.db import importer as imp
+
+    with psycopg.connect(dsn) as conn:
+        conn.execute(
+            "INSERT INTO market.dataset_versions VALUES (%s, %s, %s, 'synthetic', now(), now(),"
+            " 0, 0, %s, %s)",
+            (version, f"lid-{version}", f"{version:064d}", len(values), changes),
+        )
+        for (curve, position), price in values.items():
+            conn.execute(
+                "INSERT INTO market.monitored_values VALUES (%s, %s, %s, %s, %s, %s)",
+                (version, curve, position, date(2024, 1, version), price,
+                 "ok" if price is not None else "gap"),
+            )  # fmt: skip
+        imp.ensure_import_event(conn, version, f"lid-{version}", f"{version:064d}")
