@@ -4,6 +4,7 @@
   db-import         import published versions into Postgres (--rebuild: re-import market)
   db-status         migration version, dataset version, outbox and attempt counts
   db-backup DIR     back up the Postgres-owned app schema; db-restore DIR restores it
+  serve             local API, CSV export and live events on 127.0.0.1 (--port, default 8000)
 
 ingest            fetch -> Bronze/Silver/Gold (+ curves when shape parameters exist) -> publish
 estimate-shape    estimate s[k, m] from the published Gold history
@@ -199,11 +200,48 @@ def cmd_db_migrate(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_db_import(args: argparse.Namespace, settings: Settings) -> int:
+    import redis
+
+    from energy_curves.api.events import publish_dataset_updated
     from energy_curves.db import importer
 
+    client = redis.Redis.from_url(
+        settings.redis_url, socket_connect_timeout=0.5, socket_timeout=0.5
+    )
+    notified: list[int] = []
+
+    def notify(version: int) -> None:  # after commit; best effort (ADR-0014)
+        if publish_dataset_updated(client, version):
+            notified.append(version)
+
     run = importer.rebuild_market if args.rebuild else importer.import_pending
-    results, attempts = run(settings.database_url, settings.data_dir)
-    print(json.dumps({"versions": [r.__dict__ for r in results], "attempts_synced": attempts}))
+    results, attempts = run(settings.database_url, settings.data_dir, notify)
+    print(
+        json.dumps(
+            {
+                "versions": [r.__dict__ for r in results],
+                "attempts_synced": attempts,
+                "notified": notified,
+            }
+        )
+    )
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
+    import uvicorn
+
+    from energy_curves.api.app import create_app
+    from energy_curves.api.cache import VersionCache
+
+    app = create_app(
+        database_url=settings.database_url,
+        cache=VersionCache.from_url(settings.redis_url),
+        redis_url=settings.redis_url,
+        port=args.port,
+    )
+    # Loopback only, by design (ADR-0013): there is no --host option.
+    uvicorn.run(app, host="127.0.0.1", port=args.port, server_header=False, proxy_headers=False)
     return 0
 
 
@@ -271,6 +309,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.set_defaults(func=cmd_db_import)
     sub.add_parser("db-status").set_defaults(func=cmd_db_status)
+    p = sub.add_parser("serve", help="serve the local API on 127.0.0.1")
+    p.add_argument("--port", type=int, default=settings.api_port)
+    p.set_defaults(func=cmd_serve)
     p = sub.add_parser("db-backup", help="back up the app schema (rules, alerts, outbox)")
     p.add_argument("target")
     p.set_defaults(func=cmd_db_backup)

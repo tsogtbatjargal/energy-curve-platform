@@ -16,3 +16,5 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     log_level: str = "INFO"
     database_url: str = "postgresql://ecp:ecp@127.0.0.1:5432/ecp"  # local compose default
+    redis_url: str = "redis://127.0.0.1:6379/0"  # Valkey, local compose default
+    api_port: int = 8000
