@@ -12,7 +12,7 @@ Verified read-only on 2026-10-04:
 - **Other projects in the management account:**
   - another project's GitHub OIDC provider, IAM roles (EKS, GitHub Actions) and service-linked roles, with nothing running behind them (see the R2 pre-apply evidence);
   - the account-wide $20 budget.
-- **This project's resources** are all in the management account, in the `infra/bootstrap` stack: the state bucket, the $40 budget, `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` (R2, applied).
+- **This project's resources** are all in the management account, in the `infra/bootstrap` stack: the state bucket, the $40 budget, the `project` cost allocation tag activation (`aws_ce_cost_allocation_tag.project`, which the budget's tag filter depends on), `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` (R2, applied).
 
 Why move:
 - **Containment.** AWS Organizations advises using the management account only for tasks that need it.
@@ -28,7 +28,8 @@ Facts this plan relies on (AWS documentation, checked 2026-10-04):
   - `S3UnlockBucketPolicy`
   - `SQSUnlockQueuePolicy`
 
-  The `sts:TaskPolicyArn` condition key restricts which task policies a caller may use. `AssumeRoot` needs a Regional STS endpoint.
+  The `sts:TaskPolicyArn` condition key restricts which task policies a caller may use. `AssumeRoot` needs a Regional STS endpoint. Its resource is the **target member account's** root, `arn:aws:iam::<member-account-id>:root` (Service Authorization Reference, STS), so a policy that names the target needs that account's ID.
+- **Cost allocation tags** can only be activated by the management account of an organization ("Only a management account in an organization and single accounts that aren't members of an organization have access to the cost allocation tags manager"). Activation applies to usage in every member account. The Terraform provider sets a tag to `Inactive` when `aws_ce_cost_allocation_tag` is destroyed.
 - **`aws:AssumedRoot`** is present, and true, only in requests made with `AssumeRoot` credentials. AWS's example SCP denies the **long-term** root user (`aws:PrincipalArn` `arn:aws:iam::*:root`) only when `aws:AssumedRoot` is **null**, so it does not block `AssumeRoot` sessions.
 - **Price List API:** standard (alert-only) budgets cost $0.00. Only action-enabled budgets are charged, at $0.10 per budget-day after 62 free budget-days a month.
 
@@ -37,10 +38,10 @@ Facts this plan relies on (AWS documentation, checked 2026-10-04):
 ### Layout
 | Account | Holds |
 |---|---|
-| **Management** (existing) | Organizations, Identity Center, billing. The other project's resources, untouched. The account-wide $20 budget, untouched. **New:** an `infra/org` stack (OU, the member account, SCPs, the Identity Center assignment, root-access settings). It **actively owns** this project's retained state bucket and $40 budget (see *Ownership*). |
-| **`ecp-workloads`** (new member, in OU `Workloads`) | Everything this project deploys: a new `infra/bootstrap` instance (state bucket, the GitHub OIDC provider, CI roles, the R2 boundary, and the restricted break-glass role), then `infra/batch` (M4) and `infra/demo` (M6). **No budget.** |
+| **Management** (existing) | Organizations, Identity Center, billing. The other project's resources, untouched. The account-wide $20 budget, untouched. **New:** an `infra/org` stack (OU, the member account, SCPs, the Identity Center assignment, root-access settings). It **actively owns** this project's retained state bucket, $40 budget and `project` cost allocation tag (see *Ownership*). |
+| **`ecp-workloads`** (new member, in OU `Workloads`) | Everything this project deploys: a new `infra/bootstrap` instance (state bucket, the GitHub OIDC provider, CI roles, the R2 boundary, and the restricted break-glass role), then `infra/batch` (M4) and `infra/demo` (M6). **No budget and no cost allocation tag.** |
 
-### Ownership of the retained bucket and budget
+### Ownership of the retained bucket, budget and cost allocation tag
 Nothing in the management account is left orphaned, and nothing is duplicated:
 - **The state bucket** (`ecp-tfstate-<management>-ca-central-1`, with its versioning, encryption, public-access-block and policy resources) moves from the management `infra/bootstrap` state into `infra/org`:
   - `import` blocks in `infra/org`;
@@ -48,13 +49,18 @@ Nothing in the management account is left orphaned, and nothing is duplicated:
 
   The bucket's `prevent_destroy` stays. It keeps holding `org/terraform.tfstate`, plus the old `bootstrap/terraform.tfstate` key until phase 5 archives it.
 - **The $40 budget** moves the same way: imported into `infra/org`, removed without destroying it from the management bootstrap. It is then **modified in place** to filter on the linked account `ecp-workloads` as well as the `project` tag. It is never re-created.
-- **The `infra/bootstrap` code loses its budget resource.** Every instance of the stack, the member one included, therefore creates **no budget**, so the account keeps exactly two budgets.
+- **The `project` cost allocation tag** (`aws_ce_cost_allocation_tag.project`) moves the same way: an `import` block in `infra/org` (ID `project`), and a `removed { lifecycle { destroy = false } }` block in the management bootstrap. A destroy would set the tag `Inactive` and blind the budget's tag filter, so it is never destroyed. Its status stays `Active` throughout. In `infra/org` the budget's `depends_on` points at it, as it does today.
+- **The `infra/bootstrap` code loses `budget.tf`:** both the budget and the cost allocation tag. Every instance of the stack, the member one included, therefore creates **neither**:
+  - the account keeps exactly two budgets;
+  - the tag has one owner, in the only account that can activate it. A member-account instance could not activate it anyway, and a second Terraform owner would fight the first over its status.
 
 ### Root access: credentials removed, scoped `AssumeRoot` recovery kept
-- **Credentials removed.** Centralized root access is enabled in `infra/org` (root credentials management and privileged root sessions), and the new account's root credentials are deleted (`IAMDeleteRootUserCredentials`).
+- **Timing: after the account exists.** The scoping names the target account, and `AssumeRoot`'s resource is that account's root ARN, so it cannot be written before phase 1b returns the ID. All root-access work is therefore in **phase 1c**: nothing about root access, the permission set or `AssumeRoot` is in 1a or 1b. Before 1c, centralized root access is off, so no `AssumeRoot` session can be started against any account.
+- **Order within 1c:** first the scoping policy is provisioned on the permission set, then centralized root access is enabled (`depends_on`). There is never a moment when `AssumeRoot` works and is not yet scoped.
+- **Credentials removed.** Centralized root access is enabled in `infra/org` (root credentials management and privileged root sessions), and the new account's root credentials are deleted (`IAMDeleteRootUserCredentials`, phase 2).
 - **Who may call `sts:AssumeRoot`.** Only the admin's Identity Center role in the management account (`AWSReservedSSO_AdministratorAccess_*`), through an inline policy on the `AdministratorAccess` permission set. It denies `sts:AssumeRoot` unless both:
   - `sts:TaskPolicyArn` is one of the five task policies above;
-  - the target is `ecp-workloads`.
+  - the resource is `arn:aws:iam::<ecp-workloads-id>:root` (a `NotResource` deny), with the ID taken from the `aws_organizations_account` resource, never typed in.
 
   Other management-account principals get no new permission. If one already has admin-level `sts:*` (the other project's roles), the acceptance check below finds it, and it is reported for the user to decide; this plan does not change it.
 - **The SCP blocks the long-term root user and keeps recovery.** It uses AWS's pattern: deny `*` when `aws:PrincipalArn` is `arn:aws:iam::*:root` **and** `aws:AssumedRoot` is null. A blanket deny on the root principal would block `AssumeRoot` recovery, so it is not used.
@@ -69,22 +75,25 @@ By default this role trusts the whole management account, so any management-acco
 ### Phases, each a separate authorization
 The pattern in every phase is plan, gate, exact-plan approval, apply, then evidence, as ADR-0018 set out.
 1. **`infra/org`** (management account):
-   - **1a:** import the state bucket and the $40 budget, with the matching `removed` blocks in the management bootstrap. The OU `Workloads`. Root-access settings, and the `AssumeRoot` scoping on the `AdministratorAccess` permission set.
-   - **1b:** create the account (`close_on_deletion = false`, `role_name = OrganizationAccountAccessRole`, email supplied at plan time and never committed) and attach the SCPs.
-   - **1c:** the Identity Center assignment (`AdministratorAccess`, plus a new `ecp-readonly` set) and the budget's linked-account filter. These need the account ID, so they run after 1b.
+   - **1a:** import the state bucket, the $40 budget and the `project` cost allocation tag, with the matching `removed` blocks in the management bootstrap, which also drops `budget.tf`. The OU `Workloads`. **No** root-access, permission-set or account-specific change.
+   - **1b:** create the account (`close_on_deletion = false`, `role_name = OrganizationAccountAccessRole`, email supplied at plan time and never committed) and attach the SCPs. The SCPs name no member account ID.
+   - **1c** (everything that needs the account ID):
+     - the Identity Center assignment (`AdministratorAccess`, plus a new `ecp-readonly` set);
+     - the budget's linked-account filter;
+     - the `AssumeRoot` scoping on the `AdministratorAccess` permission set, then centralized root access, in that order.
 2. **Access:**
    - the user adds a CLI profile `ecp-workloads` (SSO) and logs in;
    - the read-only session-start checklist runs;
    - the root credentials are deleted through `AssumeRoot` (`IAMDeleteRootUserCredentials`).
 3. **Member bootstrap** (into `ecp-workloads`):
-   - the same stack, parameterized by account, with no budget;
+   - the same stack, parameterized by account, with no budget and no cost allocation tag;
    - the GitHub OIDC provider becomes a managed resource;
    - `OrganizationAccountAccessRole` is imported with the restricted trust policy;
    - first apply with local state, then `terraform init -migrate-state` into its new bucket;
    - `scripts/bootstrap_plan_check.py` gains a first-apply mode with the expected resource set;
    - R2 is re-accepted (`scripts/r2_accept.py`).
 4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap.
-5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket and budget are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
+5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket, budget and cost allocation tag are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
 
 After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workloads`.
 
@@ -107,13 +116,13 @@ These are free, and Organizations enforces them independently of IAM. Each is ev
 ### State
 | Stack | Account | Bucket / key | Owner of the bucket |
 |---|---|---|---|
-| `infra/org` | management | existing bucket, `org/terraform.tfstate` | `infra/org` (imported) |
+| `infra/org` (also the budget and the cost allocation tag) | management | existing bucket, `org/terraform.tfstate` | `infra/org` (imported) |
 | `infra/bootstrap` (member) | `ecp-workloads` | new member bucket, `bootstrap/terraform.tfstate` | member `infra/bootstrap` |
 | `infra/batch`, `infra/demo` | `ecp-workloads` | new member bucket, one key each | member `infra/bootstrap` |
 
 ### Cost
 - **Free:** Organizations, OUs, SCPs, Identity Center, root access management and the account itself. Charges roll up to the management account (consolidated billing).
-- **Budgets:** the $40 budget is modified in place to filter on the linked account as well as the tag, and stays alert-only, so $0.00. The account keeps two budgets; none is created in `ecp-workloads`.
+- **Budgets:** the $40 budget is modified in place to filter on the linked account as well as the tag, and stays alert-only, so $0.00. The account keeps two budgets; none is created in `ecp-workloads`. The cost allocation tag stays active, at no charge.
 - **New state bucket:** cents per month.
 - **The M4 estimate is unchanged:** about $0.45–0.60 a month.
 - **Closing the account later** (if ever) has no charge, but AWS keeps a closed account suspended for a post-closure period. `close_on_deletion = false` prevents an accidental closure through Terraform.
@@ -121,30 +130,39 @@ These are free, and Organizations enforces them independently of IAM. Each is ev
 ## Acceptance criteria
 Each phase is accepted only when its checks pass. They are recorded, sanitized, under `docs/evidence/`.
 
-**Phase 1a: ownership and root-access scoping**
-- **The `infra/org` plan imports and changes nothing:** `N to import, 0 to add, 0 to change, 0 to destroy` for the bucket and its configuration resources and the budget. `terraform state list` shows them in `infra/org`.
-- **The management bootstrap plan forgets them:** they appear as `removed` with `destroy = false`, and the plan shows `0 to destroy`.
+**Phase 1a: ownership transfer and the OU**
+- **The `infra/org` plan imports and changes nothing:** `N to import, 0 to add, 0 to change, 0 to destroy`, where the imports are exactly the bucket and its configuration resources, `aws_budgets_budget.project` and `aws_ce_cost_allocation_tag.project`; the only addition is the OU. `terraform state list` then shows them in `infra/org`.
+- **The management bootstrap plan forgets them:** the same resources appear as `removed` with `destroy = false`, and the plan shows `0 to destroy`. `aws_ce_cost_allocation_tag.project` in particular has no destroy or update action, so its status is never set to `Inactive`.
+- **The tag is still active:** `ce:ListCostAllocationTags` for key `project` shows `Active` before and after.
 - **The budget count is unchanged:** two budgets, the $20 and the $40. The $40's name, amount and alerts are unchanged (`budgets:DescribeBudgets`, sanitized).
-- **`AssumeRoot` scoping** (`simulate-principal-policy` on the admin's Identity Center role, with action `sts:AssumeRoot`):
-  - allowed with each of the five task policies against `ecp-workloads`;
-  - denied with any other task policy or any other target account.
-- **Other management-account principals** get the same simulation. Any that is allowed `sts:AssumeRoot` is listed for the user, unchanged.
+- **No root-access or permission-set change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` reports no enabled features afterwards.
 
-**Phase 1b–1c: account, SCPs, assignment, budget scope**
+**Phase 1b: account and SCPs**
 - **The account:** `ecp-workloads` is `ACTIVE`, in OU `Workloads`, with `FullAWSAccess` plus the project SCPs attached.
-- **The budget:** its filter includes the linked account `ecp-workloads` and the `project` tag; it has no actions; still two budgets.
+- **Still no root-access change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` still reports none enabled.
 - **SCP simulations** in `ecp-workloads`:
   - a long-term root principal (no `aws:AssumedRoot`) is denied;
   - a request with `aws:AssumedRoot` = `true` under `S3UnlockBucketPolicy` is not denied by the SCP;
   - a request outside the allowed regions is denied;
   - `organizations:LeaveOrganization` is denied.
 
+**Phase 1c: assignment, budget scope, `AssumeRoot` scoping and root access**
+- **The plan** applies the permission-set inline policy and its provisioning before the root-access features, through `depends_on`; the gate checks that dependency in the saved plan.
+- **The budget:** its filter includes the linked account `ecp-workloads` and the `project` tag; it has no actions; still two budgets. The cost allocation tag is unchanged.
+- **The assignment:** `AdministratorAccess` and `ecp-readonly` are assigned to the user for `ecp-workloads` only.
+- **Root access:** `iam:ListOrganizationsFeatures` shows root credentials management and root sessions enabled.
+- **`AssumeRoot` scoping** (`simulate-principal-policy` on the admin's Identity Center role, action `sts:AssumeRoot`, resource `arn:aws:iam::<ecp-workloads-id>:root`, context key `sts:TaskPolicyArn`):
+  - allowed with each of the five task policies;
+  - denied with any other task policy ARN;
+  - denied with any other target account's root ARN (another real account ID in the organization if one exists, otherwise a placeholder ID).
+- **Other management-account principals** get the same simulation. Any that is allowed `sts:AssumeRoot` is listed for the user, unchanged.
+
 **Phase 2: access and root credentials**
 - `sts:AssumeRoot` with `IAMAuditRootUserCredentials` from the admin's Identity Center role succeeds. `iam:GetLoginProfile`, `ListAccessKeys` and `ListMFADevices` for the root user then show **no** credentials after `IAMDeleteRootUserCredentials`.
 - The read-only session-start checklist runs clean against `ecp-workloads`.
 
 **Phase 3: member bootstrap and break-glass**
-- **The plan:** the first-apply check prints `OK`, with the expected resources only. **No `aws_budgets_budget`** appears anywhere in the plan (also a Rego/test check).
+- **The plan:** the first-apply check prints `OK`, with the expected resources only. **No `aws_budgets_budget` and no `aws_ce_cost_allocation_tag`** appear anywhere in the plan. A Rego rule and a test fail the member bootstrap on either, and the bootstrap code has no `budget.tf`.
 - **The break-glass role's trust policy** (`iam:GetRole`) equals the reviewed template: management account, `ArnLike aws:PrincipalArn` limited to `AWSReservedSSO_AdministratorAccess_*`, `sts:SetSourceIdentity` required, `MaxSessionDuration` of 3600. `scripts/role_trust_review.py` lists no unconditioned cross-account trust.
 - **The break-glass lock:** simulating `iam:UpdateAssumeRolePolicy` on the role by the member CI deploy role is denied (SCP plus boundary).
 - **R2 re-acceptance:** `scripts/r2_accept.py` gives 13 cases and 0 differences in `ecp-workloads`. The simulator now also evaluates the project SCPs.
@@ -155,11 +173,11 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - No GitHub variable or secret names a management-account role.
 
 **Phase 5: decommission**
-- **The management bootstrap plan** destroys exactly `ecp-gha-plan`, `ecp-gha-deploy`, their policies and attachments, and `ecp-workload-boundary`, with **0** changes to the bucket or budget. That is checked by an expected-change check like `bootstrap_plan_check.py`.
+- **The management bootstrap plan** destroys exactly `ecp-gha-plan`, `ecp-gha-deploy`, their policies and attachments, and `ecp-workload-boundary`, with **0** changes to the bucket, budget or cost allocation tag. That is checked by an expected-change check like `bootstrap_plan_check.py`.
 - **Afterwards:**
   - no `ecp-*` role or policy remains in the management account;
   - the other project's roles, OIDC provider and $20 budget are unchanged (the same `role_trust_review.py` lines, the same budget);
-  - two budgets.
+  - two budgets, and the `project` cost allocation tag is still `Active`, owned by `infra/org`.
 
 ## Consequences
 - **Workloads are contained,** and SCPs become a real guardrail. The management account's IAM surface shrinks back to what the other project and Identity Center need.
