@@ -29,8 +29,9 @@ def ingest(data_dir: Path, requests=JAN, source=None):  # type: ignore[no-untype
 def test_crash_between_version_record_and_pointer_is_not_treated_as_published(
     tmp_path: Path,
 ) -> None:
-    """Publishing writes published/versions/N.json, then the pointer. A crash in between must
-    not make the retry report already_published while version N-1 is still current."""
+    """A crash at the pointer write (the commit) must not make the retry report
+    already_published while version N-1 is still current. Since ADR-0019 the version record is
+    written after the commit, so the crash leaves no orphan record either."""
     ingest(tmp_path)
     store = LocalArtifactStore(tmp_path)
     pointer_v1 = store.get("published/current.json")
@@ -61,7 +62,7 @@ def test_crash_between_version_record_and_pointer_is_not_treated_as_published(
     finally:
         publish_mod_runner.publish = original
     assert store.get("published/current.json") == pointer_v1
-    assert store.exists("published/versions/00000002.json")  # the orphaned version record
+    assert not store.exists("published/versions/00000002.json")  # no orphan record
     assert load_published(store).version == 1  # readers still see the old dataset
 
     retry = ingest(tmp_path, FEB)

@@ -33,7 +33,13 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from energy_curves.pipeline.medallion import GOLD_SCHEMA, REVISION_SCHEMA, conform
-from energy_curves.pipeline.publish import Pointer, read_artifact, read_manifest, read_pointer
+from energy_curves.pipeline.publish import (
+    VERSIONS_PREFIX,
+    Pointer,
+    read_artifact,
+    read_manifest,
+    read_pointer,
+)
 from energy_curves.storage.artifacts import LocalArtifactStore
 
 IMPORT_LOCK_KEY = 7_212_301_002
@@ -91,16 +97,22 @@ class ImportResult:
 
 
 def published_versions(store: LocalArtifactStore) -> list[Pointer]:
-    """Published version records up to the current pointer, oldest first."""
+    """Published versions, oldest first: index records below the pointer, then the pointer.
+
+    The pointer is authoritative for its own version (ADR-0019): its record may be missing (a
+    crash after the commit) or stale (stores from before ADR-0019 wrote the record first), as
+    in publish.published_logical_ids.
+    """
     pointer = read_pointer(store)
-    root = store.path("published/versions")
-    if pointer is None or not root.is_dir():
+    if pointer is None:
         return []
-    records = [Pointer(**json.loads(f.read_bytes())) for f in root.glob("*.json")]
-    return sorted(
-        (r for r in records if r.dataset_version <= pointer.dataset_version),
-        key=lambda r: r.dataset_version,
-    )
+    records = [
+        Pointer(**json.loads(store.get(key)))
+        for key in store.list(VERSIONS_PREFIX)
+        if key.endswith(".json")
+    ]
+    older = (r for r in records if r.dataset_version < pointer.dataset_version)
+    return [*sorted(older, key=lambda r: r.dataset_version), pointer]
 
 
 def event_id(event_type: str, dataset_version: int, manifest_sha256: str) -> uuid.UUID:

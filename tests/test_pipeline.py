@@ -128,9 +128,13 @@ def test_malformed_batch_quarantined_and_previous_dataset_kept(tmp_path: Path, b
     assert result.status == "quarantined"
     assert result.dataset_version == 1
     assert (tmp_path / POINTER_KEY).read_bytes() == pointer_before
-    rejected = pl.read_parquet(tmp_path / f"runs/{result.logical_input_id}/silver/rejected.parquet")
+    rejected = pl.read_parquet(
+        tmp_path / f"runs/{result.logical_input_id}/{result.attempt_id}/silver/rejected.parquet"
+    )
     assert rejected.height == 1 and rejected["reason"][0]
-    quality = json.loads((tmp_path / f"runs/{result.logical_input_id}/quality.json").read_text())
+    quality = json.loads(
+        (tmp_path / f"runs/{result.logical_input_id}/{result.attempt_id}/quality.json").read_text()
+    )
     assert quality["status"] == "quarantined"
 
 
@@ -238,7 +242,7 @@ def test_publish_refuses_to_move_backward(tmp_path: Path) -> None:
 
 def test_tampered_artifact_detected(tmp_path: Path) -> None:
     result = ingest(tmp_path)
-    gold = tmp_path / f"runs/{result.logical_input_id}/gold/current.parquet"
+    gold = tmp_path / f"runs/{result.logical_input_id}/{result.attempt_id}/gold/current.parquet"
     gold.write_bytes(gold.read_bytes() + b"x")
     with pytest.raises(IntegrityError):
         load_published(LocalArtifactStore(tmp_path))
@@ -246,7 +250,11 @@ def test_tampered_artifact_detected(tmp_path: Path) -> None:
 
 def test_bronze_has_sanitised_metadata_and_hashes(tmp_path: Path) -> None:
     result = ingest(tmp_path)
-    metas = list((tmp_path / f"runs/{result.logical_input_id}/bronze").glob("*.meta.json"))
+    metas = list(
+        (tmp_path / f"runs/{result.logical_input_id}/{result.attempt_id}/bronze").glob(
+            "*.meta.json"
+        )
+    )
     assert metas
     for m in metas:
         meta = json.loads(m.read_text())

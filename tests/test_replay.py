@@ -70,7 +70,7 @@ def test_interval_sleeps_between_days_only(db: str, tmp_path: Path) -> None:
 def test_a_store_with_real_data_is_refused(db: str, tmp_path: Path) -> None:
     store = tmp_path / "store"
     ingest(store, JAN, retrieved_at=T1)
-    manifest = next((store / "runs").glob("*/manifest.json"))
+    manifest = next((store / "runs").glob("*/*/manifest.json"))
     record = next((store / "published" / "versions").glob("*.json"))
     doc = json.loads(manifest.read_text())
     doc["identity"]["source"] = "eia"  # as if real; re-seal the record so the hash matches
@@ -78,7 +78,9 @@ def test_a_store_with_real_data_is_refused(db: str, tmp_path: Path) -> None:
     from energy_curves.storage.artifacts import sha256
 
     rec = json.loads(record.read_text())
-    record.write_text(json.dumps({**rec, "manifest_sha256": sha256(manifest.read_bytes())}))
+    sealed = json.dumps({**rec, "manifest_sha256": sha256(manifest.read_bytes())})
+    record.write_text(sealed)
+    (store / "published" / "current.json").write_text(sealed)  # the pointer too (ADR-0019)
     with pytest.raises(rp.ReplayRefused, match="'eia'"):
         rp.replay(store, db, FEB_1, FEB_1)
 

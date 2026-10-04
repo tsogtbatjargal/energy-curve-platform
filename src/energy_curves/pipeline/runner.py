@@ -2,8 +2,12 @@
 
 Identity: `logical_input_id` hashes what the run is *about* (source, requests, Bronze content,
 transform version); `attempt_id` identifies one execution. Re-running a published input is a
-no-op. Artifacts live under runs/<logical_input_id>/ and are only ever overwritten by retries of
-an input that has not been published.
+no-op. Artifacts live under runs/<logical_input_id>/<attempt_id>/ and are written once: a second
+attempt of the same input, even one still running after its orchestrator gave up on it, can
+never overwrite files a published manifest names (ADR-0019).
+
+`run_ingest` is the local entry point (single-writer lock). `run_ingest_store` runs against any
+ArtifactStore without a lock; the conditional pointer write keeps concurrent runs safe.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from energy_curves.pipeline.publish import (
     publish,
     published_logical_ids,
 )
-from energy_curves.storage.artifacts import LocalArtifactStore
+from energy_curves.storage.artifacts import ArtifactStore, LocalArtifactStore
 
 log = logging.getLogger(__name__)
 TRANSFORM_VERSION = "medallion-v1"
@@ -101,18 +105,38 @@ def run_ingest(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> RunResult:
     """Run under the single-writer lock. `fault(stage)` lets tests simulate crashes."""
+    with single_writer(data_dir / ".pipeline.lock"):
+        return run_ingest_store(
+            LocalArtifactStore(data_dir),
+            source,
+            requests,
+            source_name=source_name,
+            shape=shape,
+            fault=fault,
+            clock=clock,
+        )
+
+
+def run_ingest_store(
+    store: ArtifactStore,
+    source: Source,
+    requests: list[FetchRequest],
+    *,
+    source_name: str,
+    shape: ShapeInput | None = None,
+    fault: Callable[[str], None] = _no_fault,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> RunResult:
+    """One run against any store, without a lock: publishing is a conditional write."""
     if shape is not None and shape.origin != source_name:
         raise ShapeOriginMismatch(
             f"shape parameters come from {shape.origin!r} data; this run ingests {source_name!r}"
         )
-    with single_writer(data_dir / ".pipeline.lock"):
-        return _run(
-            LocalArtifactStore(data_dir), source, requests, source_name, shape, fault, clock
-        )
+    return _run(store, source, requests, source_name, shape, fault, clock)
 
 
 def _run(
-    store: LocalArtifactStore,
+    store: ArtifactStore,
     source: Source,
     requests: list[FetchRequest],
     source_name: str,
@@ -182,7 +206,7 @@ def _run(
 
 
 def _run_identified(
-    store: LocalArtifactStore,
+    store: ArtifactStore,
     source_name: str,
     requests: list[FetchRequest],
     shape: ShapeInput | None,
@@ -195,7 +219,7 @@ def _run_identified(
     identity: dict[str, Any],
     logical_id: str,
 ) -> RunResult:
-    prefix = f"runs/{logical_id}"
+    prefix = f"runs/{logical_id}/{attempt_id}"
     prev = load_published(store)
     # A store holds one source. Mixing synthetic and EIA observations would let curves and shape
     # estimation silently combine them, so refuse before anything is written.
@@ -321,7 +345,7 @@ def _run_identified(
     )
 
 
-def _finish(store: LocalArtifactStore, prefix: str, result: RunResult, started: float) -> RunResult:
+def _finish(store: ArtifactStore, prefix: str, result: RunResult, started: float) -> RunResult:
     # Attempt records live outside runs/<id>/ so re-running a published input never writes into
     # its run prefix.
     store.put(
