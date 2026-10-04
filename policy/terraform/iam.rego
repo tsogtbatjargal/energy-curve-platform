@@ -36,3 +36,27 @@ warn contains msg if {
 	rc.change.after_unknown.policy == true
 	msg := sprintf("%s: policy JSON unknown at plan time; see the R1 approval check below", [rc.address])
 }
+
+# PLAN.md R2 (ADR-0018): every role a workload stack creates carries the workload boundary, so
+# what the deploy role creates can never exceed it. policy_gate.py passes the stack name as
+# data.ecp.stack; without it the stack counts as a workload stack, so the rule fails closed.
+boundary_exempt_stacks := {"bootstrap"}
+
+stack := s if {
+	s := data.ecp.stack
+} else := "MISSING"
+
+boundary_arn := `^arn:aws:iam::[0-9]{12}:policy/ecp-workload-boundary$`
+
+valid_boundary(rc) if {
+	b := lib.after(rc).permissions_boundary
+	is_string(b)
+	regex.match(boundary_arn, b)
+}
+
+deny contains msg if {
+	not stack in boundary_exempt_stacks
+	some rc in lib.resources_of("aws_iam_role")
+	not valid_boundary(rc)
+	msg := sprintf("%s: workload roles need permissions_boundary = the ecp-workload-boundary policy ARN, known at plan time (stack %s, PLAN.md R2)", [rc.address, stack])
+}

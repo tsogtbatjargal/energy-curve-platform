@@ -5,7 +5,8 @@ A gate that silently checks nothing is worse than no gate, so vacuity is a failu
 
 It also runs the PLAN.md R1 check (iam_approval.py): for a workload stack, an IAM policy unknown
 at plan time fails unless a matching, unexpired approval exists. `--stack` is required so that
-check can never be skipped by omission.
+check can never be skipped by omission. The stack name also reaches the Rego policies as
+data.ecp.stack: the PLAN.md R2 boundary rule exempts only bootstrap.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 EXPECTED_NAMESPACES = frozenset(
@@ -93,22 +95,27 @@ def main(argv: list[str]) -> int:
     if conftest is None:
         print("BROKEN: conftest not found on PATH", file=sys.stderr)
         return 2
-    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [
-            conftest,
-            "test",
-            str(plan_path),
-            "--policy",
-            policy_dir,
-            "--all-namespaces",
-            "--output",
-            "json",
-            "--no-color",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    with tempfile.TemporaryDirectory() as tmp:
+        stack_data = Path(tmp) / "ecp.json"
+        stack_data.write_text(json.dumps({"ecp": {"stack": args.stack}}))
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                conftest,
+                "test",
+                str(plan_path),
+                "--policy",
+                policy_dir,
+                "--data",
+                str(stack_data),
+                "--all-namespaces",
+                "--output",
+                "json",
+                "--no-color",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     try:
         results = json.loads(proc.stdout)
     except json.JSONDecodeError:
