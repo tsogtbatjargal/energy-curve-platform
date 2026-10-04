@@ -308,7 +308,7 @@ def sync_attempts(conn: psycopg.Connection, store: LocalArtifactStore) -> int:
     return added
 
 
-OnCommitted = Callable[[int], None]
+OnCommitted = Callable[[int], object]
 
 
 def import_pending(

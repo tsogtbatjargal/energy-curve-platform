@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 import uvicorn
 
@@ -19,13 +20,25 @@ def free_port() -> int:
 
 
 @contextmanager
-def serve(db: str, redis_url: str | None, poll_s: float) -> Iterator[str]:
-    """The app on a free loopback port; no background consumer (tests drive passes)."""
-    port = free_port()
+def serve(
+    db: str, redis_url: str | None, poll_s: float, port: int | None = None, **app_kw: Any
+) -> Iterator[str]:
+    """The app on a loopback port (free unless given); no background consumer (tests drive
+    passes). Open streams are cut after 1 s on exit, so a test can stop and restart a server
+    on the same port while a browser is connected."""
+    port = port or free_port()
     app = create_app(
-        database_url=db, cache=VersionCache(None), redis_url=redis_url, port=port, poll_s=poll_s
+        database_url=db,
+        cache=VersionCache(None),
+        redis_url=redis_url,
+        port=port,
+        poll_s=poll_s,
+        **app_kw,
     )
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning", timeout_graceful_shutdown=1
+    )
+    server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     deadline = time.monotonic() + 10
