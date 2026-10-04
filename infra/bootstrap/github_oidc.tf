@@ -98,48 +98,25 @@ resource "aws_iam_role" "gha_deploy" {
 }
 
 # PowerUserAccess covers service resources but not IAM. IAM is granted only for ecp-* names,
-# so CI cannot modify roles or policies belonging to anything else in the account.
+# so CI cannot modify roles or policies belonging to anything else in the account, and every role
+# it creates must carry the workload boundary (PLAN.md R2, boundary.tf).
 resource "aws_iam_role_policy_attachment" "gha_deploy_poweruser" {
   role       = aws_iam_role.gha_deploy.name
   policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
 }
 
-data "aws_iam_policy_document" "gha_deploy_iam" {
-  statement {
-    sid = "ManageProjectIam"
-    actions = [
-      "iam:*Role*",
-      "iam:*Policy*",
-      "iam:*InstanceProfile*",
-    ]
-    resources = [
-      "arn:aws:iam::${local.account_id}:role/ecp-*",
-      "arn:aws:iam::${local.account_id}:policy/ecp-*",
-      "arn:aws:iam::${local.account_id}:instance-profile/ecp-*",
-    ]
-  }
-  statement {
-    sid       = "DenySelfModification"
-    effect    = "Deny"
-    actions   = ["iam:*"]
-    resources = [aws_iam_role.gha_deploy.arn, aws_iam_role.gha_plan.arn]
-  }
-  statement {
-    sid       = "ServiceLinkedRoles"
-    actions   = ["iam:CreateServiceLinkedRole"]
-    resources = ["arn:aws:iam::${local.account_id}:role/aws-service-role/*"]
-  }
-  statement {
-    sid       = "WriteState"
-    actions   = ["s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.tfstate.arn}/*"]
-  }
-}
-
+# A JSON template, so tests/r2_policies.py renders and evaluates the very same document
+# (ADR-0018). jsondecode fails the plan on invalid JSON.
 resource "aws_iam_role_policy" "gha_deploy_iam" {
-  name   = "ecp-scoped-iam-and-state"
-  role   = aws_iam_role.gha_deploy.id
-  policy = data.aws_iam_policy_document.gha_deploy_iam.json
+  name = "ecp-scoped-iam-and-state"
+  role = aws_iam_role.gha_deploy.id
+  policy = jsonencode(jsondecode(templatefile("${path.module}/policies/deploy-iam.json.tftpl", {
+    account_id       = local.account_id
+    boundary_arn     = local.workload_boundary_arn
+    deploy_role_arn  = aws_iam_role.gha_deploy.arn
+    plan_role_arn    = aws_iam_role.gha_plan.arn
+    state_bucket_arn = aws_s3_bucket.tfstate.arn
+  })))
 }
 
 resource "aws_iam_role_policy" "gha_deploy_state_read" {

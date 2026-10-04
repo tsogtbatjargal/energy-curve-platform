@@ -22,6 +22,7 @@ jobs:
       ECP_REQUIRE_POSTGRES: "1" # database tests fail rather than skip when Postgres is missing
       REDIS_URL: redis://localhost:6379/0
       ECP_REQUIRE_VALKEY: "1" # cache and event tests fail rather than skip when Valkey is missing
+      ECP_REQUIRE_CONFTEST: "1" # the policy-gate integration tests fail rather than skip
     services:
       postgres:
         image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
@@ -51,7 +52,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
         with:
-          install_args: python uv
+          install_args: python uv conftest
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .

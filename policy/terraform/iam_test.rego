@@ -43,3 +43,52 @@ test_replaced_admin_attachment_denied_both_orders if {
 		iam.deny == {"aws_iam_role_policy_attachment.bad: AdministratorAccess attachment is not allowed"} with input as {"resource_changes": [ok, bad]}
 	}
 }
+
+# --- PLAN.md R2: the workload permissions boundary ---
+
+boundary := "arn:aws:iam::123456789012:policy/ecp-workload-boundary"
+
+role(after, unknown) := {"address": "module.app.aws_iam_role.task", "mode": "managed", "type": "aws_iam_role", "change": {"actions": ["create"], "after": after, "after_unknown": unknown}}
+
+test_workload_role_with_the_boundary_allowed if {
+	count(iam.deny) == 0 with input as {"resource_changes": [role({"permissions_boundary": boundary}, {})]}
+		with data.ecp.stack as "batch"
+}
+
+test_workload_role_without_a_boundary_denied if {
+	every after in [{}, {"permissions_boundary": null}, {"permissions_boundary": ""}] {
+		count(iam.deny) == 1 with input as {"resource_changes": [role(after, {})]}
+			with data.ecp.stack as "batch"
+	}
+}
+
+test_workload_role_with_another_boundary_denied if {
+	every b in [
+		"arn:aws:iam::123456789012:policy/ecp-workload-boundary-v2",
+		"arn:aws:iam::123456789012:policy/other",
+		"arn:aws:iam::aws:policy/AdministratorAccess",
+	] {
+		count(iam.deny) == 1 with input as {"resource_changes": [role({"permissions_boundary": b}, {})]}
+			with data.ecp.stack as "demo"
+	}
+}
+
+test_workload_role_with_an_unknown_boundary_denied if {
+	count(iam.deny) == 1 with input as {"resource_changes": [role({}, {"permissions_boundary": true})]}
+		with data.ecp.stack as "batch"
+}
+
+test_bootstrap_roles_are_exempt if {
+	count(iam.deny) == 0 with input as {"resource_changes": [role({}, {})]}
+		with data.ecp.stack as "bootstrap"
+}
+
+test_a_missing_stack_name_counts_as_a_workload_stack if {
+	iam.deny == {"module.app.aws_iam_role.task: workload roles need permissions_boundary = the ecp-workload-boundary policy ARN, known at plan time (stack MISSING, PLAN.md R2)"} with input as {"resource_changes": [role({}, {})]}
+}
+
+test_deleted_roles_are_not_checked if {
+	gone := json.patch(role({}, {}), [{"op": "replace", "path": "/change/actions", "value": ["delete"]}])
+	count(iam.deny) == 0 with input as {"resource_changes": [gone]}
+		with data.ecp.stack as "batch"
+}

@@ -1,3 +1,8 @@
+import json
+import os
+import shutil
+from pathlib import Path
+
 import policy_gate
 import pytest
 
@@ -83,3 +88,34 @@ def test_missing_namespace_is_broken() -> None:
     code, lines = policy_gate.evaluate(PLAN, ns_results()[:-1])
     assert code == 2
     assert "not evaluated" in lines[0]
+
+
+def conftest_available() -> None:
+    if shutil.which("conftest") is None:
+        if os.environ.get("ECP_REQUIRE_CONFTEST"):
+            pytest.fail("ECP_REQUIRE_CONFTEST is set but conftest is not on PATH")
+        pytest.skip("conftest not on PATH")
+
+
+@pytest.mark.parametrize(
+    ("stack", "denied"), [("batch", True), ("demo", True), ("bootstrap", False)]
+)
+def test_the_stack_name_reaches_the_boundary_rule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], stack: str, denied: bool
+) -> None:
+    """PLAN.md R2 through the real gate: conftest sees --stack as data.ecp.stack."""
+    conftest_available()
+    role = {
+        "address": "aws_iam_role.task", "mode": "managed", "type": "aws_iam_role",
+        "change": {"actions": ["create"], "after": {"name": "ecp-task", "tags": {}},
+                   "after_unknown": {}},
+    }  # fmt: skip
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"resource_changes": [role]}))
+    policy = Path(__file__).parents[1] / "policy"
+    code = policy_gate.main(["policy_gate.py", str(plan), str(policy), "--stack", stack,
+                             "--stack-dir", str(tmp_path)])  # fmt: skip
+    out = capsys.readouterr().out
+    assert ("workload roles need permissions_boundary" in out) is denied
+    assert f"(stack {stack}," in out or not denied
+    assert code == 1 or not denied

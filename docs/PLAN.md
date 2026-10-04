@@ -132,6 +132,8 @@ So a hash of the plan JSON alone would not change when the actions changed.
 - A Rego rule denies any `aws_iam_role` in the `batch` or `demo` stacks without `permissions_boundary`.
 - `aws iam simulate-principal-policy` shows that creating a role without the boundary is denied, and so is attaching `AdministratorAccess`.
 
+*Status: implemented in code ([ADR-0018](adr/0018-workload-permissions-boundary.md)): `infra/bootstrap/boundary.tf` and `policies/*.json.tftpl`, plus the boundary rule in `policy/terraform/iam.rego`. The deny list also covers `DetachRolePolicy`, `DeleteRolePolicy` and `DeleteRolePermissionsBoundary`, and the rule covers every stack except `bootstrap`. The admin applies bootstrap, after which the `simulate-principal-policy` evidence is recorded in ADR-0018.*
+
 **R3. Third-party price data stays out of public outputs until redistribution rights are confirmed (ADR-0011).**
 - **Sources:** EIA serves WTI and Brent spot from Refinitiv (an LSEG business) and futures from NYMEX (CME Group). EIA's reuse policy excludes material licensed from third parties, and no redistribution grant was found.
 - **Rules until rights are confirmed:**

@@ -24,3 +24,5 @@ The deploy role can create an `ecp-*` role, attach any managed policy to it, and
 - Deny changes to the boundary policy itself.
 
 This must be in place before any workload stack is deployed: requirement R2 in [PLAN.md](../PLAN.md#requirements-before-workload-deployment).
+
+**Update (2026-10-04):** closed by [ADR-0018](0018-workload-permissions-boundary.md). It uses explicit Denies rather than conditional Allows, and adds `DetachRolePolicy`, `DeleteRolePolicy`, `DeleteRolePermissionsBoundary` and an Identity Center deny.
