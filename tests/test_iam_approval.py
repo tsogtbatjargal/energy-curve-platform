@@ -355,6 +355,15 @@ def test_an_expired_approval_fails(plan: dict, stack: Path) -> None:
     assert failing(result) == {POLICIES[0]} and "expired on" in result.failures[0]
 
 
+def test_a_future_dated_approval_fails_until_its_date(plan: dict, stack: Path) -> None:
+    approvals = approve_all(plan, stack)
+    early = [approval(plan, stack, POLICIES[0], approved_on=TODAY + timedelta(days=1),
+                      expires_on=TODAY + timedelta(days=30)), *approvals[1:]]  # fmt: skip
+    result = gate(plan, stack, early)
+    assert failing(result) == {POLICIES[0]} and "not valid before" in result.failures[0]
+    assert ia.check(plan, "batch", stack, early, today=TODAY + timedelta(days=1)).failures == []
+
+
 @pytest.mark.parametrize("over", [{"stack": "demo"}, {"address": "aws_iam_policy.other"}])
 def test_an_approval_for_another_stack_or_address_fails(
     plan: dict, stack: Path, over: dict

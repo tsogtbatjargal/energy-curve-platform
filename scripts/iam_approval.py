@@ -504,6 +504,8 @@ def check(
             result.failures.append(
                 f"{what}: approval fingerprint does not match this plan ({fp}); re-review"
             )
+        elif today < match.approved_on:
+            result.failures.append(f"{what}: approval not valid before {match.approved_on}")
         elif today > match.expires_on:
             result.failures.append(f"{what}: approval expired on {match.expires_on}")
         else:
