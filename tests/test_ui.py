@@ -428,3 +428,52 @@ def test_p2_4_an_expired_cursor_reset_drops_pruned_alerts(page: Page, db: str, s
         page.goto("about:blank")
     network = ("ERR_CONNECTION_REFUSED", "ERR_INCOMPLETE_CHUNKED_ENCODING")
     assert [e for e in errors if not any(n in e for n in network)] == []
+
+
+def test_p2_4b_a_delayed_stream_event_never_restores_a_pruned_alert(
+    page: Page, db: str, store: Path
+) -> None:
+    """Finding P2-4b (reverse order of P2-4): a stream event for an alert that a later snapshot
+    showed as pruned (at or below the snapshot's head, not listed) arrives after that snapshot.
+    It must not restore or announce the alert, and newer alerts must still arrive."""
+    import json as jsonlib
+
+    with psycopg.connect(db) as conn:
+        alerts.create_rule(conn, "WTI", "Spot", Decimal("95"))
+    replay(store, db, FEB_8, FEB_8, overrides=SPIKE)  # alert 1
+    with psycopg.connect(db) as conn:
+        cursor = alerts.log_state(conn).cursor()
+        (first,) = alerts.alerts_after(conn, 0)
+    event = {k: str(v) if not isinstance(v, int | type(None)) else v for k, v in first.items()}
+    delayed = (  # the event as the stream sent it, held back until after the pruning snapshot
+        f"event: alert_fired\nid: {cursor}\nretry: 300\ndata: {jsonlib.dumps(event)}\n\n"
+    )
+    prune_all(db)  # every snapshot from now on is empty, with alert 1 at or below its head
+    held: list[Any] = []
+
+    def stream(route: Any) -> None:
+        if held:
+            route.continue_()  # reconnects go to the real server
+        else:
+            held.append(route)
+
+    page.route("**/api/alerts/events*", stream)
+    errors: list[str] = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    with serve(db, None, poll_s=0.3) as base:
+        page.goto(f"{base}/")
+        expect(page.locator("body")).to_have_attribute("data-ready", "true")  # snapshot applied
+        tab(page, "Alerts")
+        while not held:
+            page.wait_for_timeout(20)
+        held[0].fulfill(status=200, headers={"content-type": "text/event-stream"}, body=delayed)
+        wait_processed(page, "alert-events", 1)
+        grid = page.locator("#grid-alerts")
+        expect(grid).not_to_contain_text("2024-02-08")
+        expect(page.get_by_test_id("toast")).to_be_hidden()
+        replay(store, db, FEB_9, FEB_12, overrides={("RWTC", FEB_12): "99.99"})  # alert 2
+        expect(page.get_by_test_id("toast")).to_contain_text("WTI Spot at 99.9900")
+        expect(grid).to_contain_text("2024-02-12")
+        expect(grid).not_to_contain_text("2024-02-08")
+        page.goto("about:blank")
+    assert [e for e in errors if "ERR_INCOMPLETE_CHUNKED_ENCODING" not in e] == []

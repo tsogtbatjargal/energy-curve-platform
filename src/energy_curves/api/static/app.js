@@ -9,6 +9,7 @@ const $ = sel => document.querySelector(sel)
 const state = {
     tab: 'curves', csrf: null, streams: {},
     alerts: new Map(), alertEpoch: null, alertCursor: null, alertRequest: 0, // event id -> alert
+    alertHead: 0, // head seq of the last applied snapshot: its truth extends up to here
     historyRequest: 0,
 }
 
@@ -174,6 +175,15 @@ function addAlert(alert, id) {
     return true
 }
 
+// A stream event inside the last snapshot's range (same epoch, at or below its head) for an
+// alert that snapshot did not list was pruned after it was sent: ignore it rather than restore
+// and re-announce it. Events above the head are new and always taken.
+function fromStream(alert, id) {
+    const [epoch, seq] = [id.split('-')[0], Number(id.split('-')[1])]
+    if (epoch === state.alertEpoch && seq <= state.alertHead && !state.alerts.has(id)) return false
+    return addAlert(alert, id)
+}
+
 // Each new alert is announced once, whichever path (stream or snapshot) brings it first.
 function announceAlert(alert) {
     toast(`Alert: ${alert.curve_id} ${alert.position} at ${alert.price} crossed ${alert.threshold}`)
@@ -200,6 +210,7 @@ async function loadAlerts() {
         const fresh = [...listed].filter(([id]) => announce && !state.alerts.has(id)).map(([, a]) => a)
         for (const [id, a] of listed) state.alerts.set(id, a)
         state.alertEpoch = epoch
+        state.alertHead = head
         state.alertCursor ??= body.cursor
         renderAlerts()
         for (const a of fresh) announceAlert(a)
@@ -300,7 +311,8 @@ async function main() {
     stream('alerts', `/api/alerts/events?after=${encodeURIComponent(state.alertCursor)}`, {
         alert_fired: e => {
             const alert = JSON.parse(e.data)
-            if (addAlert(alert, e.lastEventId)) announceAlert(alert)
+            if (fromStream(alert, e.lastEventId)) announceAlert(alert)
+            processed('alertEvents')
         },
         alerts_reset: () => loadAlerts(),
     })
