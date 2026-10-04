@@ -242,6 +242,32 @@ def test_a_variable_value_reached_through_a_local_is_fingerprinted(plan: dict, s
     assert failing(gate(plan, stack, approvals)) == {"aws_iam_policy.write"}
 
 
+def test_a_variable_in_a_dynamic_index_inside_a_local_is_fingerprinted(
+    plan: dict, stack: Path
+) -> None:
+    hcl = (
+        'variable "mode" {\n  type = string\n}\n\nlocals {\n'
+        '  by_mode = { read = ["s3:GetObject"], write = ["s3:*"] }\n'
+        "  actions = local.by_mode[var.mode]\n}\n"
+    )
+    values = {"mode": {"value": "read"}}
+    use_local(plan, stack, hcl, "actions", {"config": {"mode": {}}, "values": values})
+    approvals = approve_all(plan, stack)
+    plan["variables"]["mode"]["value"] = "write"  # a tfvars change: no source file changes
+    assert failing(gate(plan, stack, approvals)) == {"aws_iam_policy.write"}
+
+
+def test_an_unknown_value_in_a_dynamic_index_inside_a_local_fails(plan: dict, stack: Path) -> None:
+    hcl = (
+        "locals {\n  by_host = {}\n"
+        "  pick    = local.by_host[aws_s3_bucket.data.bucket_regional_domain_name]\n}\n"
+    )
+    use_local(plan, stack, hcl, "pick")
+    result = gate(plan, stack, approve_all(plan, stack))
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "aws_s3_bucket.data.bucket_regional_domain_name" in result.failures[0]
+
+
 def test_a_local_missing_from_the_source_fails(plan: dict, stack: Path) -> None:
     approvals = approve_all(plan, stack)
     root_resource(plan, "aws_iam_policy.write")["expressions"]["policy"]["references"].append(
@@ -260,18 +286,20 @@ def test_local_references_are_read_from_the_source_text(tmp_path: Path) -> None:
         "  doc  = <<-EOT\n    ${aws_s3_bucket.data[0].arn}\n  EOT\n"
         "  all  = aws_s3_bucket.data[*].id # var.in_a_comment\n"
         '  list = ["s3:GetObject"]\n'
+        "  idx  = local.m[var.k[local.j]].x\n"
         "}\n"
     )  # fmt: skip
     found = ia.Walker({"configuration": {"root_module": {}}}, tmp_path).locals_in(())
 
     def refs(name: str) -> set[str]:
-        return {ia.strip_keys(m.group()) for m in ia.TRAVERSAL.finditer(found[name])}
+        return ia.source_references(found[name])
 
     assert refs("tag") == {"var.token", "local.m"}
     assert refs("m") == {"module.label.id", "data.aws_caller_identity.me.account_id"}
     assert refs("doc") == {"aws_s3_bucket.data.arn"}
     assert refs("all") == {"aws_s3_bucket.data.id"}  # comments are not expressions
     assert refs("list") == set()
+    assert refs("idx") == {"local.m.x", "var.k", "local.j"}  # inside an index too
 
 
 def test_a_policy_marked_sensitive_by_terraform_fails(plan: dict, stack: Path) -> None:

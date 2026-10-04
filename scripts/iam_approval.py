@@ -91,12 +91,42 @@ def prefix(path: tuple[str, ...]) -> str:
     return "".join(f"module.{p}." for p in path)
 
 
-# A traversal in HCL source: var.x, local.x, module.x.out, data.t.n.attr, t.n.attr (keys stripped
-# later). Matches inside string literals too, which can only add to the closure.
-TRAVERSAL = re.compile(
-    r"(?<![\w.])(?:var|local|module|data|[a-z][a-z0-9]*_[a-z0-9_]*)(?:\.[A-Za-z_][\w-]*|\[[^\]]*\])+"
-)
+# Where a traversal starts in HCL source: var.x, local.x, module.x.out, data.t.n.attr, t.n.attr.
+# It matches inside string literals too, which can only add to the closure.
+HEAD = re.compile(r"(?<![\w.])(?:var|local|module|data|[a-z][a-z0-9]*_[a-z0-9_]*)(?=\s*[.\[])")
+STEP = re.compile(r"\s*\.\s*([A-Za-z_][\w-]*|\*)")
+INDEX = re.compile(r"\s*\[")
 NO_COMMENTS = SerializationOptions(with_comments=False)
+
+
+def closing(text: str, start: int) -> int:
+    """Index of the `]` that closes the `[` at `start` (or the end of the text)."""
+    depth = 0
+    for i in range(start, len(text)):
+        depth += {"[": 1, "]": -1}.get(text[i], 0)
+        if depth == 0:
+            return i
+    return len(text)
+
+
+def source_references(text: str) -> set[str]:
+    """Each traversal in source text, index keys skipped. Every traversal is found wherever it
+    starts, inside an index too: `local.m[var.k]` reaches `local.m` and `var.k`."""
+    found = set()
+    for head in HEAD.finditer(text):
+        parts, i = [head.group()], head.end()
+        while True:
+            if step := STEP.match(text, i):
+                if step.group(1) != "*":  # legacy splat `r.*.arn`
+                    parts.append(step.group(1))
+                i = step.end()
+            elif index := INDEX.match(text, i):
+                i = closing(text, index.end() - 1) + 1
+            else:
+                break
+        if len(parts) >= 2:
+            found.add(".".join(parts))
+    return found
 
 
 def references(expr: Any) -> Iterator[str]:
@@ -172,7 +202,7 @@ class Walker:
         text = self.locals_in(path).get(name)
         if text is None:
             raise GateError(f"{scoped}: not found in the source; run terraform init")
-        refs = sorted({strip_keys(r.group()) for r in TRAVERSAL.finditer(text)})
+        refs = sorted(source_references(text))
         self.closure.nodes[scoped] = {"source_references": refs}
         for ref in refs:
             self.reference(path, ref)
