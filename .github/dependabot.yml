@@ -22,3 +22,9 @@ updates:
     directory: /infra/bootstrap
     schedule:
       interval: weekly
+  # The batch image (ADR-0020): both FROM lines are pinned as tag@sha256 (the uv build stage and
+  # the Lambda Python base), so Dependabot proposes new digests when either tag moves.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -75,6 +75,8 @@ It explicitly denies all S3 actions on the Terraform state bucket. Everything el
 
   **Done on 2026-10-04,** after applying the approved saved plan (`1 added, 1 changed, 0 destroyed`): 13 cases, 0 differences, including these three. See [the apply and acceptance evidence](../evidence/r2-postapply-2026-10-04.md); re-run with `scripts/r2_accept.py`.
 
+  This is still a simulation: it does not see Organizations policies or resource-based policies. The first real proof is the first bounded role the deploy role creates, in M4e.
+
 ## Consequences and remaining risks
 - **The escalation in ADR-0010 is closed.** Every role the deploy role creates or changes carries the boundary, and the boundary cannot be edited, removed or swapped for another.
 - **Resource-based policies are not limited by boundaries.** PowerUserAccess can write bucket, key, queue and Lambda policies that grant a bounded role (or another principal) access outside the boundary. Boundaries don't solve this. Workload stacks are reviewed through the policy gate, and conftest's storage rules cover bucket policies.
