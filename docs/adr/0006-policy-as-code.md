@@ -27,7 +27,7 @@ S3 is checked **per bucket**. Each bucket must have its own public access block 
 
 For new buckets the companion's `bucket` value is unknown until apply, so the configuration references are what matter. A companion that can be traced neither way is a violation, and the check does not assume it covers anything.
 
-IAM policies whose JSON is unknown at plan time produce a warning. That is acceptable for the bootstrap stack only. Before any workload stack is deployed, requirement R1 in [PLAN.md](../PLAN.md#requirements-before-workload-deployment) must be met.
+IAM policies whose JSON is unknown at plan time produce a warning from Rego. Since R1 ([ADR-0017](0017-iam-approval-fingerprint-gate.md)), `policy_gate.py --stack <name>` also fails them in every workload stack unless a reviewed approval matches their fingerprint. The bootstrap stack stays exempt.
 
 The policies are unit-tested with `opa test` and checked with `opa check --strict` and `opa fmt --fail`. `scripts/policy_gate.py` runs conftest and exits 0 on pass, 1 on a violation, and 2 when the run proves nothing (no resources in the plan, or an expected policy namespace not loaded), so the gate cannot pass vacuously. `trivy config` runs alongside as an off-the-shelf scanner.
 
