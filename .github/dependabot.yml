@@ -28,3 +28,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The Lambda base stays on Python 3.12, the project's runtime (ADR-0020). Dependabot labels
+      # 3.12 -> 3.14 a semver-minor update; ignoring minor and major updates keeps the Python
+      # version fixed while new digests for the 3.12 tag still arrive.
+      - dependency-name: lambda/python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
