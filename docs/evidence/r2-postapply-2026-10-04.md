@@ -54,4 +54,11 @@ boundary policy: name=ecp-workload-boundary path=/ default=v1 attachments=0 boun
 
 The boundary policy is live at version v1, attached to nothing yet. Workload roles will reference it from M4 on.
 
-**This is a simulation.** `simulate-principal-policy` evaluates the role's identity policies and the context supplied. It does not see AWS Organizations policies (SCPs, RCPs) or resource-based policies. So the first real proof is the first bounded role the deploy role creates, in the M4 first apply (M4e).
+**This is a simulation.** `simulate-principal-policy` evaluates the role's attached policies, any service control policies (SCPs) in scope, and the context supplied. It has limits ([IAM User Guide, "How the IAM policy simulator works"](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_testing-policies.html); [SimulatePrincipalPolicy API](https://docs.aws.amazon.com/IAM/latest/APIReference/API_SimulatePrincipalPolicy.html), checked 2026-10-04):
+- **No resource control policies (RCPs).** The simulator does not support them.
+- **No resource-based policies.** It does not fetch them, and simulating them "isn't supported for IAM roles", which is what this check simulates.
+- **Live behaviour can differ** for VPC endpoint policies, role chaining, and multiple resource-based policies on one resource.
+
+**SCPs do not apply here.** This account is the organization's management account (checked read-only with `organizations:DescribeOrganization`). AWS Organizations cannot restrict "any action performed by the management account" with SCPs, so the simulator's SCP evaluation changes nothing in this account.
+
+So the first real proof is the first bounded role the deploy role creates, in the M4 first apply (M4e).

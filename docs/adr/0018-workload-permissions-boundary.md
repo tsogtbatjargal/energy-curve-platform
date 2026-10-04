@@ -75,7 +75,7 @@ It explicitly denies all S3 actions on the Terraform state bucket. Everything el
 
   **Done on 2026-10-04,** after applying the approved saved plan (`1 added, 1 changed, 0 destroyed`): 13 cases, 0 differences, including these three. See [the apply and acceptance evidence](../evidence/r2-postapply-2026-10-04.md); re-run with `scripts/r2_accept.py`.
 
-  This is still a simulation: it does not see Organizations policies or resource-based policies. The first real proof is the first bounded role the deploy role creates, in M4e.
+  This is still a simulation. It evaluates SCPs in scope, but SCPs cannot restrict this account, which is the organization's management account. It does not support resource control policies, and it cannot simulate resource-based policies for an IAM role. The first real proof is the first bounded role the deploy role creates, in M4e. Details are in the evidence.
 
 ## Consequences and remaining risks
 - **The escalation in ADR-0010 is closed.** Every role the deploy role creates or changes carries the boundary, and the boundary cannot be edited, removed or swapped for another.
