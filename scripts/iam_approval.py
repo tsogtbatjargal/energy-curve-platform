@@ -8,18 +8,19 @@ The fingerprint is the SHA-256 of a canonical JSON document of:
 1. identity: stack, address, resource type, attribute, format version;
 2. the dependency closure in the plan's `configuration`: from the attribute's references,
    transitively, every resource and data source reached (full expressions), every module call
-   reached (source, version constraint, input expressions), module outputs and variables;
+   reached (source, version constraint, input expressions), module outputs and variables, and
+   every local reached, which plan JSON omits: its references are read from the source;
 3. inputs: the plan's `variables` values for root variables in the closure, and the resolved
    version of every registry module in the closure (`.terraform/modules/modules.json`);
 4. source: the SHA-256 of every `*.tf`/`*.tf.json` in the stack root and in every local module
    in the closure, plus `.terraform.lock.hcl`. Plan JSON omits locals and literals inside
-   function calls (`jsonencode`), so only the source covers them. Registry modules in the closure
-   are hashed too, from their downloaded copy, so a re-published or moved version tag cannot
-   change a policy under an existing approval.
+   function calls (`jsonencode`), so only the source covers their text. Registry modules in the
+   closure are hashed too, from their downloaded copy, so a re-published or moved version tag
+   cannot change a policy under an existing approval.
 
-Gate rules beyond the fingerprint: a sensitive variable in the closure fails outright (its value
-is never hashed), and every unknown value the policy depends on must be the `arn`, `id` or
-`name` of a managed resource in the same stack.
+Gate rules beyond the fingerprint: a sensitive variable in the closure, or a policy Terraform
+marks sensitive, fails outright (its value is never hashed), and every unknown value the policy
+depends on must be the `arn`, `id` or `name` of a managed resource in the same stack.
 
 Plans can hold sensitive values in plain text, so nothing here prints plan contents: only
 addresses, attribute names, file paths and fingerprints.
@@ -37,6 +38,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import hcl2
+from hcl2.utils import SerializationOptions
 
 FORMAT = "ecp-iam-approval-v1"
 MAX_APPROVAL_DAYS = 30
@@ -87,6 +91,14 @@ def prefix(path: tuple[str, ...]) -> str:
     return "".join(f"module.{p}." for p in path)
 
 
+# A traversal in HCL source: var.x, local.x, module.x.out, data.t.n.attr, t.n.attr (keys stripped
+# later). Matches inside string literals too, which can only add to the closure.
+TRAVERSAL = re.compile(
+    r"(?<![\w.])(?:var|local|module|data|[a-z][a-z0-9]*_[a-z0-9_]*)(?:\.[A-Za-z_][\w-]*|\[[^\]]*\])+"
+)
+NO_COMMENTS = SerializationOptions(with_comments=False)
+
+
 def references(expr: Any) -> Iterator[str]:
     """Every reference string anywhere in an expression tree (blocks nest lists of dicts)."""
     if isinstance(expr, dict):
@@ -114,10 +126,13 @@ class Closure:
 
 
 class Walker:
-    def __init__(self, plan: dict[str, Any]) -> None:
+    def __init__(self, plan: dict[str, Any], stack_dir: Path) -> None:
         self.root = plan["configuration"]["root_module"]
+        self.stack_dir = stack_dir
+        self.modules = modules_json(stack_dir)
         self.closure = Closure()
         self.seen: set[tuple[tuple[str, ...], str]] = set()
+        self.locals: dict[tuple[str, ...], dict[str, str]] = {}
 
     def module(self, path: tuple[str, ...]) -> dict[str, Any]:
         node = self.root
@@ -137,8 +152,8 @@ class Walker:
         head = parts[0]
         if head in {"count", "each", "path", "terraform", "self"}:
             return
-        if head == "local":  # absent from plan JSON; the source hash covers locals
-            self.closure.nodes[f"{prefix(path)}local.{parts[1]}"] = "covered by source"
+        if head == "local":
+            self.local(path, parts[1])
         elif head == "var":
             self.variable(path, parts[1])
         elif head == "module":
@@ -149,6 +164,49 @@ class Walker:
             self.resource(path, "managed", head, parts[1], parts[2] if len(parts) > 2 else None)
         else:
             self.closure.nodes[f"{prefix(path)}{ref}"] = "unresolved reference"
+
+    def local(self, path: tuple[str, ...], name: str) -> None:
+        """Plan JSON omits locals, so follow the references in the local's source text. Its text
+        itself is in the fingerprint through the source hash of its directory."""
+        scoped = f"{prefix(path)}local.{name}"
+        text = self.locals_in(path).get(name)
+        if text is None:
+            raise GateError(f"{scoped}: not found in the source; run terraform init")
+        refs = sorted({strip_keys(r.group()) for r in TRAVERSAL.finditer(text)})
+        self.closure.nodes[scoped] = {"source_references": refs}
+        for ref in refs:
+            self.reference(path, ref)
+
+    def locals_in(self, path: tuple[str, ...]) -> dict[str, str]:
+        """Local name -> its expression as text, for the module at `path`."""
+        if path not in self.locals:
+            found: dict[str, str] = {}
+            for f in terraform_files(self.scope_dir(path)):
+                try:
+                    if f.name.endswith(".tf.json"):
+                        blocks = json.loads(f.read_text()).get("locals", [])
+                    else:
+                        with f.open() as fh:
+                            blocks = hcl2.load(fh, serialization_options=NO_COMMENTS).get(
+                                "locals", []
+                            )
+                except Exception as exc:  # Terraform parsed it; fail closed if we cannot
+                    raise GateError(f"{f}: cannot read its locals ({type(exc).__name__})") from exc
+                for block in blocks if isinstance(blocks, list) else [blocks]:
+                    found.update(
+                        (k, json.dumps(v)) for k, v in block.items() if not k.startswith("__")
+                    )
+            self.locals[path] = found
+        return self.locals[path]
+
+    def scope_dir(self, path: tuple[str, ...]) -> Path:
+        if not path:
+            return self.stack_dir
+        key = ".".join(path)
+        entry = self.modules.get(key)
+        if entry is None or not (self.stack_dir / entry["Dir"]).is_dir():
+            raise GateError(f"module {key} not downloaded; run terraform init")
+        return self.stack_dir / entry["Dir"]
 
     def variable(self, path: tuple[str, ...], name: str) -> None:
         config = self.module(path).get("variables", {}).get(name, {})
@@ -207,9 +265,9 @@ class Walker:
         self.follow(path, config.get("for_each_expression"))
 
 
-def closure_of(plan: dict[str, Any], address: str, attribute: str) -> Closure:
+def closure_of(plan: dict[str, Any], stack_dir: Path, address: str, attribute: str) -> Closure:
     path, local = split_address(address)
-    walker = Walker(plan)
+    walker = Walker(plan, stack_dir)
     config = next(
         (r for r in walker.module(path).get("resources", []) if r.get("address") == local), None
     )
@@ -246,7 +304,7 @@ def is_local_source(source: str) -> bool:
 def fingerprint_document(
     plan: dict[str, Any], stack: str, stack_dir: Path, address: str, attribute: str
 ) -> tuple[dict[str, Any], Closure]:
-    closure = closure_of(plan, address, attribute)
+    closure = closure_of(plan, stack_dir, address, attribute)
     rc = next(r for r in plan["resource_changes"] if r["address"] == address)
     modules = modules_json(stack_dir)
     registry: dict[str, Any] = {}
@@ -377,6 +435,13 @@ def attribute_unknown(plan: dict[str, Any], address: str, attribute: str) -> boo
     )
 
 
+def attribute_sensitive(plan: dict[str, Any], address: str, attribute: str) -> bool:
+    """Terraform carries sensitivity marks into unknown values, through locals and modules."""
+    rc = next(r for r in plan["resource_changes"] if r["address"] == address)
+    marks = rc["change"].get("after_sensitive")
+    return marks is True or (isinstance(marks, dict) and marks.get(attribute) is True)
+
+
 def check(
     plan: dict[str, Any],
     stack: str,
@@ -401,6 +466,12 @@ def check(
             result.failures.append(
                 f"{what}: depends on sensitive variable(s) {sorted(closure.sensitive)};"
                 " IAM policies must not depend on secrets (no approval can override this)"
+            )
+            continue
+        if attribute_sensitive(plan, address, attribute):
+            result.failures.append(
+                f"{what}: marked sensitive by Terraform; IAM policies must not depend on secrets"
+                " (no approval can override this)"
             )
             continue
         bad = sorted(

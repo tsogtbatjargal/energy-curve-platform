@@ -179,7 +179,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
         with:
-          install_args: terraform conftest python
+          install_args: terraform conftest python uv
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
@@ -202,8 +202,9 @@ jobs:
           terraform show -json tfplan > plan.json
       - name: policy gate
         # --stack selects the R1 rules: unknown IAM policies fail in workload stacks unless
-        # policy/approvals/iam_unknown.json approves their fingerprint (ADR-0017).
-        run: python ../../scripts/policy_gate.py plan.json ../../policy --stack "$STACK"
+        # policy/approvals/iam_unknown.json approves their fingerprint (ADR-0017). Only the gate's
+        # dependency group (python-hcl2, to read locals from the source) is installed.
+        run: uv run --locked --only-group gate python ../../scripts/policy_gate.py plan.json ../../policy --stack "$STACK"
       - name: remove plan artifacts
         if: always()
         run: rm -f tfplan plan.json

@@ -8,6 +8,10 @@ credentials. Regenerate it after editing the stack (the opt-in test below checks
     terraform show -json /tmp/fx.tfplan > ../fixture-plan.json
     cp .terraform/modules/modules.json ../fixture-modules.json
 
+`registry/cloudposse-label-0.25.0` holds the `*.tf` files and LICENSE (Apache-2.0) of the
+registry module as `terraform init` downloads it (tag 0.25.0, commit 488ab91e), so the gate reads
+real third-party locals.
+
 Each case changes one input and must fail the gate, unless it says it passes.
 """
 
@@ -40,9 +44,8 @@ def stack(tmp_path: Path) -> Path:
     d = tmp_path / "stack"
     shutil.copytree(FIXTURE / "stack", d, ignore=shutil.ignore_patterns(".terraform"))
     modules = d / ".terraform" / "modules"
-    (modules / "label").mkdir(parents=True)
+    shutil.copytree(FIXTURE / "registry" / "cloudposse-label-0.25.0", modules / "label")
     shutil.copy(FIXTURE / "fixture-modules.json", modules / "modules.json")
-    (modules / "label" / "main.tf").write_text("# stand-in for the downloaded registry module\n")
     return d
 
 
@@ -196,6 +199,89 @@ def test_an_unknown_value_that_is_not_an_arn_id_or_name_fails(plan: dict, stack:
     result = gate(plan, stack, approve_all(plan, stack))
     assert failing(result) == {"aws_iam_policy.write"}
     assert "aws_s3_bucket.data.bucket_regional_domain_name" in result.failures[0]
+
+
+def use_local(plan: dict, stack: Path, hcl: str, name: str, variable: dict | None = None) -> None:
+    """Append `hcl` (a variable and a locals block) to main.tf and make aws_iam_policy.write
+    reference `local.<name>`, as Terraform records it (verified on a real 1.15.8 plan)."""
+    tf = stack / "main.tf"
+    tf.write_text(tf.read_text() + "\n" + hcl)
+    if variable is not None:
+        plan["configuration"]["root_module"]["variables"].update(variable["config"])
+        plan["variables"].update(variable["values"])
+    root_resource(plan, "aws_iam_policy.write")["expressions"]["policy"]["references"].append(
+        f"local.{name}"
+    )
+
+
+def test_a_sensitive_variable_reached_through_a_local_fails(plan: dict, stack: Path) -> None:
+    hcl = 'variable "token" {\n  sensitive = true\n}\n\nlocals {\n  tag = var.token\n}\n'
+    use_local(plan, stack, hcl, "tag", {"config": {"token": {"sensitive": True}},
+                                        "values": {"token": {"value": "t"}}})  # fmt: skip
+    result = gate(plan, stack, approve_all(plan, stack))
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "sensitive variable(s) ['var.token']" in result.failures[0]
+
+
+def test_an_unknown_value_reached_through_a_local_must_be_an_arn_id_or_name(
+    plan: dict, stack: Path
+) -> None:
+    hcl = "locals {\n  host = aws_s3_bucket.data.bucket_regional_domain_name\n}\n"
+    use_local(plan, stack, hcl, "host")
+    result = gate(plan, stack, approve_all(plan, stack))
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "aws_s3_bucket.data.bucket_regional_domain_name" in result.failures[0]
+
+
+def test_a_variable_value_reached_through_a_local_is_fingerprinted(plan: dict, stack: Path) -> None:
+    hcl = 'variable "extra" {\n  type = string\n}\n\nlocals {\n  extra = var.extra\n}\n'
+    values = {"extra": {"value": "s3:GetObject"}}
+    use_local(plan, stack, hcl, "extra", {"config": {"extra": {}}, "values": values})
+    approvals = approve_all(plan, stack)
+    plan["variables"]["extra"]["value"] = "s3:*"  # a tfvars change: no source file changes
+    assert failing(gate(plan, stack, approvals)) == {"aws_iam_policy.write"}
+
+
+def test_a_local_missing_from_the_source_fails(plan: dict, stack: Path) -> None:
+    approvals = approve_all(plan, stack)
+    root_resource(plan, "aws_iam_policy.write")["expressions"]["policy"]["references"].append(
+        "local.gone"
+    )
+    result = gate(plan, stack, approvals)
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "local.gone: not found in the source" in result.failures[0]
+
+
+def test_local_references_are_read_from_the_source_text(tmp_path: Path) -> None:
+    (tmp_path / "locals.tf").write_text(
+        "locals {\n"
+        '  tag  = "x-${var.token}-${lookup(local.m, "k", "}")}"\n'
+        "  m    = { a = module.label.id, b = data.aws_caller_identity.me.account_id }\n"
+        "  doc  = <<-EOT\n    ${aws_s3_bucket.data[0].arn}\n  EOT\n"
+        "  all  = aws_s3_bucket.data[*].id # var.in_a_comment\n"
+        '  list = ["s3:GetObject"]\n'
+        "}\n"
+    )  # fmt: skip
+    found = ia.Walker({"configuration": {"root_module": {}}}, tmp_path).locals_in(())
+
+    def refs(name: str) -> set[str]:
+        return {ia.strip_keys(m.group()) for m in ia.TRAVERSAL.finditer(found[name])}
+
+    assert refs("tag") == {"var.token", "local.m"}
+    assert refs("m") == {"module.label.id", "data.aws_caller_identity.me.account_id"}
+    assert refs("doc") == {"aws_s3_bucket.data.arn"}
+    assert refs("all") == {"aws_s3_bucket.data.id"}  # comments are not expressions
+    assert refs("list") == set()
+
+
+def test_a_policy_marked_sensitive_by_terraform_fails(plan: dict, stack: Path) -> None:
+    """Terraform propagates sensitivity marks into unknown values (verified on 1.15.8):
+    e.g. a local wrapping a literal in sensitive(), which names no variable."""
+    rc = next(r for r in plan["resource_changes"] if r["address"] == "aws_iam_policy.write")
+    rc["change"]["after_sensitive"] = {"policy": True}
+    result = gate(plan, stack, approve_all(plan, stack))
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "marked sensitive" in result.failures[0]
 
 
 def test_an_unknown_value_from_another_data_source_fails(plan: dict, stack: Path) -> None:
