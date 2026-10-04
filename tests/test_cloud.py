@@ -160,3 +160,12 @@ def test_the_image_pins_its_base_images_and_installs_locked_hashes() -> None:
     assert froms and all("@sha256:" in f for f in froms)
     assert "--locked" in dockerfile and "--require-hashes" in dockerfile
     assert "--no-dev" in dockerfile
+    assert "dnf -y upgrade --releasever=latest" in dockerfile  # OS fixes past the release lock
+
+
+def test_dependabot_watches_the_image_base_digests() -> None:
+    config = (ROOT / ".github" / "dependabot.yml").read_text()
+    assert "package-ecosystem: docker" in config
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    pins = [line.split()[1] for line in dockerfile.splitlines() if line.startswith("FROM ")]
+    assert len(pins) == 2 and all(":" in p.split("@")[0] for p in pins)  # tag@digest, both

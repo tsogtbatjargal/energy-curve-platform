@@ -6,6 +6,10 @@
 FROM ghcr.io/astral-sh/uv:0.12.17@sha256:1194b357d63b7bea6c121d8eef5d08d29c26ffbcfc64ec5ebcefd642ea759edb AS uv
 
 FROM public.ecr.aws/lambda/python:3.12@sha256:331a4f671a43eae58b8dfe1f3022928fe259540f535512d941ff0ec9352ab047
+# OS security updates at build time. Amazon Linux 2023 locks its repositories to the image's
+# release, so a plain upgrade misses fixes published since; --releasever=latest reaches them. The
+# deployed image is identified by its own digest, and CI scans it (trivy, fixed HIGH/CRITICAL).
+RUN dnf -y upgrade --releasever=latest && dnf clean all
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /build
 COPY pyproject.toml uv.lock ./

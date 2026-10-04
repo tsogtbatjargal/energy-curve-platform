@@ -108,8 +108,9 @@ jobs:
         run: actionlint
 
   image:
-    # The batch image (M4, ADR-0020): build it and run both entry points on a file store. The
-    # pipeline step runs with no network, as it needs none.
+    # The batch image (M4, ADR-0020): build it, scan it for fixed HIGH/CRITICAL vulnerabilities,
+    # and run both entry points on a file store. The pipeline step runs with no network, as it
+    # needs none. A required check.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -117,8 +118,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+        with:
+          install_args: trivy
       - name: build
         run: docker build --platform linux/amd64 -t ecp-batch:ci .
+      - name: scan the image for fixed HIGH/CRITICAL vulnerabilities
+        run: trivy image --exit-code 1 --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed ecp-batch:ci
       - name: smoke test both entry points
         run: |
           store="$(mktemp -d)" && chmod 777 "$store"
