@@ -1,19 +1,18 @@
 """The PLAN.md R2 policies as Terraform renders them, with synthetic account values (ADR-0018).
 
-Terraform renders `infra/bootstrap/policies/*.json.tftpl` with templatefile(). These templates
-use only `${name}` placeholders, so this renders the very same files and fails on anything else
-(`%{` directives, unknown names), rather than diverge from Terraform.
+Rendering is scripts/policy_templates.py, shared with scripts/bootstrap_plan_check.py, so the
+tests, the AWS simulation and the pre-apply plan check all read the same template files.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
+import policy_templates
+
 ROOT = Path(__file__).parents[1]
-POLICIES = ROOT / "infra" / "bootstrap" / "policies"
 FIXTURES = Path(__file__).parent / "fixtures" / "aws_managed"
 
 ACCOUNT = "123456789012"
@@ -30,28 +29,14 @@ VALUES = {
     "plan_role_arn": PLAN_ROLE_ARN,
     "state_bucket_arn": f"arn:aws:s3:::{STATE_BUCKET}",
 }
-PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
-
-
-def template(name: str) -> str:
-    return (POLICIES / f"{name}.json.tftpl").read_text()
 
 
 def placeholders(name: str) -> set[str]:
-    return set(PLACEHOLDER.findall(template(name)))
+    return policy_templates.placeholders(name)
 
 
 def render(name: str, values: dict[str, str] = VALUES) -> dict[str, Any]:
-    text = template(name)
-    if "%{" in text:
-        raise ValueError(f"{name}: template directives are not supported here")
-
-    def value(m: re.Match[str]) -> str:
-        if m.group(1) not in values:
-            raise ValueError(f"{name}: unknown placeholder {m.group(0)}")
-        return values[m.group(1)]
-
-    return json.loads(PLACEHOLDER.sub(value, text))
+    return policy_templates.render(name, values)
 
 
 def power_user() -> dict[str, Any]:
