@@ -61,6 +61,7 @@ It explicitly denies all S3 actions on the Terraform state bucket. Everything el
   3. `python scripts/policy_gate.py /tmp/bootstrap-r2.json policy --stack bootstrap --stack-dir infra/bootstrap` must pass.
   4. `python scripts/bootstrap_plan_check.py /tmp/bootstrap-r2.json` must print `OK`. Anything else stops the apply:
      - any change other than creating `aws_iam_policy.workload_boundary` and updating only `policy` on `aws_iam_role_policy.gha_deploy_iam`;
+     - a boundary not named exactly `ecp-workload-boundary` at path `/`, or with a name unknown at plan time. Another name or path is another ARN than the one the deploy policy and workload stacks use;
      - any output change other than the new `workload_boundary_arn`;
      - drift, deferred changes, or an errored plan;
      - a planned policy that is unknown, or that differs from its template.

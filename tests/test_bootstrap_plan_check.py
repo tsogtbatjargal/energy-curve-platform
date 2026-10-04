@@ -39,9 +39,9 @@ def plan() -> dict:
         "resource_changes": [
             rc("aws_s3_bucket.tfstate", ["no-op"], {"bucket": "b"}, {"bucket": "b"}),
             rc("aws_iam_role.gha_deploy", ["no-op"], {"name": "d"}, {"name": "d"}),
-            rc(BOUNDARY, ["create"], None,
-               {"name": "ecp-workload-boundary", "policy": json.dumps(r2.boundary())},
-               {"arn": True, "id": True}),
+            rc(BOUNDARY, ["create"], None,  # as in a real 1.15.8 plan: name_prefix unknown, absent
+               {"name": "ecp-workload-boundary", "path": "/", "policy": json.dumps(r2.boundary())},
+               {"arn": True, "id": True, "name_prefix": True}),
             rc(DEPLOY, ["update"], {"name": "n", "policy": json.dumps(old)},
                {"name": "n", "policy": json.dumps(r2.render("deploy-iam"))}),
         ],
@@ -109,6 +109,24 @@ def mutate_prior_state(plan: dict) -> None:
     plan["prior_state"]["values"]["root_module"]["resources"].pop(0)
 
 
+def boundary_after(plan: dict) -> dict:
+    return change(plan, BOUNDARY)["change"]["after"]
+
+
+def mutate_boundary_name(plan: dict) -> None:
+    boundary_after(plan)["name"] = "ecp-workload-boundary-v2"
+
+
+def mutate_boundary_path(plan: dict) -> None:
+    boundary_after(plan)["path"] = "/workload/"
+
+
+def mutate_boundary_name_prefix(plan: dict) -> None:
+    after = boundary_after(plan)
+    after["name"], after["name_prefix"] = None, "ecp-workload-boundary"
+    change(plan, BOUNDARY)["change"]["after_unknown"]["name"] = True
+
+
 @pytest.mark.parametrize(
     ("mutate", "why"),
     [
@@ -123,6 +141,10 @@ def mutate_prior_state(plan: dict) -> None:
         (mutate_policy_content, "differs from the deploy-iam template"),
         (mutate_unknown_policy, "policy unknown at plan time"),
         (mutate_prior_state, "prior state lacks"),
+        # the boundary's identity: another name or path is another policy ARN
+        (mutate_boundary_name, "boundary name must be ecp-workload-boundary"),
+        (mutate_boundary_path, "boundary path must be /"),
+        (mutate_boundary_name_prefix, "boundary name must be ecp-workload-boundary"),
     ],
 )
 def test_any_other_difference_stops_the_apply(plan: dict, mutate: Any, why: str) -> None:

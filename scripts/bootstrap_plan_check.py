@@ -4,8 +4,9 @@
     python scripts/bootstrap_plan_check.py <plan.json>
 
 Exit 0 only when the plan does exactly what was reviewed:
-- resource changes: create `aws_iam_policy.workload_boundary`, and update
-  `aws_iam_role_policy.gha_deploy_iam` with only `policy` changing. Nothing else: no other
+- resource changes: create `aws_iam_policy.workload_boundary`, named exactly
+  `ecp-workload-boundary` at path `/` (the ARN the deploy policy and workload stacks name), and
+  update `aws_iam_role_policy.gha_deploy_iam` with only `policy` changing. Nothing else: no other
   creates, updates, replacements or deletions;
 - output changes: only the new `workload_boundary_arn`;
 - no drift, no deferred changes, not an errored plan;
@@ -32,6 +33,8 @@ EXPECTED = {  # address -> (actions, attributes allowed to change; None = new re
     "aws_iam_role_policy.gha_deploy_iam": (["update"], {"policy"}),
 }
 EXPECTED_OUTPUTS = {"workload_boundary_arn": ["create"]}
+BOUNDARY = "aws_iam_policy.workload_boundary"
+BOUNDARY_NAME, BOUNDARY_PATH = "ecp-workload-boundary", "/"
 TEMPLATES = {
     "aws_iam_policy.workload_boundary": "workload-boundary",
     "aws_iam_role_policy.gha_deploy_iam": "deploy-iam",
@@ -68,6 +71,18 @@ def template_values(plan: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def boundary_identity(change: dict[str, Any]) -> list[str]:
+    """The boundary is named by ARN everywhere (the deploy policy, workload stacks, the Rego
+    rule), and its ARN is fixed by name and path; another name or path is another policy."""
+    after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
+    problems = []
+    if after.get("name") != BOUNDARY_NAME or unknown.get("name") or after.get("name_prefix"):
+        problems.append(f"{BOUNDARY}: boundary name must be {BOUNDARY_NAME}, known at plan time")
+    if after.get("path") != BOUNDARY_PATH or unknown.get("path"):
+        problems.append(f"{BOUNDARY}: boundary path must be {BOUNDARY_PATH}")
+    return problems
+
+
 def digest(document: Any) -> str:
     return hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -97,6 +112,8 @@ def check(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
             problems.append(f"{address}: {'+'.join(actions)}, expected {'+'.join(want_actions)}")
         elif allowed is not None and not (attrs and attrs <= allowed):
             problems.append(f"{address}: changes {sorted(attrs)}, only {sorted(allowed)} allowed")
+    if BOUNDARY in seen:
+        problems += boundary_identity(seen[BOUNDARY]["change"])
     for address in sorted(set(EXPECTED) - set(seen)):
         problems.append(f"missing expected change: {address}")
     for name, change in (plan.get("output_changes") or {}).items():
