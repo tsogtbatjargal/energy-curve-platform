@@ -53,3 +53,5 @@ boundary policy: name=ecp-workload-boundary path=/ default=v1 attachments=0 boun
 - **Still allowed:** the destroy steps for a bounded role, so teardown keeps working.
 
 The boundary policy is live at version v1, attached to nothing yet. Workload roles will reference it from M4 on.
+
+**This is a simulation.** `simulate-principal-policy` evaluates the role's identity policies and the context supplied. It does not see AWS Organizations policies (SCPs, RCPs) or resource-based policies. So the first real proof is the first bounded role the deploy role creates, in the M4 first apply (M4e).

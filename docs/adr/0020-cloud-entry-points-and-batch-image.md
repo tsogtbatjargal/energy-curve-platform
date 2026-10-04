@@ -43,7 +43,15 @@ Step Functions passes its execution name as `run_id` to both steps. It is checke
 - **`USER 1000:1000`.** Lambda always runs functions as its own unprivileged user, but Fargate runs the image's user. trivy's `DS-0002` (root user) flagged the first build.
 - **The build context is an allowlist** (`.dockerignore`): `*`, then only `pyproject.toml`, `uv.lock` and `src/`. `data/` (real prices), `.env`, virtualenvs and plan files cannot enter the image. A test checks the allowlist and the digest pins.
 - **x86_64, not ARM64.** The CI runners and the development machine are x86_64, so the image builds and is smoke-tested natively, without emulation. ARM64 Fargate would save about $0.05 a month at this usage, which is not worth an emulated build.
-- **Size:** about 0.9 GB, mostly the Lambda base. ECR stores it for about $0.09 per image per month, and M4c keeps at most two images.
+- **Size:** about 0.9 GB, mostly the Lambda base. ECR stores it for about $0.09 per image per month, and M4c keeps at most two images. The image also carries API-only dependencies (fastapi, uvicorn, redis, psycopg) that the batch doesn't use. That costs size and attack surface, not correctness; splitting the dependency groups would remove them, and that is tracked.
+
+### Keeping the image current (added after review)
+- **OS patches at build time.** The Dockerfile runs `dnf -y upgrade --releasever=latest`. Amazon Linux 2023 locks its repositories to the image's release, so a plain upgrade misses fixes published since.
+  - Verified on 2026-10-04: the pinned base had 8 fixed HIGH vulnerabilities (`curl`/`libcurl`, `pcre2`, `rpm`).
+  - A plain upgrade left all 8; `--releasever=latest` left 0.
+  - The trade-off: the base layer's package versions now depend on the build date. The deployed artifact is identified exactly by its image digest.
+- **The image is scanned.** The `image` job runs `trivy image` and fails on any fixed HIGH or CRITICAL vulnerability. `image` is a required check (user decision, 2026-10-04).
+- **Dependabot watches both base digests.** Both `FROM` lines are `tag@sha256`, and the `docker` ecosystem in `.github/dependabot.yml` proposes new digests when either tag moves.
 
 ## Verification
 - **`tests/test_cloud.py`** (both steps; S3 through moto, as in ADR-0019):
@@ -61,5 +69,12 @@ Step Functions passes its execution name as `run_id` to both steps. It is checke
 
 ## Consequences
 - **No runner changes.** The Lambda/Fargate split lives entirely in `cloud.py`.
+- **Staging can be rewritten** when a Lambda is retried or overlaps another invocation for the same `run_id`.
+  - This does not follow ADR-0019's write-once rule, and it fails safe: a mixed state gives a hash mismatch and a `StagingError` in the task, never a wrong publication.
+  - `If-None-Match` on `requests.json` would also stop a legitimate retry from completing its stage, so it is not used.
+- **Every daily run publishes a new dataset version, accepted for the synthetic demo** (user decision, 2026-10-04).
+  - The retrieval time changes each day, so even with unchanged prices each run publishes a watermark-only version: `last_seen_at` moves.
+  - That is about 365 versions a year, and `published_logical_ids` and the importer read every version record.
+  - Cutting these versions would change idempotency rules that ADR-0012 and ADR-0019 settled; at this scale the cost is trivial. Revisit if the dataset ever runs on real data.
 - **Orphaned staging prefixes.** A run that fails between the steps leaves `staging/<run_id>/`. M4c adds an S3 lifecycle rule for `staging/`.
 - **Moving to real data later** means changing the source construction, adding the secret, and amending R3/ADR-0011. The synthetic-only tests would then fail, which is intended: the change has to be deliberate.
