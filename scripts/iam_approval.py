@@ -13,10 +13,10 @@ The fingerprint is the SHA-256 of a canonical JSON document of:
 3. inputs: the plan's `variables` values for root variables in the closure, and the resolved
    version of every registry module in the closure (`.terraform/modules/modules.json`);
 4. source: the SHA-256 of every `*.tf`/`*.tf.json` in the stack root and in every local module
-   in the closure, plus `.terraform.lock.hcl`. Plan JSON omits locals and literals inside
-   function calls (`jsonencode`), so only the source covers their text. Registry modules in the
-   closure are hashed too, from their downloaded copy, so a re-published or moved version tag
-   cannot change a policy under an existing approval.
+   in the closure (including the policy's own module), plus `.terraform.lock.hcl`. Plan JSON
+   omits locals and literals inside function calls (`jsonencode`), so only the source covers
+   their text. Registry modules in the closure are hashed too, from their downloaded copy, so a
+   re-published or moved version tag cannot change a policy under an existing approval.
 
 Gate rules beyond the fingerprint: a sensitive variable in the closure, or a policy Terraform
 marks sensitive, fails outright (its value is never hashed), and every unknown value the policy
@@ -273,6 +273,9 @@ def closure_of(plan: dict[str, Any], stack_dir: Path, address: str, attribute: s
     )
     if config is None:
         raise GateError(f"{address}: not found in the plan's configuration")
+    # The policy's own module and its ancestors hold its source (jsonencode literals, locals)
+    # even when nothing it references leads back to them.
+    walker.closure.module_keys.update(".".join(path[:i]) for i in range(1, len(path) + 1))
     walker.follow(path, config.get("expressions", {}).get(attribute, {}))
     return walker.closure
 

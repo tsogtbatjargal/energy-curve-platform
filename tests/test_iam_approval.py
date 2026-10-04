@@ -284,6 +284,40 @@ def test_a_policy_marked_sensitive_by_terraform_fails(plan: dict, stack: Path) -
     assert "marked sensitive" in result.failures[0]
 
 
+INNER = "module.logs.aws_iam_policy.inner"
+
+
+def test_a_policy_inside_a_module_hashes_that_module(plan: dict, stack: Path) -> None:
+    """The policy's own module is in its closure even when nothing references the module."""
+    module = stack / "modules" / "logs" / "main.tf"
+    module.write_text(module.read_text() + (
+        '\nresource "aws_sns_topic" "inner" {\n  name = "inner"\n}\n'
+        '\nresource "aws_iam_policy" "inner" {\n  name   = "inner"\n  policy = jsonencode({'
+        ' Statement = [{ Effect = "Allow", Action = ["sns:Publish"],'
+        " Resource = aws_sns_topic.inner.arn }] })\n}\n"
+    ))  # fmt: skip
+    logs = plan["configuration"]["root_module"]["module_calls"]["logs"]["module"]
+    logs["resources"] += [{
+        "address": "aws_sns_topic.inner", "mode": "managed", "type": "aws_sns_topic",
+        "name": "inner", "provider_config_key": "aws", "schema_version": 0,
+        "expressions": {"name": {"constant_value": "inner"}},
+    }, {
+        "address": "aws_iam_policy.inner", "mode": "managed", "type": "aws_iam_policy",
+        "name": "inner", "provider_config_key": "aws", "schema_version": 0,
+        "expressions": {"policy": {"references": ["aws_sns_topic.inner.arn",
+                                                  "aws_sns_topic.inner"]}},
+    }]  # fmt: skip
+    plan["resource_changes"] += [{
+        "address": f"module.logs.aws_{kind}.inner", "module_address": "module.logs",
+        "mode": "managed", "type": f"aws_{kind}", "name": "inner",
+        "change": {"actions": ["create"], "after_unknown": {attr: True}},
+    } for kind, attr in (("sns_topic", "arn"), ("iam_policy", "policy"))]  # fmt: skip
+    approvals = [*approve_all(plan, stack), approval(plan, stack, INNER)]
+    assert gate(plan, stack, approvals).failures == []
+    module.write_text(module.read_text().replace('["sns:Publish"]', '["sns:*"]'))
+    assert failing(gate(plan, stack, approvals)) == {"aws_iam_policy.logs", INNER}
+
+
 def test_an_unknown_value_from_another_data_source_fails(plan: dict, stack: Path) -> None:
     """Not a resource in this stack: e.g. an identity looked up at apply time."""
     root = plan["configuration"]["root_module"]
