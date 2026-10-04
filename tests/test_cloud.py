@@ -166,6 +166,10 @@ def test_the_image_pins_its_base_images_and_installs_locked_hashes() -> None:
 def test_dependabot_watches_the_image_base_digests() -> None:
     config = (ROOT / ".github" / "dependabot.yml").read_text()
     assert "package-ecosystem: docker" in config
+    docker = config.split("package-ecosystem: docker", 1)[1]
+    assert "dependency-name: lambda/python" in docker  # Python version changes are ignored
+    assert "version-update:semver-minor" in docker and "version-update:semver-major" in docker
+    assert "lambda/python:3.12@sha256:" in (ROOT / "Dockerfile").read_text()
     dockerfile = (ROOT / "Dockerfile").read_text()
     pins = [line.split()[1] for line in dockerfile.splitlines() if line.startswith("FROM ")]
     assert len(pins) == 2 and all(":" in p.split("@")[0] for p in pins)  # tag@digest, both
