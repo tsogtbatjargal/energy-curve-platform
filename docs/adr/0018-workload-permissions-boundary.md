@@ -54,7 +54,19 @@ It explicitly denies all S3 actions on the Terraform state bucket. Everything el
 - **Adversarial tests.** Written black-box from the requirements by a separate helper: `tests/test_r2_adversarial.py` and `policy/terraform/iam_r2_adversarial_test.rego`.
 
 ### Evidence from AWS
-- **Before apply (read-only):** `aws iam simulate-custom-policy` runs the same scenarios against AWS's own evaluator, with the rendered policies. The boundary is passed as `PermissionsBoundaryPolicyInputList`, and context keys are passed with type `string`. *Results: pending, to be recorded here.*
+- **Before apply (read-only):** `aws iam simulate-custom-policy` runs the same scenarios against AWS's own evaluator, with the rendered policies. The boundary is passed as `PermissionsBoundaryPolicyInputList`, and context keys are passed with type `string`. **Done on 2026-10-04:** 41 scenarios, 0 differences from the expected results or the offline evaluator. Details, the role-trust review and the plan comparison are in [the pre-apply evidence](../evidence/r2-preapply-2026-10-04.md).
+- **Applying it:** only with the user's explicit approval, and only the exact plan that was checked:
+  1. `terraform plan -input=false -out=/tmp/bootstrap-r2.tfplan` in `infra/bootstrap`, with **locking on** (the default).
+  2. `terraform show -json /tmp/bootstrap-r2.tfplan > /tmp/bootstrap-r2.json`.
+  3. `python scripts/policy_gate.py /tmp/bootstrap-r2.json policy --stack bootstrap --stack-dir infra/bootstrap` must pass.
+  4. `python scripts/bootstrap_plan_check.py /tmp/bootstrap-r2.json` must print `OK`. Anything else stops the apply:
+     - any change other than creating `aws_iam_policy.workload_boundary` and updating only `policy` on `aws_iam_role_policy.gha_deploy_iam`;
+     - any output change other than the new `workload_boundary_arn`;
+     - drift, deferred changes, or an errored plan;
+     - a planned policy that is unknown, or that differs from its template.
+  5. Record `sha256sum /tmp/bootstrap-r2.tfplan` and the check's report; the user approves that exact plan.
+  6. `terraform apply -input=false /tmp/bootstrap-r2.tfplan`, with locking on. Terraform refuses a saved plan that has gone stale.
+  7. Delete both files. Plan files hold sensitive values in plain text.
 - **After an authorized bootstrap apply:** `aws iam simulate-principal-policy` on `ecp-gha-deploy`, per PLAN.md R2:
   - `CreateRole` without the boundary is denied;
   - attaching `AdministratorAccess` is denied;
