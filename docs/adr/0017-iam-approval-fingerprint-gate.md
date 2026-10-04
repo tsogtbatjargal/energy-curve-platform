@@ -34,7 +34,7 @@ The fixture plans offline with dummy credentials, because `aws_iam_policy_docume
 It is `sha256:` plus the SHA-256 of the canonical JSON (sorted keys, no whitespace) of:
 
 1. **Identity:** format `ecp-iam-approval-v1`, stack, address, resource type, attribute.
-2. **Closure:** from the attribute's `references`, transitively through `configuration`:
+2. **Closure:** from the attribute's `references` and the resource's own `count_expression`/`for_each_expression`, transitively through `configuration`. The policy itself references only `each.value` or `count.index`; their values come from the meta-argument. The closure covers:
    - every resource and data source reached, with its full `expressions` and count/for_each expressions;
    - every module call reached, with `source`, `version_constraint` and all input expressions, which are followed in the caller's scope;
    - module output expressions, followed in the module's scope;
@@ -42,7 +42,7 @@ It is `sha256:` plus the SHA-256 of the canonical JSON (sorted keys, no whitespa
    - every local reached.
 
    **The source is scanned too.** Plan JSON omits locals and hides whole-object uses (above). So the gate also parses each module's `*.tf` files with `python-hcl2` (`*.tf.json` as JSON) and scans the source of:
-   - the policy attribute;
+   - the policy attribute, and the resource's own `count` and `for_each`;
    - every resource, data source, module call and output reached, except meta-arguments such as `depends_on`;
    - every local reached.
 
@@ -81,6 +81,7 @@ Editing any root stack file invalidates every approval in that stack, which is c
   - changed registry module code under the same version, with the real `cloudposse/label` 0.25.0 files vendored as the downloaded copy, so the locals parser runs on third-party HCL;
   - sensitive variables, unknown values and variable values reached through locals, including inside a dynamic index;
   - whole-resource and whole-module uses, alone, mixed with an ARN or output, and through a local; `depends_on` not counted;
+  - the policy's own `for_each` (a tfvars value, through a local, an unknown value, a whole-object lookup) and `count`;
   - missing blocks and `*.tf.json` sources;
   - a policy inside a module;
   - future-dated approvals;
@@ -90,4 +91,4 @@ Editing any root stack file invalidates every approval in that stack, which is c
   - approvals-file validation;
   - the CLI never printing values.
 
-  Negative controls confirmed the guards. Disabling source hashing, closure following, the sensitive rule, the unknown-value rule, expiry, registry-file hashing, local following, index scanning, whole-object detection, the policy-attribute scan, the meta-argument filter, the containing-module hash, the sensitivity-mark check, or the approval-date check each fails its tests.
+  Negative controls confirmed the guards. Disabling source hashing, closure following, the sensitive rule, the unknown-value rule, expiry, registry-file hashing, local following, index scanning, whole-object detection, the policy-attribute scan, the meta-argument filter, the policy's own `for_each`/`count` (plan-side follow and source scan removed together; the source scan alone, via a whole-object lookup), the containing-module hash, the sensitivity-mark check, or the approval-date check each fails its tests.
