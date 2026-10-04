@@ -27,10 +27,12 @@ deny contains msg if {
 	msg := sprintf("%s: AdministratorAccess attachment is not allowed", [rc.address])
 }
 
-# Policies whose JSON depends on not-yet-created resources are unknown at plan time.
+# Policies whose JSON depends on not-yet-created resources are unknown at plan time. For workload
+# stacks scripts/iam_approval.py (PLAN.md R1, ADR-0017) fails them unless a reviewed approval
+# matches their fingerprint; this warning keeps them visible in every stack's report.
 warn contains msg if {
 	some rc in input.resource_changes
 	rc.type in policy_types
 	rc.change.after_unknown.policy == true
-	msg := sprintf("%s: policy JSON unknown at plan time; workload stacks must satisfy PLAN.md R1 before apply", [rc.address])
+	msg := sprintf("%s: policy JSON unknown at plan time; see the R1 approval check below", [rc.address])
 }

@@ -75,6 +75,7 @@ Points are labelled `Spot, C1–C4` (contract positions). Real data supports not
 These block the first `apply` of any stack other than bootstrap (M4 onward). They are tracked here so they cannot be quietly dropped.
 
 **R1. IAM policies unknown at plan time block deployment unless reviewed and approved before apply.**
+*Status: implemented ([ADR-0017](adr/0017-iam-approval-fingerprint-gate.md)): `scripts/iam_approval.py`, run by `scripts/policy_gate.py --stack <name>`; approvals in `policy/approvals/iam_unknown.json`.*
 A check after deployment would find unsafe permissions only once they are live, so it cannot be the gate. Before M4 applies:
 - For workload stacks, an IAM policy whose JSON is unknown at plan time is a gate **failure**, not a warning.
 - **The only exception** is an approval committed through a reviewed PR in `policy/approvals/iam_unknown.json`, recording:
