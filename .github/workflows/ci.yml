@@ -101,9 +101,37 @@ jobs:
           opa check --strict policy
           opa test policy
       - name: trivy config scan
-        run: trivy config --exit-code 1 --severity MEDIUM,HIGH,CRITICAL infra
+        run: |
+          trivy config --exit-code 1 --severity MEDIUM,HIGH,CRITICAL infra
+          trivy config --exit-code 1 --severity MEDIUM,HIGH,CRITICAL Dockerfile
       - name: actionlint
         run: actionlint
+
+  image:
+    # The batch image (M4, ADR-0020): build it and run both entry points on a file store. The
+    # pipeline step runs with no network, as it needs none.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build
+        run: docker build --platform linux/amd64 -t ecp-batch:ci .
+      - name: smoke test both entry points
+        run: |
+          store="$(mktemp -d)" && chmod 777 "$store"
+          docker run -d --name ecp-lambda -p 127.0.0.1:9123:8080 -v "$store:/store" \
+            -e ECP_STORE_URL=file:///store ecp-batch:ci
+          for _ in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:9123/ && break; sleep 1; done
+          curl -sf -XPOST http://127.0.0.1:9123/2015-03-31/functions/function/invocations \
+            -d '{"run_id":"ci-1","today":"2024-03-15"}' | tee staged.json
+          docker rm -f ecp-lambda
+          grep -q '"pages": 1' staged.json
+          docker run --rm --network none -v "$store:/store" -e ECP_STORE_URL=file:///store \
+            --entrypoint python ecp-batch:ci -m energy_curves.cloud task ci-1 | tail -1 | tee run.json
+          grep -q '"status": "published"' run.json
 
   glue-compat:
     # AWS Glue 5.1 runtime (ADR-0007): Python 3.11, Java 17, PySpark 3.5.6. Runs the whole suite

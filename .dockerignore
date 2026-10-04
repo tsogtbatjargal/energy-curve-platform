@@ -1,0 +1,7 @@
+# An allowlist: only what the image needs enters the build context. data/ (real EIA prices,
+# ADR-0011), .env, virtualenvs and anything else stay out by default.
+*
+!pyproject.toml
+!uv.lock
+!src/
+src/**/__pycache__
