@@ -1,0 +1,97 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageProjectIam",
+      "Effect": "Allow",
+      "Action": [
+        "iam:*Role*",
+        "iam:*Policy*",
+        "iam:*InstanceProfile*"
+      ],
+      "Resource": [
+        "arn:aws:iam::${account_id}:role/ecp-*",
+        "arn:aws:iam::${account_id}:policy/ecp-*",
+        "arn:aws:iam::${account_id}:instance-profile/ecp-*"
+      ]
+    },
+    {
+      "Sid": "RolesOnlyWithTheBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotEquals": {
+          "iam:PermissionsBoundary": "${boundary_arn}"
+        }
+      }
+    },
+    {
+      "Sid": "NoBoundaryRemoval",
+      "Effect": "Deny",
+      "Action": "iam:DeleteRolePermissionsBoundary",
+      "Resource": "*"
+    },
+    {
+      "Sid": "BoundaryIsFrozen",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:Get*",
+        "iam:List*"
+      ],
+      "Resource": "${boundary_arn}"
+    },
+    {
+      "Sid": "NoAdministratorAccess",
+      "Effect": "Deny",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/AdministratorAccess"
+        }
+      }
+    },
+    {
+      "Sid": "NoIdentityCenter",
+      "Effect": "Deny",
+      "Action": [
+        "sso:*",
+        "sso-directory:*",
+        "identitystore:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenySelfModification",
+      "Effect": "Deny",
+      "Action": "iam:*",
+      "Resource": [
+        "${deploy_role_arn}",
+        "${plan_role_arn}"
+      ]
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::${account_id}:role/aws-service-role/*"
+    },
+    {
+      "Sid": "WriteState",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "${state_bucket_arn}/*"
+    }
+  ]
+}
