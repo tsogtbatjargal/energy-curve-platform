@@ -30,7 +30,7 @@ Verified on 2026-10-04:
 
    Of two runs racing to publish, exactly one commits. The other gets `PublishConflict`, and orchestration retries it from fresh state.
 3. **The version index is written after the commit,** and the pointer is authoritative for its own version:
-   - `published_logical_ids` takes versions below the pointer from the index, and the pointer's own version from the pointer.
+   - Every reader that enumerates versions takes versions below the pointer from the index, and the pointer's own version from the pointer. That means `published_logical_ids` and the Postgres importer's `published_versions`; the importer's rule was added after review.
    - A crash between commit and record therefore loses nothing, and the next publish writes the missing record.
    - A record at or above the pointer's version is never trusted. Stores written before this ADR recorded first, so such a record may describe a version that was never published.
 4. **Run artifacts are per attempt:** `runs/<logical_input_id>/<attempt_id>/`. Two attempts of the same input never write the same key, so an attempt still running after its orchestrator gave up cannot change files a published manifest names. Manifests already record every artifact's key, so readers are unaffected, and older stores keep their layout.
