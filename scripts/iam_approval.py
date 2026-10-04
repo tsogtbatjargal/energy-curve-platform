@@ -9,7 +9,8 @@ The fingerprint is the SHA-256 of a canonical JSON document of:
 2. the dependency closure in the plan's `configuration`: from the attribute's references,
    transitively, every resource and data source reached (full expressions), every module call
    reached (source, version constraint, input expressions), module outputs and variables, and
-   every local reached, which plan JSON omits: its references are read from the source;
+   every local reached. The source of each block reached is scanned as well, because plan JSON
+   omits locals and cannot show a whole-object use (`lookup(r, "k")`, `jsonencode(module.m)`);
 3. inputs: the plan's `variables` values for root variables in the closure, and the resolved
    version of every registry module in the closure (`.terraform/modules/modules.json`);
 4. source: the SHA-256 of every `*.tf`/`*.tf.json` in the stack root and in every local module
@@ -20,7 +21,8 @@ The fingerprint is the SHA-256 of a canonical JSON document of:
 
 Gate rules beyond the fingerprint: a sensitive variable in the closure, or a policy Terraform
 marks sensitive, fails outright (its value is never hashed), and every unknown value the policy
-depends on must be the `arn`, `id` or `name` of a managed resource in the same stack.
+depends on must be the `arn`, `id` or `name` of a managed resource in the same stack. A
+whole-object use depends on every unknown attribute of that object.
 
 Plans can hold sensitive values in plain text, so nothing here prints plan contents: only
 addresses, attribute names, file paths and fingerprints.
@@ -96,6 +98,13 @@ def prefix(path: tuple[str, ...]) -> str:
 HEAD = re.compile(r"(?<![\w.])(?:var|local|module|data|[a-z][a-z0-9]*_[a-z0-9_]*)(?=\s*[.\[])")
 STEP = re.compile(r"\s*\.\s*([A-Za-z_][\w-]*|\*)")
 INDEX = re.compile(r"\s*\[")
+# Name parts that select one attribute; fewer means the whole object is used: lookup(r, "k"),
+# r[*], jsonencode(module.m). Plan JSON cannot show this, because Terraform lists the bare
+# object next to every `object.attribute` reference anyway.
+ATTRIBUTE_PARTS = {"module": 3, "data": 4}  # managed resources: 3 (type.name.attribute)
+NOT_VALUES = frozenset(
+    {"depends_on", "lifecycle", "provider", "providers", "provisioner", "connection"}
+)  # meta-arguments: ordering and wiring, not values the policy is built from
 NO_COMMENTS = SerializationOptions(with_comments=False)
 
 
@@ -109,9 +118,9 @@ def closing(text: str, start: int) -> int:
     return len(text)
 
 
-def source_references(text: str) -> set[str]:
-    """Each traversal in source text, index keys skipped. Every traversal is found wherever it
-    starts, inside an index too: `local.m[var.k]` reaches `local.m` and `var.k`."""
+def source_references(text: str) -> set[tuple[str, bool]]:
+    """(reference, whole object?) for each traversal in source text. Index keys are skipped, and
+    every traversal is found wherever it starts, inside an index too: `local.m[var.k]`."""
     found = set()
     for head in HEAD.finditer(text):
         parts, i = [head.group()], head.end()
@@ -124,9 +133,17 @@ def source_references(text: str) -> set[str]:
                 i = closing(text, index.end() - 1) + 1
             else:
                 break
-        if len(parts) >= 2:
-            found.add(".".join(parts))
+        if len(parts) < 2:
+            continue
+        whole = parts[0] not in {"var", "local"} and len(parts) < ATTRIBUTE_PARTS.get(parts[0], 3)
+        found.add((".".join(parts), whole))
     return found
+
+
+def values_text(body: dict[str, Any]) -> str:
+    return json.dumps(
+        {k: v for k, v in body.items() if k not in NOT_VALUES and not k.startswith("__")}
+    )
 
 
 def references(expr: Any) -> Iterator[str]:
@@ -155,14 +172,60 @@ class Closure:
     data_attributes: set[tuple[str, str]] = field(default_factory=set)
 
 
+@dataclass
+class Source:
+    """One module directory's source: locals, and resource/data/module/output block bodies keyed
+    `aws_x.n`, `data.aws_x.n`, `module.n`, `output.n`."""
+
+    locals: dict[str, Any] = field(default_factory=dict)
+    blocks: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def as_list(x: Any) -> list[Any]:
+    return x if isinstance(x, list) else [x]
+
+
+def merged(body: Any) -> dict[str, Any]:
+    return {k: v for part in as_list(body) for k, v in part.items()}
+
+
+def read_source(directory: Path) -> Source:
+    """Parse `*.tf` with python-hcl2 and `*.tf.json` as JSON; both nest blocks the same way once
+    single objects are read as one-element lists."""
+    source = Source()
+    for f in terraform_files(directory):
+        try:
+            if f.name.endswith(".tf.json"):
+                doc = json.loads(f.read_text())
+            else:
+                with f.open() as fh:
+                    doc = hcl2.load(fh, serialization_options=NO_COMMENTS)
+        except Exception as exc:  # Terraform parsed it; fail closed if we cannot
+            raise GateError(f"{f}: cannot be parsed ({type(exc).__name__})") from exc
+        for block in as_list(doc.get("locals", [])):
+            source.locals.update((k, v) for k, v in block.items() if not k.startswith("__"))
+        for kind, pre in (("resource", ""), ("data", "data.")):
+            for block in as_list(doc.get(kind, [])):
+                for rtype, named in block.items():
+                    for item in as_list(named):
+                        for name, body in item.items():
+                            key = f"{pre}{rtype.strip(chr(34))}.{name.strip(chr(34))}"
+                            source.blocks[key] = merged(body)
+        for kind in ("module", "output"):
+            for block in as_list(doc.get(kind, [])):
+                for name, body in block.items():
+                    source.blocks[f"{kind}.{name.strip(chr(34))}"] = merged(body)
+    return source
+
+
 class Walker:
     def __init__(self, plan: dict[str, Any], stack_dir: Path) -> None:
         self.root = plan["configuration"]["root_module"]
         self.stack_dir = stack_dir
         self.modules = modules_json(stack_dir)
         self.closure = Closure()
-        self.seen: set[tuple[tuple[str, ...], str]] = set()
-        self.locals: dict[tuple[str, ...], dict[str, str]] = {}
+        self.seen: set[tuple[tuple[str, ...], str, bool]] = set()
+        self.sources: dict[tuple[str, ...], Source] = {}
 
     def module(self, path: tuple[str, ...]) -> dict[str, Any]:
         node = self.root
@@ -174,10 +237,16 @@ class Walker:
         for ref in references(expr):
             self.reference(path, strip_keys(ref))
 
-    def reference(self, path: tuple[str, ...], ref: str) -> None:
-        if (path, ref) in self.seen:
+    def scan(self, path: tuple[str, ...], text: str) -> None:
+        """Follow the references in source text. Beyond plan JSON, this sees locals and whole-object
+        uses (see ATTRIBUTE_PARTS)."""
+        for ref, whole in sorted(source_references(text)):
+            self.reference(path, ref, whole)
+
+    def reference(self, path: tuple[str, ...], ref: str, whole: bool = False) -> None:
+        if (path, ref, whole) in self.seen:
             return
-        self.seen.add((path, ref))
+        self.seen.add((path, ref, whole))
         parts = ref.split(".")
         head = parts[0]
         if head in {"count", "each", "path", "terraform", "self"}:
@@ -187,11 +256,13 @@ class Walker:
         elif head == "var":
             self.variable(path, parts[1])
         elif head == "module":
-            self.module_call(path, parts[1], parts[2] if len(parts) > 2 else None)
+            self.module_call(path, parts[1], parts[2] if len(parts) > 2 else None, whole)
         elif head == "data" and len(parts) >= 3:
-            self.resource(path, "data", parts[1], parts[2], parts[3] if len(parts) > 3 else None)
+            attr = parts[3] if len(parts) > 3 else None
+            self.resource(path, "data", parts[1], parts[2], attr, whole)
         elif len(parts) >= 2 and "_" in head:
-            self.resource(path, "managed", head, parts[1], parts[2] if len(parts) > 2 else None)
+            attr = parts[2] if len(parts) > 2 else None
+            self.resource(path, "managed", head, parts[1], attr, whole)
         else:
             self.closure.nodes[f"{prefix(path)}{ref}"] = "unresolved reference"
 
@@ -199,35 +270,25 @@ class Walker:
         """Plan JSON omits locals, so follow the references in the local's source text. Its text
         itself is in the fingerprint through the source hash of its directory."""
         scoped = f"{prefix(path)}local.{name}"
-        text = self.locals_in(path).get(name)
-        if text is None:
+        locals_ = self.source(path).locals
+        if name not in locals_:
             raise GateError(f"{scoped}: not found in the source; run terraform init")
-        refs = sorted(source_references(text))
-        self.closure.nodes[scoped] = {"source_references": refs}
-        for ref in refs:
-            self.reference(path, ref)
+        text = json.dumps(locals_[name])
+        self.closure.nodes[scoped] = {
+            "source_references": sorted(ref for ref, _ in source_references(text))
+        }
+        self.scan(path, text)
 
-    def locals_in(self, path: tuple[str, ...]) -> dict[str, str]:
-        """Local name -> its expression as text, for the module at `path`."""
-        if path not in self.locals:
-            found: dict[str, str] = {}
-            for f in terraform_files(self.scope_dir(path)):
-                try:
-                    if f.name.endswith(".tf.json"):
-                        blocks = json.loads(f.read_text()).get("locals", [])
-                    else:
-                        with f.open() as fh:
-                            blocks = hcl2.load(fh, serialization_options=NO_COMMENTS).get(
-                                "locals", []
-                            )
-                except Exception as exc:  # Terraform parsed it; fail closed if we cannot
-                    raise GateError(f"{f}: cannot read its locals ({type(exc).__name__})") from exc
-                for block in blocks if isinstance(blocks, list) else [blocks]:
-                    found.update(
-                        (k, json.dumps(v)) for k, v in block.items() if not k.startswith("__")
-                    )
-            self.locals[path] = found
-        return self.locals[path]
+    def source(self, path: tuple[str, ...]) -> Source:
+        if path not in self.sources:
+            self.sources[path] = read_source(self.scope_dir(path))
+        return self.sources[path]
+
+    def block(self, path: tuple[str, ...], key: str) -> dict[str, Any]:
+        body = self.source(path).blocks.get(key)
+        if body is None:
+            raise GateError(f"{prefix(path)}{key}: not found in the source; run terraform init")
+        return body
 
     def scope_dir(self, path: tuple[str, ...]) -> Path:
         if not path:
@@ -250,7 +311,9 @@ class Walker:
             parent, call = path[:-1], path[-1]
             self.module_call(parent, call, None)
 
-    def module_call(self, path: tuple[str, ...], name: str, output: str | None) -> None:
+    def module_call(
+        self, path: tuple[str, ...], name: str, output: str | None, whole: bool = False
+    ) -> None:
         call = self.module(path)["module_calls"][name]
         scoped = f"{prefix(path)}module.{name}"
         if scoped not in self.closure.nodes:
@@ -261,19 +324,30 @@ class Walker:
             }
             self.closure.module_keys.add(".".join((*path, name)))
             self.follow(path, call.get("expressions", {}))  # inputs, in the caller's scope
-        if output is not None:
-            child = (*path, name)
-            out = call["module"].get("outputs", {}).get(output, {})
-            self.closure.nodes[f"{prefix(child)}output.{output}"] = out
+            self.scan(path, values_text(self.block(path, f"module.{name}")))
+        outputs = call["module"].get("outputs", {})
+        child = (*path, name)
+        for o in sorted(outputs) if whole else [output] if output is not None else []:
+            out = outputs.get(o, {})
+            self.closure.nodes[f"{prefix(child)}output.{o}"] = out
             self.follow(child, out.get("expression", {}))
+            self.scan(child, values_text(self.block(child, f"output.{o}")))
 
     def resource(
-        self, path: tuple[str, ...], mode: str, rtype: str, name: str, attr: str | None
+        self,
+        path: tuple[str, ...],
+        mode: str,
+        rtype: str,
+        name: str,
+        attr: str | None,
+        whole: bool = False,
     ) -> None:
         local = f"data.{rtype}.{name}" if mode == "data" else f"{rtype}.{name}"
         address = f"{prefix(path)}{local}"
-        if attr is not None:
-            target = self.closure.data_attributes if mode == "data" else self.closure.attributes
+        target = self.closure.data_attributes if mode == "data" else self.closure.attributes
+        if whole:
+            target.add((address, "*"))  # every attribute
+        elif attr is not None:
             target.add((address, attr))
         if address in self.closure.nodes:
             return
@@ -293,6 +367,7 @@ class Walker:
         self.follow(path, config.get("expressions", {}))
         self.follow(path, config.get("count_expression"))
         self.follow(path, config.get("for_each_expression"))
+        self.scan(path, values_text(self.block(path, local)))
 
 
 def closure_of(plan: dict[str, Any], stack_dir: Path, address: str, attribute: str) -> Closure:
@@ -307,6 +382,10 @@ def closure_of(plan: dict[str, Any], stack_dir: Path, address: str, attribute: s
     # even when nothing it references leads back to them.
     walker.closure.module_keys.update(".".join(path[:i]) for i in range(1, len(path) + 1))
     walker.follow(path, config.get("expressions", {}).get(attribute, {}))
+    body = walker.block(path, local)
+    if attribute not in body:
+        raise GateError(f"{address}.{attribute}: not found in the source")
+    walker.scan(path, json.dumps(body[attribute]))
     return walker.closure
 
 
@@ -459,13 +538,37 @@ def unknown_policies(plan: dict[str, Any]) -> Iterator[tuple[str, str, str]]:
                 yield rc["address"], rc["type"], attribute
 
 
-def attribute_unknown(plan: dict[str, Any], address: str, attribute: str) -> bool:
-    """Is this attribute unknown for any planned instance of the (key-stripped) address?"""
-    return any(
-        strip_keys(rc["address"]) == address
-        and (rc["change"].get("after_unknown") or {}).get(attribute) is True
+def has_unknown(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(has_unknown(v) for v in value.values())
+    if isinstance(value, list):
+        return any(has_unknown(v) for v in value)
+    return value is True
+
+
+def unknown_attributes(plan: dict[str, Any], address: str) -> set[str]:
+    """Attributes unknown (in whole or in part) for any planned instance of the address."""
+    return {
+        name
         for rc in plan.get("resource_changes", [])
-    )
+        if strip_keys(rc["address"]) == address
+        for name, value in (rc["change"].get("after_unknown") or {}).items()
+        if has_unknown(value)
+    }
+
+
+def unknown_dependencies(plan: dict[str, Any], closure: Closure) -> list[str]:
+    """Unknown values the policy uses that are not a same-stack resource's arn, id or name. An
+    attribute of "*" is a whole-object use, so it uses every unknown attribute."""
+    bad = set()
+    for attributes, allowed in ((closure.attributes, UNKNOWN_OK), (closure.data_attributes, None)):
+        for address, attr in attributes:
+            if allowed is None and address.split(".")[-2] in PURE_DATA_SOURCES:
+                continue
+            unknown = unknown_attributes(plan, address)
+            used = unknown if attr == "*" else unknown & {attr}
+            bad |= {f"{address}.{name}" for name in used - (allowed or set())}
+    return sorted(bad)
 
 
 def attribute_sensitive(plan: dict[str, Any], address: str, attribute: str) -> bool:
@@ -507,15 +610,7 @@ def check(
                 " (no approval can override this)"
             )
             continue
-        bad = sorted(
-            f"{a}.{attr}"
-            for a, attr in closure.attributes
-            if attribute_unknown(plan, a, attr) and attr not in UNKNOWN_OK
-        ) + sorted(
-            f"{a}.{attr}"
-            for a, attr in closure.data_attributes
-            if attribute_unknown(plan, a, attr) and a.split(".")[-2] not in PURE_DATA_SOURCES
-        )
+        bad = unknown_dependencies(plan, closure)
         if bad:
             result.failures.append(
                 f"{what}: depends on unknown values that are not a same-stack arn, id or name:"

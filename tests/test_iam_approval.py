@@ -278,7 +278,7 @@ def test_a_local_missing_from_the_source_fails(plan: dict, stack: Path) -> None:
     assert "local.gone: not found in the source" in result.failures[0]
 
 
-def test_local_references_are_read_from_the_source_text(tmp_path: Path) -> None:
+def test_references_are_read_from_the_source_text(tmp_path: Path) -> None:
     (tmp_path / "locals.tf").write_text(
         "locals {\n"
         '  tag  = "x-${var.token}-${lookup(local.m, "k", "}")}"\n'
@@ -287,19 +287,51 @@ def test_local_references_are_read_from_the_source_text(tmp_path: Path) -> None:
         "  all  = aws_s3_bucket.data[*].id # var.in_a_comment\n"
         '  list = ["s3:GetObject"]\n'
         "  idx  = local.m[var.k[local.j]].x\n"
+        '  obj  = [lookup(aws_s3_bucket.data, "a"), data.aws_x.y, module.label, var.v]\n'
         "}\n"
     )  # fmt: skip
-    found = ia.Walker({"configuration": {"root_module": {}}}, tmp_path).locals_in(())
+    found = ia.read_source(tmp_path).locals
 
-    def refs(name: str) -> set[str]:
-        return ia.source_references(found[name])
+    def refs(name: str) -> set[tuple[str, bool]]:
+        return ia.source_references(json.dumps(found[name]))
 
-    assert refs("tag") == {"var.token", "local.m"}
-    assert refs("m") == {"module.label.id", "data.aws_caller_identity.me.account_id"}
-    assert refs("doc") == {"aws_s3_bucket.data.arn"}
-    assert refs("all") == {"aws_s3_bucket.data.id"}  # comments are not expressions
+    assert refs("tag") == {("var.token", False), ("local.m", False)}
+    assert refs("m") == {("module.label.id", False),
+                         ("data.aws_caller_identity.me.account_id", False)}  # fmt: skip
+    assert refs("doc") == {("aws_s3_bucket.data.arn", False)}
+    assert refs("all") == {("aws_s3_bucket.data.id", False)}  # comments are not expressions
     assert refs("list") == set()
-    assert refs("idx") == {"local.m.x", "var.k", "local.j"}  # inside an index too
+    # Every traversal is found, inside an index too; an object used whole is marked.
+    assert refs("idx") == {("local.m.x", False), ("var.k", False), ("local.j", False)}
+    assert refs("obj") == {("aws_s3_bucket.data", True), ("data.aws_x.y", True),
+                           ("module.label", True), ("var.v", False)}  # fmt: skip
+
+
+def test_tf_json_sources_are_read_too(tmp_path: Path) -> None:
+    (tmp_path / "extra.tf.json").write_text(json.dumps({
+        "locals": {"arn": "${aws_s3_bucket.data.arn}"},
+        "resource": {"aws_s3_bucket": {"data": {"bucket": "${var.suffix}"}}},
+        "output": {"o": {"value": "${module.label}"}},
+    }))  # fmt: skip
+    source = ia.read_source(tmp_path)
+    assert source.locals == {"arn": "${aws_s3_bucket.data.arn}"}
+    assert set(source.blocks) == {"aws_s3_bucket.data", "output.o"}
+
+
+def test_a_block_missing_from_the_source_fails(plan: dict, stack: Path) -> None:
+    """Every block the policy reaches is scanned in the source, so it must be there."""
+    approvals = approve_all(plan, stack)
+    tf = stack / "main.tf"
+    tf.write_text(
+        tf.read_text().replace(
+            'resource "aws_s3_bucket" "data"', 'resource "aws_s3_bucket" "moved"'
+        )
+    )
+    missing = ia.Result(
+        [f for f in gate(plan, stack, approvals).failures if "not found in the source" in f]
+    )
+    assert failing(missing) == {"aws_iam_policy.write", "aws_iam_role_policy.read"}
+    assert all("aws_s3_bucket.data: not found in the source" in f for f in missing.failures)
 
 
 def test_a_policy_marked_sensitive_by_terraform_fails(plan: dict, stack: Path) -> None:
@@ -310,6 +342,76 @@ def test_a_policy_marked_sensitive_by_terraform_fails(plan: dict, stack: Path) -
     result = gate(plan, stack, approve_all(plan, stack))
     assert failing(result) == {"aws_iam_policy.write"}
     assert "marked sensitive" in result.failures[0]
+
+
+WRITE_RESOURCE = 'Resource = "${aws_s3_bucket.data.arn}/*"'
+
+
+def edit_write_policy(stack: Path, resource: str) -> None:
+    tf = stack / "main.tf"
+    assert WRITE_RESOURCE in tf.read_text()
+    tf.write_text(tf.read_text().replace(WRITE_RESOURCE, f"Resource = {resource}"))
+
+
+def test_a_whole_resource_lookup_must_meet_the_unknown_value_rule(plan: dict, stack: Path) -> None:
+    """Plan JSON lists only `aws_s3_bucket.data`; nothing names the attribute looked up."""
+    edit_write_policy(stack, 'lookup(aws_s3_bucket.data, "bucket_regional_domain_name")')
+    root_resource(plan, "aws_iam_policy.write")["expressions"]["policy"] = {
+        "references": ["aws_s3_bucket.data"]
+    }
+    result = gate(plan, stack, approve_all(plan, stack))
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "aws_s3_bucket.data.bucket_regional_domain_name" in result.failures[0]
+
+
+def test_a_whole_resource_lookup_mixed_with_an_arn_fails(plan: dict, stack: Path) -> None:
+    """Terraform lists the bare resource next to `.arn` anyway, so the plan looks unchanged."""
+    edit_write_policy(
+        stack, '[aws_s3_bucket.data.arn, lookup(aws_s3_bucket.data, "website_endpoint")]'
+    )
+    result = gate(plan, stack, approve_all(plan, stack))  # plan references as committed
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "aws_s3_bucket.data.website_endpoint" in result.failures[0]
+
+
+def test_a_whole_resource_through_a_local_fails(plan: dict, stack: Path) -> None:
+    use_local(plan, stack, "locals {\n  bucket = aws_s3_bucket.data\n}\n", "bucket")
+    result = gate(plan, stack, approve_all(plan, stack))
+    assert failing(result) == {"aws_iam_policy.write"}
+    assert "aws_s3_bucket.data.bucket_regional_domain_name" in result.failures[0]
+
+
+def test_a_whole_module_lookup_mixed_with_an_output_fails(plan: dict, stack: Path) -> None:
+    """`module.logs` alone is every output; Terraform lists it next to `module.logs.group_arn`."""
+    module = stack / "modules" / "logs" / "main.tf"
+    module.write_text(
+        module.read_text()
+        + '\noutput "class" {\n  value = aws_cloudwatch_log_group.this.log_group_class\n}\n'
+    )
+    logs = plan["configuration"]["root_module"]["module_calls"]["logs"]["module"]
+    logs["outputs"]["class"] = {
+        "expression": {"references": ["aws_cloudwatch_log_group.this.log_group_class",
+                                      "aws_cloudwatch_log_group.this"]}
+    }  # fmt: skip
+    tf = stack / "main.tf"
+    tf.write_text(
+        tf.read_text().replace(
+            "resources = [module.logs.group_arn]",
+            'resources = [module.logs.group_arn, lookup(module.logs, "class")]',
+        )
+    )
+    result = gate(plan, stack, approve_all(plan, stack))  # plan references as committed
+    assert failing(result) == {"aws_iam_policy.logs"}
+    assert "module.logs.aws_cloudwatch_log_group.this.log_group_class" in result.failures[0]
+
+
+def test_depends_on_is_not_a_use_of_the_whole_resource(plan: dict, stack: Path) -> None:
+    """Meta-arguments order and wire resources; the policy is not built from them."""
+    tf = stack / "main.tf"
+    block = 'data "aws_iam_policy_document" "read" {\n'
+    assert block in tf.read_text()
+    tf.write_text(tf.read_text().replace(block, block + "  depends_on = [aws_s3_bucket.data]\n"))
+    assert gate(plan, stack, approve_all(plan, stack)).failures == []
 
 
 INNER = "module.logs.aws_iam_policy.inner"
@@ -366,6 +468,8 @@ def test_an_unknown_value_from_another_data_source_fails(plan: dict, stack: Path
             "change": {"actions": ["read"], "after_unknown": {"account_id": True}},
         }
     )
+    tf = stack / "main.tf"
+    tf.write_text(tf.read_text() + '\ndata "aws_caller_identity" "me" {}\n')
     doc = root_resource(plan, "data.aws_iam_policy_document.logs")
     doc["expressions"]["statement"][0]["resources"] = {
         "references": ["data.aws_caller_identity.me.account_id", "data.aws_caller_identity.me"]
