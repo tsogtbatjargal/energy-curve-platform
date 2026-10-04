@@ -2,10 +2,15 @@
 
 Exit codes: 0 pass, 1 policy violation, 2 vacuous or broken run (nothing was really checked).
 A gate that silently checks nothing is worse than no gate, so vacuity is a failure.
+
+It also runs the PLAN.md R1 check (iam_approval.py): for a workload stack, an IAM policy unknown
+at plan time fails unless a matching, unexpired approval exists. `--stack` is required so that
+check can never be skipped by omission.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -53,11 +58,36 @@ def evaluate(plan: dict, results: list[dict]) -> tuple[int, list[str]]:
     return (1 if failures else 0), lines
 
 
+def iam_check(
+    plan: dict, stack: str, stack_dir: Path, approvals_path: Path
+) -> tuple[int, list[str]]:
+    """PLAN.md R1, from iam_approval.py: (exit code, report lines)."""
+    import iam_approval
+
+    try:
+        result = iam_approval.check(
+            plan, stack, stack_dir, iam_approval.load_approvals(approvals_path)
+        )
+    except iam_approval.GateError as exc:
+        return 1, [f"FAIL  R1: {exc}"]
+    lines = [f"NOTE  R1: {n}" for n in result.notes]
+    lines += [f"FAIL  R1: {f}" for f in result.failures]
+    return (1 if result.failures else 0), lines
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("usage: policy_gate.py <plan.json> <policy-dir>", file=sys.stderr)
+    parser = argparse.ArgumentParser(prog="policy_gate.py")
+    parser.add_argument("plan", type=Path)
+    parser.add_argument("policy_dir")
+    parser.add_argument("--stack", required=True, help="stack name, e.g. bootstrap or batch")
+    parser.add_argument("--stack-dir", type=Path, default=Path("."))
+    parser.add_argument("--approvals", type=Path, help="default: <policy-dir>/approvals/...")
+    try:
+        args = parser.parse_args(argv[1:])
+    except SystemExit:
         return 2
-    plan_path, policy_dir = Path(argv[1]), argv[2]
+    plan_path, policy_dir = args.plan, args.policy_dir
+    approvals = args.approvals or Path(policy_dir) / "approvals" / "iam_unknown.json"
     plan = json.loads(plan_path.read_text())
     conftest = shutil.which("conftest")
     if conftest is None:
@@ -85,6 +115,9 @@ def main(argv: list[str]) -> int:
         print(f"BROKEN: conftest produced no JSON\n{proc.stderr}", file=sys.stderr)
         return 2
     code, lines = evaluate(plan, results)
+    if code != 2:
+        iam_code, iam_lines = iam_check(plan, args.stack, args.stack_dir, approvals)
+        code, lines = max(code, iam_code), [*lines, *iam_lines]
     print("\n".join(lines))
     return code
 
