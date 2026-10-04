@@ -414,6 +414,87 @@ def test_depends_on_is_not_a_use_of_the_whole_resource(plan: dict, stack: Path) 
     assert gate(plan, stack, approve_all(plan, stack)).failures == []
 
 
+EACH = 'aws_iam_policy.write["pub"]'
+
+
+def repeat_write_policy(plan: dict, stack: Path, meta: str, references: list[str]) -> None:
+    """Give aws_iam_policy.write its own for_each or count (`meta`, as HCL) and use each.value
+    in its policy, as Terraform 1.15.8 records it: the policy references only `each.value`, and
+    the meta-argument's references sit in `for_each_expression` or `count_expression`."""
+    tf = stack / "main.tf"
+    block = 'resource "aws_iam_policy" "write" {\n'
+    edit_write_policy(stack, '"${aws_s3_bucket.data.arn}/${each.value}"')
+    tf.write_text(tf.read_text().replace(block, f"{block}  {meta}\n"))
+    config = root_resource(plan, "aws_iam_policy.write")
+    config["expressions"]["policy"]["references"].append("each.value")
+    key = "for_each_expression" if meta.startswith("for_each") else "count_expression"
+    config[key] = {"references": references}
+    rc = next(r for r in plan["resource_changes"] if r["address"] == "aws_iam_policy.write")
+    rc["address"], rc["index"] = (EACH, "pub") if key == "for_each_expression" else (
+        "aws_iam_policy.write[0]", 0)  # fmt: skip
+
+
+def paths_variable(plan: dict, stack: Path, value: str = "public/*") -> None:
+    tf = stack / "main.tf"
+    tf.write_text(tf.read_text() + '\nvariable "paths" {\n  type = map(string)\n}\n')
+    plan["configuration"]["root_module"]["variables"]["paths"] = {}
+    plan["variables"]["paths"] = {"value": {"pub": value}}
+
+
+def approvals_with(plan: dict, stack: Path, address: str) -> list[ia.Approval]:
+    return [approval(plan, stack, a) for a in (*POLICIES[:1], address, *POLICIES[2:])]
+
+
+def test_a_policys_own_for_each_value_is_fingerprinted(plan: dict, stack: Path) -> None:
+    paths_variable(plan, stack)
+    repeat_write_policy(plan, stack, "for_each = var.paths", ["var.paths"])
+    approvals = approvals_with(plan, stack, EACH)
+    assert gate(plan, stack, approvals).failures == []
+    plan["variables"]["paths"]["value"]["pub"] = "*"  # each.value: public/* -> *, in tfvars
+    assert failing(gate(plan, stack, approvals)) == {EACH}
+
+
+def test_a_policys_own_for_each_through_a_local_is_fingerprinted(plan: dict, stack: Path) -> None:
+    paths_variable(plan, stack)
+    tf = stack / "main.tf"
+    tf.write_text(tf.read_text() + "\nlocals {\n  paths = var.paths\n}\n")
+    repeat_write_policy(plan, stack, "for_each = local.paths", ["local.paths"])
+    approvals = approvals_with(plan, stack, EACH)
+    plan["variables"]["paths"]["value"]["pub"] = "*"
+    assert failing(gate(plan, stack, approvals)) == {EACH}
+
+
+def test_an_unknown_value_in_a_policys_own_for_each_fails(plan: dict, stack: Path) -> None:
+    repeat_write_policy(
+        plan, stack, "for_each = { pub = aws_s3_bucket.data.bucket_regional_domain_name }",
+        ["aws_s3_bucket.data.bucket_regional_domain_name", "aws_s3_bucket.data"],
+    )  # fmt: skip
+    result = gate(plan, stack, approvals_with(plan, stack, EACH))
+    assert failing(result) == {EACH}
+    assert "aws_s3_bucket.data.bucket_regional_domain_name" in result.failures[0]
+
+
+def test_a_whole_resource_lookup_in_a_policys_own_for_each_fails(plan: dict, stack: Path) -> None:
+    """Only the source shows this: the plan lists just `aws_s3_bucket.data`."""
+    repeat_write_policy(
+        plan, stack, 'for_each = { pub = lookup(aws_s3_bucket.data, "website_endpoint") }',
+        ["aws_s3_bucket.data"],
+    )  # fmt: skip
+    result = gate(plan, stack, approvals_with(plan, stack, EACH))
+    assert failing(result) == {EACH}
+    assert "aws_s3_bucket.data.website_endpoint" in result.failures[0]
+
+
+def test_a_policys_own_count_inputs_are_in_its_closure(plan: dict, stack: Path) -> None:
+    tf = stack / "main.tf"
+    tf.write_text(tf.read_text() + '\nvariable "copies" {\n  type = number\n}\n')
+    plan["configuration"]["root_module"]["variables"]["copies"] = {}
+    plan["variables"]["copies"] = {"value": 1}
+    repeat_write_policy(plan, stack, "count = var.copies", ["var.copies"])
+    closure = ia.closure_of(plan, stack, "aws_iam_policy.write[0]", "policy")
+    assert "copies" in closure.root_variables
+
+
 INNER = "module.logs.aws_iam_policy.inner"
 
 

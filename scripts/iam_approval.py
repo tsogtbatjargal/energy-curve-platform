@@ -6,10 +6,11 @@ attribute whose fingerprint matches the one recomputed from this plan (ADR-0017)
 
 The fingerprint is the SHA-256 of a canonical JSON document of:
 1. identity: stack, address, resource type, attribute, format version;
-2. the dependency closure in the plan's `configuration`: from the attribute's references,
-   transitively, every resource and data source reached (full expressions), every module call
-   reached (source, version constraint, input expressions), module outputs and variables, and
-   every local reached. The source of each block reached is scanned as well, because plan JSON
+2. the dependency closure in the plan's `configuration`: from the attribute's references and
+   the resource's own `count`/`for_each` (which feed `count.index`/`each.value`), transitively,
+   every resource and data source reached (full expressions), every module call reached
+   (source, version constraint, input expressions), module outputs and variables, and every
+   local reached. The source of each block reached is scanned as well, because plan JSON
    omits locals and cannot show a whole-object use (`lookup(r, "k")`, `jsonencode(module.m)`);
 3. inputs: the plan's `variables` values for root variables in the closure, and the resolved
    version of every registry module in the closure (`.terraform/modules/modules.json`);
@@ -382,10 +383,13 @@ def closure_of(plan: dict[str, Any], stack_dir: Path, address: str, attribute: s
     # even when nothing it references leads back to them.
     walker.closure.module_keys.update(".".join(path[:i]) for i in range(1, len(path) + 1))
     walker.follow(path, config.get("expressions", {}).get(attribute, {}))
+    # The policy's own count/for_each: each.value and count.index carry their values into it.
+    walker.follow(path, config.get("count_expression"))
+    walker.follow(path, config.get("for_each_expression"))
     body = walker.block(path, local)
     if attribute not in body:
         raise GateError(f"{address}.{attribute}: not found in the source")
-    walker.scan(path, json.dumps(body[attribute]))
+    walker.scan(path, json.dumps([body[attribute], body.get("count"), body.get("for_each")]))
     return walker.closure
 
 
