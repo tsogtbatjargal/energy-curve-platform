@@ -95,6 +95,9 @@ def overstate_rows(store_dir: Path, version: int) -> None:
         sha256(store.get(record.manifest_key)),
     )
     store.put(f"published/versions/{version:08d}.json", dumps(sealed.__dict__))
+    if json.loads(store.get("published/current.json"))["dataset_version"] == version:
+        # The pointer is authoritative for its own version (ADR-0019): seal it too.
+        store.put("published/current.json", dumps(sealed.__dict__))
 
 
 INVALID_INPUTS = {
@@ -429,7 +432,7 @@ def test_rebuild_refuses_a_store_behind_the_recorded_history(db: str, tmp_path: 
     imp.import_pending(db, store_dir)
     store = LocalArtifactStore(store_dir)
     unpublish(store_dir, 3)
-    store.put("published/current.json", dumps(imp.published_versions(store)[-1].__dict__))
+    store.put("published/current.json", _record_path(store_dir, 2).read_bytes())
     before = serving_state(db)
     with pytest.raises(imp.IncompatibleHistory, match="version 3"):
         imp.rebuild_market(db, store_dir)
@@ -452,3 +455,34 @@ def test_import_never_adopts_an_event_recorded_for_other_content(db: str, tmp_pa
     with pytest.raises(imp.IncompatibleHistory, match="version 1"):
         imp.import_pending(db, store)
     assert serving_state(db) == before
+
+
+# --- ADR-0019: the pointer is authoritative for its own version ---------------------------------
+
+
+def test_a_version_whose_record_was_lost_after_its_commit_is_imported(
+    db: str, tmp_path: Path
+) -> None:
+    """The pointer write is the commit; the version record follows it. A crash in between
+    leaves the newest version with no record, and it is still published."""
+    store_dir = three_version_store(tmp_path / "store")
+    _record_path(store_dir, 3).unlink()
+    results, _ = imp.import_pending(db, store_dir)
+    assert [(r.dataset_version, r.status) for r in results] == [
+        (1, "imported"), (2, "imported"), (3, "imported"),
+    ]  # fmt: skip
+
+
+def test_a_stale_record_at_the_pointer_version_is_not_imported(db: str, tmp_path: Path) -> None:
+    """Stores from before ADR-0019 wrote the record first, so a crash could leave a record for
+    a version never published, which a later run then published under another input. The
+    pointer's manifest is the one imported."""
+    store_dir = three_version_store(tmp_path / "store")
+    pointer = json.loads((store_dir / "published" / "current.json").read_bytes())
+    v2 = json.loads(_record_path(store_dir, 2).read_bytes())
+    stale = {**v2, "dataset_version": 3, "logical_input_id": "stale-unpublished-run"}
+    _record_path(store_dir, 3).write_bytes(dumps(stale))
+    imp.import_pending(db, store_dir)
+    assert q(
+        db, "SELECT logical_input_id FROM market.dataset_versions WHERE dataset_version = 3"
+    ) == [(pointer["logical_input_id"],)]
