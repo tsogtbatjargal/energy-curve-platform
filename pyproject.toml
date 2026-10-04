@@ -28,6 +28,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "moto[s3]>=5.2.3",
     "mypy>=2.4.0",
     "pandas>=3.0.6",
     "playwright>=1.63.0",

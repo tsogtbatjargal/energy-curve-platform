@@ -70,7 +70,7 @@ def test_interval_sleeps_between_days_only(db: str, tmp_path: Path) -> None:
 def test_a_store_with_real_data_is_refused(db: str, tmp_path: Path) -> None:
     store = tmp_path / "store"
     ingest(store, JAN, retrieved_at=T1)
-    manifest = next((store / "runs").glob("*/manifest.json"))
+    manifest = next((store / "runs").glob("*/*/manifest.json"))
     record = next((store / "published" / "versions").glob("*.json"))
     doc = json.loads(manifest.read_text())
     doc["identity"]["source"] = "eia"  # as if real; re-seal the record so the hash matches

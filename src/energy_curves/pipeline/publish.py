@@ -1,10 +1,15 @@
 """Manifests and the published-dataset pointer.
 
 Order of operations for a run: write every artifact, then the run manifest, then publish by
-atomically replacing `published/current.json`. A crash anywhere before the replace leaves the
-previous dataset as the published one. Publication requires the manifest's base version to equal
-the current version (an optimistic check that S3 conditional writes enforce in M4), so an older
-run can never move the dataset backward.
+replacing `published/current.json`. A crash anywhere before the replace leaves the previous
+dataset as the published one. Publication requires the manifest's base version to equal the
+current version, so an older run can never move the dataset backward.
+
+The pointer write is the commit point, and it is conditional (ADR-0019): it succeeds only if the
+pointer is still the one this publish read (If-Match on its tag, or "must not exist" for the first
+version). Two runs racing to publish cannot both win, with or without the local lock. The version
+record under published/versions/ is an index written after the commit; the pointer itself is
+authoritative for its own version, so a crash between the two loses nothing.
 """
 
 from __future__ import annotations
@@ -17,9 +22,10 @@ from typing import Any
 import polars as pl
 
 from energy_curves.pipeline.medallion import GOLD_SCHEMA, REVISION_SCHEMA, empty
-from energy_curves.storage.artifacts import ArtifactStore, sha256
+from energy_curves.storage.artifacts import ArtifactStore, PreconditionFailed, sha256
 
 POINTER_KEY = "published/current.json"
+VERSIONS_PREFIX = "published/versions/"
 MANIFEST_SCHEMA_VERSION = 1
 
 
@@ -96,26 +102,34 @@ def load_published(store: ArtifactStore) -> Published:
     )
 
 
-def published_logical_ids(store: ArtifactStore) -> dict[str, int]:
-    """logical_input_id -> dataset_version for versions up to the current pointer.
+def version_key(version: int) -> str:
+    return f"{VERSIONS_PREFIX}{version:08d}.json"
 
-    publish() writes the version record before the pointer, so a crash between the two leaves a
-    record for a version that was never published. Records above the pointer are ignored.
+
+def published_logical_ids(store: ArtifactStore) -> dict[str, int]:
+    """logical_input_id -> dataset_version for every published version.
+
+    Records below the pointer come from the index. The pointer is authoritative for its own
+    version: its record may be missing (a crash after the commit) or stale (stores written before
+    ADR-0019 wrote the record first, so a crash could leave one for a version never published).
+    Records above the pointer are ignored for the same reason.
     """
     pointer = read_pointer(store)
-    root = store.path("published/versions")
-    if pointer is None or not root.is_dir():
+    if pointer is None:
         return {}
     out = {}
-    for f in root.glob("*.json"):
-        p = json.loads(f.read_bytes())
-        if p["dataset_version"] <= pointer.dataset_version:
-            out[p["logical_input_id"]] = p["dataset_version"]
+    for key in store.list(VERSIONS_PREFIX):
+        if key.endswith(".json"):
+            p = json.loads(store.get(key))
+            if p["dataset_version"] < pointer.dataset_version:
+                out[p["logical_input_id"]] = p["dataset_version"]
+    out[pointer.logical_input_id] = pointer.dataset_version
     return out
 
 
 def publish(store: ArtifactStore, manifest_key: str, manifest: dict[str, Any]) -> Pointer:
-    current = read_pointer(store)
+    tagged = store.get_tagged(POINTER_KEY)
+    current = Pointer(**json.loads(tagged[0])) if tagged else None
     current_version = current.dataset_version if current else 0
     if manifest["base_dataset_version"] != current_version:
         raise PublishConflict(
@@ -129,6 +143,11 @@ def publish(store: ArtifactStore, manifest_key: str, manifest: dict[str, Any]) -
         manifest["dataset_version"], manifest["logical_input_id"], manifest_key, manifest_sha
     )
     doc = dumps(pointer.__dict__)
-    store.put(f"published/versions/{pointer.dataset_version:08d}.json", doc)
-    store.put(POINTER_KEY, doc)
+    if tagged and not store.exists(version_key(current_version)):
+        store.put(version_key(current_version), tagged[0])  # repair: lost after its commit
+    try:
+        store.put_if(POINTER_KEY, doc, tag=tagged[1] if tagged else None)  # the commit
+    except PreconditionFailed as exc:
+        raise PublishConflict(f"another run published version {pointer.dataset_version}") from exc
+    store.put(version_key(pointer.dataset_version), doc)
     return pointer

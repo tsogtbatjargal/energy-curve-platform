@@ -1,8 +1,8 @@
 """Single-writer lock for local pipeline runs.
 
 Uses an OS advisory lock (flock). The kernel releases it when the holder exits, including on
-SIGKILL, so a crashed run never leaves a stale lock behind. S3-based coordination replaces this
-in M4.
+SIGKILL, so a crashed run never leaves a stale lock behind. In the cloud (no shared filesystem)
+the conditional pointer write in publish.py keeps concurrent runs safe instead (ADR-0019).
 """
 
 from __future__ import annotations
