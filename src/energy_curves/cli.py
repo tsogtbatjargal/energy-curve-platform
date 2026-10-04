@@ -67,11 +67,19 @@ def load_shape(data_dir: Path, source: str) -> ShapeInput | None:
         meta = json.loads(store.get(f"{SHAPE_DIR}/meta.json"))
         params = pl.read_parquet(store.path(f"{SHAPE_DIR}/params.parquet"))
     elif source == "synthetic":
-        base = packaged_params_dir()
-        meta = json.loads((base / f"{PACKAGED_PARAMS}.json").read_text())
-        params = shape.params_from_csv((base / f"{PACKAGED_PARAMS}.csv").read_text())
+        return packaged_synthetic_shape()
     else:
         return None
+    if meta["params_sha256"] != shape.params_sha256(params):
+        raise SystemExit("shape parameters do not match their recorded hash")
+    return ShapeInput(params, meta["params_sha256"], meta["method_version"], meta["origin"])
+
+
+def packaged_synthetic_shape() -> ShapeInput:
+    """The parameters shipped with the package, estimated from the synthetic source only."""
+    base = packaged_params_dir()
+    meta = json.loads((base / f"{PACKAGED_PARAMS}.json").read_text())
+    params = shape.params_from_csv((base / f"{PACKAGED_PARAMS}.csv").read_text())
     if meta["params_sha256"] != shape.params_sha256(params):
         raise SystemExit("shape parameters do not match their recorded hash")
     return ShapeInput(params, meta["params_sha256"], meta["method_version"], meta["origin"])
