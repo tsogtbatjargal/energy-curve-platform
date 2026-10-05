@@ -82,4 +82,16 @@ It explicitly denies all S3 actions on the Terraform state bucket. Everything el
 - **Resource-based policies are not limited by boundaries.** PowerUserAccess can write bucket, key, queue and Lambda policies that grant a bounded role (or another principal) access outside the boundary. Boundaries don't solve this. Workload stacks are reviewed through the policy gate, and conftest's storage rules cover bucket policies.
 - **Service-linked roles cannot carry a boundary.** PowerUserAccess allows `iam:CreateServiceLinkedRole`. Their permissions are fixed by AWS and only the service can assume them, so the risk is accepted.
 - **`sts:AssumeRole`.** PowerUserAccess allows it, so any role in the account that trusts the account root would be reachable. Check with a read-only `aws iam list-roles` review in the session-start checklist.
+  - **Amended 2026-10-05 (ADR-0021): no roles in other accounts.** A role in another account that trusts this account's root is reachable too, and a new member account's `OrganizationAccountAccessRole` trusts the whole management account by default. A read-only simulation found the deploy role allowed to assume it. The deploy policy now ends that path with `NoCrossAccountRoles`: an explicit Deny on `sts:AssumeRole`, `sts:TagSession` and `sts:SetSourceIdentity` for every role outside the deploy role's own account (`NotResource arn:aws:iam::<account>:role/*`). Roles in its own account are unaffected.
+  - **No privileged root sessions:** `NoRootSessions` denies `sts:AssumeRoot` on every target. Its resource is a member account's root, PowerUserAccess allows it, and phase 1c turns on centralized root access (recommended in review).
+  - **Tests and evidence:**
+    - seven new deploy-role scenarios in `tests/test_r2_policies.py`, also run through AWS's evaluator with `scripts/r2_simulate.py`: 46 cases, 0 differences;
+    - three new post-apply cases in `scripts/r2_accept.py`;
+    - `scripts/bootstrap_plan_check.py --change no-cross-account` for the saved plan.
+  - **Acceptance after the apply** (read-only):
+    - `scripts/r2_accept.py` shows every case as expected;
+    - `iam:SimulatePrincipalPolicy` for every non-service role in the management account. For `sts:AssumeRole` on `arn:aws:iam::<member>:role/OrganizationAccountAccessRole` and `sts:AssumeRoot` on `arn:aws:iam::<member>:root`, only the Identity Center admin role may be allowed.
+
+    Before this change (2026-10-05): the admin role and `ecp-gha-deploy` were allowed both; `ecp-gha-plan` and the other project's six roles were denied both.
+  - **ADR-0021 phase 1b (account creation) waits** until this is applied and verified.
 - **Every new workload service needs a boundary change** by the admin. This is deliberate friction.

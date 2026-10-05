@@ -57,6 +57,8 @@ def test_no_policy_allows_everything_on_everything(policy: dict) -> None:
 
 # --- the deploy role --------------------------------------------------------------------------
 
+OTHER_ACCOUNT_BREAK_GLASS = "arn:aws:iam::210987654321:role/OrganizationAccountAccessRole"
+
 DEPLOY_CASES = [
     # F-3: roles only with the boundary; a missing key counts as "not the boundary"
     ("iam:CreateRole", ROLE, BOUNDED, ALLOWED),
@@ -88,6 +90,17 @@ DEPLOY_CASES = [
     ("iam:PutRolePolicy", r2.DEPLOY_ROLE_ARN, BOUNDED, EXPLICIT_DENY),
     ("iam:UpdateAssumeRolePolicy", r2.PLAN_ROLE_ARN, {}, EXPLICIT_DENY),
     ("iam:PassRole", ROLE, {}, ALLOWED),
+    # ADR-0021 bootstrap window: no role in another account, above all a new member account's
+    # OrganizationAccountAccessRole, which trusts the whole management account
+    ("sts:AssumeRole", OTHER_ACCOUNT_BREAK_GLASS, {}, EXPLICIT_DENY),
+    ("sts:TagSession", OTHER_ACCOUNT_BREAK_GLASS, {}, EXPLICIT_DENY),
+    ("sts:SetSourceIdentity", OTHER_ACCOUNT_BREAK_GLASS, {}, EXPLICIT_DENY),
+    ("sts:AssumeRole", "arn:aws:iam::210987654321:role/ecp-batch-task", {}, EXPLICIT_DENY),
+    ("sts:AssumeRole", ROLE, {}, ALLOWED),  # its own account's roles are unaffected
+    # ADR-0021: no privileged root sessions (centralized root access, phase 1c) in any account;
+    # the resource is the target account's root, and PowerUserAccess would allow it
+    ("sts:AssumeRoot", "arn:aws:iam::210987654321:root", {}, EXPLICIT_DENY),
+    ("sts:AssumeRoot", "arn:aws:iam::123456789012:root", {}, EXPLICIT_DENY),
     ("iam:CreatePolicy", f"arn:aws:iam::{r2.ACCOUNT}:policy/ecp-batch-read", {}, ALLOWED),
     ("s3:PutObject", f"arn:aws:s3:::{r2.STATE_BUCKET}/batch/terraform.tfstate", {}, ALLOWED),
 ]
