@@ -166,3 +166,70 @@ def test_the_cli_exits_nonzero_and_prints_no_values(
     out = capsys.readouterr().out
     assert "STOP: do not apply this plan" in out
     assert r2.ACCOUNT not in out  # addresses, attribute names and digests only
+
+
+# --- ADR-0021: the deploy role loses cross-account sts:AssumeRole ------------------------------
+# After phase 1a the state bucket is owned by infra/org, so the bootstrap prior state no longer
+# holds it; the check builds its ARN from the account and the region variable, as Terraform does.
+
+
+@pytest.fixture
+def nca_plan() -> dict:
+    stmt = {"Sid": "WriteState", "Effect": "Allow", "Action": "s3:PutObject", "Resource": "*"}
+    old = {"Version": "2012-10-17", "Statement": [stmt]}
+    return {
+        "variables": {"region": {"value": "ca-central-1"}},
+        "prior_state": {"values": {"root_module": {"resources": [
+            state("data.aws_caller_identity.current", {"account_id": r2.ACCOUNT}),
+            state("aws_iam_role.gha_deploy", {"arn": r2.DEPLOY_ROLE_ARN}),
+            state("aws_iam_role.gha_plan", {"arn": r2.PLAN_ROLE_ARN}),
+        ]}}},
+        "resource_changes": [
+            rc("aws_iam_role.gha_deploy", ["no-op"], {"name": "d"}, {"name": "d"}),
+            rc(BOUNDARY, ["no-op"], {"name": "b"}, {"name": "b"}),
+            rc(DEPLOY, ["update"], {"name": "n", "policy": json.dumps(old)},
+               {"name": "n", "policy": json.dumps(r2.render("deploy-iam"))}),
+        ],
+        "output_changes": {"state_bucket": {"actions": ["no-op"]},
+                           "workload_boundary_arn": {"actions": ["no-op"]}},
+    }  # fmt: skip
+
+
+def test_the_no_cross_account_change_passes(nca_plan: dict) -> None:
+    problems, report = bpc.check(nca_plan, "no-cross-account")
+    assert problems == []
+    assert any("equals deploy-iam template: True" in line for line in report)
+    sids = [s["Sid"] for s in r2.render("deploy-iam")["Statement"]]
+    assert "NoCrossAccountRoles" in sids  # the template that the planned policy must equal
+
+
+def test_the_no_cross_account_change_must_use_the_new_template(nca_plan: dict) -> None:
+    doc = r2.render("deploy-iam")
+    doc["Statement"] = [s for s in doc["Statement"] if s["Sid"] != "NoCrossAccountRoles"]
+    change(nca_plan, DEPLOY)["change"]["after"]["policy"] = json.dumps(doc)
+    assert bpc.check(nca_plan, "no-cross-account")[0] == [
+        f"{DEPLOY}: planned policy differs from the deploy-iam template"
+    ]
+
+
+@pytest.mark.parametrize("address", [BOUNDARY, "aws_iam_role.gha_deploy"])
+def test_the_no_cross_account_change_allows_nothing_else(nca_plan: dict, address: str) -> None:
+    change(nca_plan, address)["change"]["actions"] = ["update"]
+    assert bpc.check(nca_plan, "no-cross-account")[0] == [f"unexpected change: update {address}"]
+
+
+def test_the_no_cross_account_change_needs_the_region_without_the_bucket(nca_plan: dict) -> None:
+    nca_plan["variables"] = {}
+    assert bpc.check(nca_plan, "no-cross-account")[0] == ["the plan lacks the region variable"]
+
+
+def test_the_r2_mode_rejects_the_no_cross_account_plan(nca_plan: dict) -> None:
+    assert f"missing expected change: {BOUNDARY}" in bpc.check(nca_plan)[0]
+
+
+def test_the_cli_selects_the_change(tmp_path: Any, nca_plan: dict) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(nca_plan))
+    assert bpc.main(["--change", "no-cross-account", str(path)]) == 0
+    assert bpc.main([str(path)]) == 1
+    assert bpc.main(["--change", "other", str(path)]) == 2

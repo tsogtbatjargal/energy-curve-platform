@@ -79,6 +79,16 @@
       ]
     },
     {
+      "Sid": "NoCrossAccountRoles",
+      "Effect": "Deny",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:SetSourceIdentity",
+        "sts:TagSession"
+      ],
+      "NotResource": "arn:aws:iam::${account_id}:role/*"
+    },
+    {
       "Sid": "ServiceLinkedRoles",
       "Effect": "Allow",
       "Action": "iam:CreateServiceLinkedRole",

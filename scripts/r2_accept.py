@@ -43,6 +43,9 @@ def cases(account: str) -> list[tuple[str, str, str, dict[str, str], str]]:
         ("destroy a bounded role: detach", "iam:DetachRolePolicy", task,
          {**bounded, "iam:PolicyARN": READONLY}, "allowed"),
         ("destroy a bounded role: delete", "iam:DeleteRole", task, bounded, "allowed"),
+        ("ADR-0021: assume another account's break-glass role", "sts:AssumeRole",
+         "arn:aws:iam::210987654321:role/OrganizationAccountAccessRole", {}, "explicitDeny"),
+        ("ADR-0021: assume a role in its own account", "sts:AssumeRole", task, {}, "allowed"),
     ]  # fmt: skip
 
 
