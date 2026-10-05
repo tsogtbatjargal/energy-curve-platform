@@ -46,6 +46,8 @@ def cases(account: str) -> list[tuple[str, str, str, dict[str, str], str]]:
         ("ADR-0021: assume another account's break-glass role", "sts:AssumeRole",
          "arn:aws:iam::210987654321:role/OrganizationAccountAccessRole", {}, "explicitDeny"),
         ("ADR-0021: assume a role in its own account", "sts:AssumeRole", task, {}, "allowed"),
+        ("ADR-0021: a privileged root session in another account", "sts:AssumeRoot",
+         "arn:aws:iam::210987654321:root", {}, "explicitDeny"),
     ]  # fmt: skip
 
 

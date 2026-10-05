@@ -89,6 +89,12 @@
       "NotResource": "arn:aws:iam::${account_id}:role/*"
     },
     {
+      "Sid": "NoRootSessions",
+      "Effect": "Deny",
+      "Action": "sts:AssumeRoot",
+      "Resource": "*"
+    },
+    {
       "Sid": "ServiceLinkedRoles",
       "Effect": "Allow",
       "Action": "iam:CreateServiceLinkedRole",
