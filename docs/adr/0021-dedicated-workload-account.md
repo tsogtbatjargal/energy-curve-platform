@@ -7,7 +7,7 @@ The user chose (2026-10-04) to run this project's workloads in a dedicated membe
 
 Verified read-only on 2026-10-04:
 - **The organization has one account,** the management account, which also hosts Identity Center and billing.
-- **No OUs, and only the default `FullAWSAccess` SCP.**
+- **No OUs, and SCPs not enabled.** The AWS-managed `FullAWSAccess` policy exists, but the root lists no enabled policy types and nothing is attached. *(Corrected 2026-10-05: this first said "only the default `FullAWSAccess` SCP", as if SCPs were enabled.)*
 - **Identity Center** has one permission set, `AdministratorAccess` (12-hour sessions).
 - **Other projects in the management account:**
   - another project's GitHub OIDC provider, IAM roles (EKS, GitHub Actions) and service-linked roles, with nothing running behind them (see the R2 pre-apply evidence);
@@ -81,7 +81,11 @@ By default this role trusts the whole management account, so any management-acco
 The pattern in every phase is plan, gate, exact-plan approval, apply, then evidence, as ADR-0018 set out.
 1. **`infra/org`** (management account):
    - **1a:** import the state bucket (seven resources), the $40 budget and the `project` cost allocation tag: nine imports. The matching `removed` blocks go in the management bootstrap, which also drops `budget.tf`. **Create** the OU `Workloads`, the phase's only new resource. **No** root-access, permission-set or account-specific change.
-   - **1b:** create the account (`close_on_deletion = false`, `role_name = OrganizationAccountAccessRole`, email supplied at plan time and never committed) and attach the SCPs. The SCPs name no member account ID.
+   - **1b:** enable SCPs (the organization import above), create the two SCPs and attach them to `Workloads`, then create the account in `Workloads` (`depends_on` both attachments, so it is never outside the guardrails).
+     - The account has `close_on_deletion = false`, `role_name = OrganizationAccountAccessRole` and `iam_user_access_to_billing = ALLOW`.
+     - It has `prevent_destroy`, and `role_name` is under `ignore_changes`, because Organizations cannot read it back.
+     - The email comes from the git-ignored `terraform.tfvars` and is a sensitive variable.
+     - The SCPs name no member account ID.
    - **1c** (everything that needs the account ID):
      - the Identity Center assignment (`AdministratorAccess`, plus a new `ecp-readonly` set);
      - the budget's linked-account filter;
@@ -103,14 +107,22 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
 After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workloads`.
 
 ### SCPs on `Workloads`
-These are free, and Organizations enforces them independently of IAM. Each is evaluated with the policy simulator, which evaluates SCPs, before it is attached.
-- **Region allow-list:** `ca-central-1`, plus `us-east-1` for global services, as a deny on `aws:RequestedRegion` outside the list. Global-service actions are exempt.
+These are free, and Organizations enforces them independently of IAM.
+- **Enabling them comes first.** SCPs are off for the organization, so phase 1b imports `aws_organizations_organization` into `infra/org` and changes only `enabled_policy_types`, to `SERVICE_CONTROL_POLICY`.
+  - **Trusted service access is left alone:** `aws_service_access_principals` is under `ignore_changes`, so this stack can never remove Identity Center's integration. IAM's integration (phase 1c) gets its own resource.
+  - **The organization has `prevent_destroy`.**
+  - **Enabling the type attaches `FullAWSAccess` to the root, every OU and every account.** That changes no permission, and SCPs never restrict the management account.
+- **Two SCPs, both attached to `Workloads`:** `ecp-workloads-baseline` (the region, organization and root rules) and `ecp-workloads-protect` (the break-glass lock and the second R2 layer). With `FullAWSAccess`, that is 3 of the 10 SCPs an OU can have (Organizations quotas). Each document is far under the 10,240-character limit. They live in `infra/org/policies/`, and the plan check compares the planned content with them.
+- **How they are checked:**
+  - before attachment: an offline evaluator (`tests/test_scps.py`, with `tests/iam_eval.py`) checks each rule, and the plan check compares the planned documents with the reviewed files;
+  - after the account exists: the policy simulator, which evaluates SCPs, checks them inside the account (acceptance below).
+- **Region allow-list:** `ca-central-1`, plus `us-east-1` for global services, as a deny on `aws:RequestedRegion` outside the list. Following AWS's example policy, `cloudfront`, `iam`, `organizations`, `route53` and `support` actions are exempt.
 - **No leaving the organization:** deny `organizations:LeaveOrganization`.
 - **No long-term root user,** with `AssumeRoot` kept (see above).
-- **A break-glass lock** (see above).
+- **A break-glass lock** (see above). It denies changes to `OrganizationAccountAccessRole` (trust, policies, boundary, tags, deletion) except by `AWSReservedSSO_AdministratorAccess_*` roles.
 - **A second layer for R2:**
-  - deny `iam:DeleteRolePermissionsBoundary`;
-  - deny writes to `policy/ecp-workload-boundary`, except by the admin's Identity Center session.
+  - deny `iam:DeleteRolePermissionsBoundary` for everyone;
+  - deny creating, versioning, deleting or tagging `policy/ecp-workload-boundary`, except by the admin's Identity Center session.
 - **`FullAWSAccess` stays attached.** SCPs only limit; they never grant.
 
 ### Access model
@@ -152,6 +164,13 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **No root-access or permission-set change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` reports no enabled features afterwards.
 
 **Phase 1b: account and SCPs**
+- **The plan:** Terraform reports `1 to import, 5 to add, 1 to change, 0 to destroy`. `scripts/phase1b_plan_check.py` must print `OK: exactly the reviewed phase 1b change`, which means:
+  - the 1 import (and the 1 change) is the organization, with only `enabled_policy_types` changing, from none to `SERVICE_CONTROL_POLICY`; the feature set and trusted-service principals are unchanged;
+  - the 5 additions are the two SCPs (each equal to its reviewed document), their two attachments to `Workloads`, and the account. The account is `ecp-workloads`, in `Workloads`, with the configured email, still sensitive, `close_on_deletion = false`, the break-glass role name, billing access `ALLOW` and no GovCloud account, created after both attachments;
+  - every phase 1a resource is unchanged, and the state holds exactly them;
+  - no other change, no deferral, and no drift except the OU's `tags` reading back as `{}` where state had null, with the OU planned `no-op` (the same provider normalization as in phase 1a).
+- **The policy gate passes** with `--stack org`.
+- **After the apply:** SCPs are enabled on the root; `Workloads` has `FullAWSAccess` plus the two project SCPs; the organization has 2 accounts.
 - **The account:** `ecp-workloads` is `ACTIVE`, in OU `Workloads`, with `FullAWSAccess` plus the project SCPs attached.
 - **Still no root-access change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` still reports none enabled.
 - **SCP simulations** in `ecp-workloads`:
@@ -198,7 +217,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **Recovery keeps working without root passwords.** `AssumeRoot` is limited to named tasks and one admin role, and the long-term root user is blocked.
 - **More moving parts:** a second account, profile and state bucket, an `infra/org` stack, and imports across state files.
 - **R2 must be re-accepted in the member account.** M4c's Terraform can be written in parallel, but it is planned and applied only after phases 1 to 5.
-- **To decide at phase 1:**
-  - the account email (plus-addressing works);
-  - the account name;
-  - whether the second R2 layer and the break-glass lock SCPs are added. Both are recommended.
+- **Decided for phase 1 (user, 2026-10-04 and 2026-10-05):**
+  - the account email is the budget alert address, kept in the git-ignored `infra/org/terraform.tfvars`;
+  - the account name is `ecp-workloads`;
+  - both recommended SCPs (the second R2 layer and the break-glass lock) are included, in `ecp-workloads-protect`.
