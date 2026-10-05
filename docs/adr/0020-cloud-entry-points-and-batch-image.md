@@ -32,7 +32,7 @@ Step Functions passes its execution name as `run_id` to both steps. It is checke
 - **Infrastructure follows.** The batch stack (M4c) will have no secret and no key input.
 
 ### One image for both steps (`Dockerfile`)
-- **Base images:** the AWS Lambda Python 3.12 base (Python 3.12.15, the project's pinned version) with the Lambda runtime, and the uv image used only to export the lock. Both are pinned by their linux/amd64 digests.
+- **Base images:** the AWS Lambda Python 3.12 base (Python 3.12.15, the project's pinned version) with the Lambda runtime, and the uv image used only to export the lock. Both are pinned by their multi-arch **index** (manifest-list) digests, and the build selects linux/amd64 with `--platform linux/amd64`. An index digest is as immutable as a single-platform one: it fixes the digest of every platform's manifest it lists. *(Corrected 2026-10-04: this said "linux/amd64 digests". The first pins were the amd64 manifests, but Dependabot proposes the tag's index digest, as in #17 and #21.)*
 - **Locked, verified dependencies:**
   - runtime dependencies come from `uv.lock` (`uv export --locked --no-dev`);
   - they are installed with `pip --require-hashes`, then the project itself;
@@ -51,7 +51,7 @@ Step Functions passes its execution name as `run_id` to both steps. It is checke
   - A plain upgrade left all 8; `--releasever=latest` left 0.
   - The trade-off: the base layer's package versions now depend on the build date. The deployed artifact is identified exactly by its image digest.
 - **The image is scanned.** The `image` job runs `trivy image` and fails on any fixed HIGH or CRITICAL vulnerability. `image` is a required check (user decision, 2026-10-04).
-- **Dependabot watches both base digests.** Both `FROM` lines are `tag@sha256`, and the `docker` ecosystem in `.github/dependabot.yml` proposes new digests when either tag moves.
+- **Dependabot watches both base digests.** Both `FROM` lines are `tag@sha256`, and the `docker` ecosystem in `.github/dependabot.yml` proposes new digests when either tag moves. It proposes the index digest, so that is the pinned form; a test checks that the CI build still selects `linux/amd64`.
 
 ## Verification
 - **`tests/test_cloud.py`** (both steps; S3 through moto, as in ADR-0019):

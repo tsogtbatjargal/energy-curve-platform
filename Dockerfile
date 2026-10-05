@@ -1,7 +1,9 @@
 # The batch image (M4, ADR-0020): one image, two entry points.
 #   Lambda (staging):  the default CMD, energy_curves.cloud.lambda_handler
 #   Fargate (pipeline): entryPoint ["python", "-m", "energy_curves.cloud"], command ["task", <run_id>]
-# Base images are pinned by their linux/amd64 digests. Runtime dependencies come from uv.lock,
+# Base images are pinned by their multi-arch index (manifest-list) digests, the form Dependabot
+# proposes; an index digest fixes every platform's manifest. The build selects linux/amd64 with
+# `docker build --platform linux/amd64` (ADR-0020). Runtime dependencies come from uv.lock,
 # installed by pip with --require-hashes, so the image gets exactly the locked, verified wheels.
 FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
 

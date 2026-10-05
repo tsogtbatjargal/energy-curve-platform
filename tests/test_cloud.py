@@ -173,3 +173,11 @@ def test_dependabot_watches_the_image_base_digests() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
     pins = [line.split()[1] for line in dockerfile.splitlines() if line.startswith("FROM ")]
     assert len(pins) == 2 and all(":" in p.split("@")[0] for p in pins)  # tag@digest, both
+
+
+def test_the_image_build_selects_amd64_from_the_index_pins() -> None:
+    """The pins are multi-arch index digests (what Dependabot proposes), so the platform is chosen
+    at build time; the image is x86_64 (ADR-0020)."""
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "docker build --platform linux/amd64 " in ci
+    assert "multi-arch index" in (ROOT / "Dockerfile").read_text()
