@@ -340,3 +340,37 @@ def test_the_account_cannot_be_destroyed_or_closed_by_terraform() -> None:
     body = resource_body("aws_organizations_account", "workloads")
     assert body["lifecycle"][0]["prevent_destroy"] is True
     assert body["close_on_deletion"] is False
+
+
+# --- F1 (review of 260537d): an attachment must reference its policy directly and only ---------
+# Plan JSON keeps only the references of an expression, not its literals or functions, so the check
+# requires exactly the direct reference (`<policy>.id` and `<policy>`) and an unknown policy_id:
+# a policy created in this plan has no ID yet, so a known value means something else was attached.
+
+
+def set_policy_id(plan: dict, attachment: str, references: list[str]) -> None:
+    config = plan["configuration"]["root_module"]["resources"]
+    next(r for r in config if r["address"] == attachment)["expressions"]["policy_id"] = {
+        "references": references
+    }
+
+
+def test_an_attachment_referencing_both_policies_stops(plan: dict) -> None:
+    """coalesce(aws_organizations_policy.workloads_baseline.id, ...protect.id) and the like."""
+    set_policy_id(plan, ATTACH_PROTECT, [f"{BASELINE}.id", BASELINE, f"{PROTECT}.id", PROTECT])
+    assert problems(plan) == [f"{ATTACH_PROTECT}: must attach {PROTECT}"]
+
+
+def test_an_attachment_with_another_input_stops(plan: dict) -> None:
+    """var.policy_id != "" ? var.policy_id : aws_organizations_policy.workloads_protect.id"""
+    set_policy_id(plan, ATTACH_PROTECT, ["var.policy_id", f"{PROTECT}.id", PROTECT])
+    assert problems(plan) == [f"{ATTACH_PROTECT}: must attach {PROTECT}"]
+
+
+def test_an_attachment_resolving_to_a_known_policy_stops(plan: dict) -> None:
+    """try("p-other", aws_organizations_policy.workloads_protect.id): the references look right,
+    but the value is known at plan time, so it is not the policy this plan creates."""
+    attachment = change(plan, ATTACH_PROTECT)
+    attachment["after_unknown"]["policy_id"] = False
+    attachment["after"]["policy_id"] = "p-other0000"
+    assert problems(plan) == [f"{ATTACH_PROTECT}: must attach {PROTECT}"]

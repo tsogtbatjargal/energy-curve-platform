@@ -124,8 +124,12 @@ def check_attachment(
     problems = []
     if unknown.get("target_id") or ou_id is None or after.get("target_id") != ou_id:
         problems.append(f"{address}: must target the Workloads OU")
+    # Exactly the direct reference: plan JSON drops literals and functions, so any other reference
+    # (the other policy, a variable) could decide the value. The policy is created in this plan,
+    # so its ID is unknown; a known policy_id is some other policy, whatever the references say.
     policy = ATTACHMENTS[address]
-    if f"{policy}.id" not in references(plan, address, "policy_id"):
+    direct = {f"{policy}.id", policy}
+    if set(references(plan, address, "policy_id")) != direct or not unknown.get("policy_id"):
         problems.append(f"{address}: must attach {policy}")
     return problems
 
