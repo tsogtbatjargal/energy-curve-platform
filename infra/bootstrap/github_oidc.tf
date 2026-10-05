@@ -49,17 +49,17 @@ data "aws_iam_policy_document" "state_access" {
   statement {
     sid       = "ListStateBucket"
     actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.tfstate.arn]
+    resources = [local.state_bucket_arn]
   }
   statement {
     sid       = "ReadState"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.tfstate.arn}/*"]
+    resources = ["${local.state_bucket_arn}/*"]
   }
   statement {
     sid       = "ManageLockFiles"
     actions   = ["s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.tfstate.arn}/*.tflock"]
+    resources = ["${local.state_bucket_arn}/*.tflock"]
   }
 }
 
@@ -115,7 +115,7 @@ resource "aws_iam_role_policy" "gha_deploy_iam" {
     boundary_arn     = local.workload_boundary_arn
     deploy_role_arn  = aws_iam_role.gha_deploy.arn
     plan_role_arn    = aws_iam_role.gha_plan.arn
-    state_bucket_arn = aws_s3_bucket.tfstate.arn
+    state_bucket_arn = local.state_bucket_arn
   })))
 }
 

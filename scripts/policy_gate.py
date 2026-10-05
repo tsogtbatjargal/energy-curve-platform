@@ -6,7 +6,8 @@ A gate that silently checks nothing is worse than no gate, so vacuity is a failu
 It also runs the PLAN.md R1 check (iam_approval.py): for a workload stack, an IAM policy unknown
 at plan time fails unless a matching, unexpired approval exists. `--stack` is required so that
 check can never be skipped by omission. The stack name also reaches the Rego policies as
-data.ecp.stack: the PLAN.md R2 boundary rule exempts only bootstrap.
+data.ecp.stack: the PLAN.md R2 boundary rule exempts only bootstrap, and only org may manage
+budgets and cost allocation tags (ADR-0021).
 """
 
 from __future__ import annotations
@@ -20,7 +21,13 @@ import tempfile
 from pathlib import Path
 
 EXPECTED_NAMESPACES = frozenset(
-    {"terraform.network", "terraform.storage", "terraform.tags", "terraform.iam"}
+    {
+        "terraform.network",
+        "terraform.storage",
+        "terraform.tags",
+        "terraform.iam",
+        "terraform.ownership",
+    }
 )
 
 

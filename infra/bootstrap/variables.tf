@@ -18,18 +18,3 @@ variable "github_oidc_subject_prefix" {
   type        = string
   default     = "repo:tsogtbatjargal@122837521/energy-curve-platform@1402272172"
 }
-
-variable "budget_limit_usd" {
-  type    = number
-  default = 40
-}
-
-variable "budget_alert_emails" {
-  type      = list(string)
-  sensitive = true # keeps the address out of public CI plan logs
-
-  validation {
-    condition     = length(var.budget_alert_emails) > 0
-    error_message = "At least one alert email is required."
-  }
-}
