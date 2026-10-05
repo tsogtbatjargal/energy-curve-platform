@@ -417,3 +417,100 @@ def test_the_right_import_id_with_another_object_stops(
     assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
         "aws_s3_bucket_versioning.tfstate: imports another object than bootstrap relinquishes"
     ]
+
+
+# --- the budget import's sensitivity-only update (real org plan, 2026-10-05) -------------------
+# Terraform 1.15.8 plans the budget import as "update": every value is identical, but the import
+# reads the alert emails from AWS unmarked while the configuration's sensitive variable marks the
+# whole `notification` set. Terraform records such a mark-only update in state without calling the
+# provider (internal/terraform/node_resource_abstract_instance.go). Only this exact case passes.
+
+BUDGET = "aws_budgets_budget.project"
+NOTIFICATION = {"subscriber_email_addresses": ["alerts@example.com"],
+                "subscriber_sns_topic_arns": [], "threshold": 50}  # fmt: skip
+UNMARKED = [{"subscriber_email_addresses": [False], "subscriber_sns_topic_arns": []}] * 4
+
+
+def marks_only(plan: dict, address: str = BUDGET) -> dict:
+    """Turn an import into the real mark-only update: values equal, notification now sensitive."""
+    c = change(plan, address)["change"]
+    c["actions"] = ["update"]
+    c["before"]["notification"] = [dict(NOTIFICATION)] * 4
+    c["after"]["notification"] = [dict(NOTIFICATION)] * 4
+    common = {"cost_filter": [{"values": [False]}], "tags": {}, "tags_all": {}}
+    c["before_sensitive"] = {**common, "notification": copy.deepcopy(UNMARKED)}
+    c["after_sensitive"] = {**common, "notification": True}
+    return c
+
+
+def test_the_budget_sensitivity_only_update_passes_as_state_only(org_plan: dict) -> None:
+    marks_only(org_plan)
+    problems, report = opc.check_org(org_plan)
+    assert problems == []
+    assert (
+        f"import+state-only {BUDGET}  sensitivity marks only: notification "
+        "(values identical; recorded in state, no AWS call)"
+    ) in report
+    assert report[-1] == (
+        "summary: 9 to import, 1 to add, 1 to change (state-only: sensitivity marks on the "
+        "imported budget), 0 to destroy"
+    )
+
+
+def test_a_budget_value_change_with_the_marks_stops(org_plan: dict) -> None:
+    marks_only(org_plan)["after"]["limit_amount"] = "50.0"
+    assert opc.check_org(org_plan)[0] == [
+        f"{BUDGET}: the import is not a plain import (['limit_amount'])"
+    ]
+
+
+def test_a_budget_email_change_with_the_marks_stops(org_plan: dict) -> None:
+    c = marks_only(org_plan)
+    c["after"]["notification"] = [dict(NOTIFICATION, subscriber_email_addresses=["x@example.com"])]
+    assert opc.check_org(org_plan)[0] == [
+        f"{BUDGET}: the import is not a plain import (['notification'])"
+    ]
+
+
+def test_marks_removed_from_the_emails_stop(org_plan: dict) -> None:
+    c = marks_only(org_plan)
+    c["before_sensitive"]["notification"], c["after_sensitive"]["notification"] = True, False
+    assert opc.check_org(org_plan)[0] == [f"{BUDGET}: the import is not a plain import ([])"]
+
+
+def test_a_mark_change_on_another_budget_attribute_stops(org_plan: dict) -> None:
+    marks_only(org_plan)["after_sensitive"]["cost_filter"] = True
+    assert opc.check_org(org_plan)[0] == [f"{BUDGET}: the import is not a plain import ([])"]
+
+
+def test_a_mark_only_update_on_another_import_stops(org_plan: dict) -> None:
+    c = change(org_plan, "aws_s3_bucket_policy.tfstate")["change"]
+    c["actions"] = ["update"]  # the budget's exact mark pattern, on another import
+    c["before_sensitive"], c["after_sensitive"] = {"notification": []}, {"notification": True}
+    assert opc.check_org(org_plan)[0] == [
+        "aws_s3_bucket_policy.tfstate: the import is not a plain import ([])"
+    ]
+
+
+def test_a_mark_only_update_with_unknown_values_stops(org_plan: dict) -> None:
+    marks_only(org_plan)["after_unknown"] = {"notification": True}
+    assert opc.check_org(org_plan)[0] == [
+        f"{BUDGET}: the import is not a plain import (['notification'])"
+    ]
+
+
+def test_the_transfer_identity_check_still_applies_to_the_marked_budget(
+    org_plan: dict, bootstrap_plan: dict
+) -> None:
+    marks_only(org_plan)
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == []
+    retarget(org_plan, BUDGET, name=OTHER_BUDGET)
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        f"{BUDGET}: imports another object than bootstrap relinquishes"
+    ]
+
+
+@pytest.mark.parametrize("actions", [["delete", "create"], ["create", "delete"]])
+def test_a_budget_replacement_with_the_marks_stops(org_plan: dict, actions: list[str]) -> None:
+    marks_only(org_plan)["actions"] = actions
+    assert opc.check_org(org_plan)[0] == [f"{BUDGET}: the import is not a plain import ([])"]

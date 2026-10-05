@@ -49,6 +49,7 @@ MOVED = frozenset(
     + ["aws_budgets_budget.project", "aws_ce_cost_allocation_tag.project"]
 )
 OU = "aws_organizations_organizational_unit.workloads"
+BUDGET = "aws_budgets_budget.project"
 OU_NAME = "Workloads"
 ROOT_ID = re.compile(r"^r-[0-9a-z]{4,32}$")
 # Later phases only (1b, 1c): their presence in a phase 1a configuration is a stop.
@@ -112,7 +113,7 @@ def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
     for t in sorted(configured_types(plan)):
         if LATER_PHASE_TYPES.match(t):
             problems.append(f"later-phase resource type in the configuration: {t}")
-    imported, created = set(), set()
+    imported, created, state_only = set(), set(), set()
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]
         actions, importing = change["actions"], change.get("importing")
@@ -120,10 +121,24 @@ def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
             problems.append(f"later-phase resource in the plan: {address}")
         if importing is not None:
             attrs = changed_attributes(change)
-            report.append(f"import+{'+'.join(actions):10} {address}  changes: {sorted(attrs)}")
+            if (
+                address == BUDGET
+                and actions == ["update"]
+                and not attrs
+                and emails_newly_marked(change)
+            ):
+                # Values identical, marks only: Terraform 1.15.8 records the new marks in state
+                # without calling the provider (node_resource_abstract_instance.go, apply).
+                report.append(
+                    f"import+state-only {address}  sensitivity marks only: notification "
+                    "(values identical; recorded in state, no AWS call)"
+                )
+                state_only.add(address)
+            else:
+                report.append(f"import+{'+'.join(actions):10} {address}  changes: {sorted(attrs)}")
             if address not in MOVED:
                 problems.append(f"unexpected import: {address}")
-            elif actions != ["no-op"] or attrs:
+            elif (actions != ["no-op"] or attrs) and address not in state_only:
                 problems.append(f"{address}: the import is not a plain import ({sorted(attrs)})")
             imported.add(address)
             continue
@@ -150,7 +165,13 @@ def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
         ):
             problems.append(f"unexpected output change: {'+'.join(change['actions'])} {name}")
     report.append(
-        f"summary: {len(imported)} to import, {len(created)} to add, 0 to change, 0 to destroy"
+        f"summary: {len(imported)} to import, {len(created)} to add, "
+        + (
+            "1 to change (state-only: sensitivity marks on the imported budget)"
+            if state_only
+            else "0 to change"
+        )
+        + ", 0 to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )
@@ -183,6 +204,24 @@ def check_bootstrap(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
         else "summary: not the reviewed shape"
     )
     return problems, report
+
+
+def emails_newly_marked(change: dict[str, Any]) -> bool:
+    """The budget import's one reviewed difference: `notification` (which holds the alert emails)
+    becomes sensitive, and no other mark changes. The import reads the emails from AWS unmarked;
+    the configuration's sensitive variable marks the whole set."""
+    before, after = change.get("before_sensitive"), change.get("after_sensitive")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+
+    def rest(marks: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in marks.items() if k != "notification"}
+
+    return (
+        rest(before) == rest(after)
+        and after.get("notification") is True
+        and before.get("notification") is not True
+    )
 
 
 def caller_account(plan: dict[str, Any]) -> str | None:
