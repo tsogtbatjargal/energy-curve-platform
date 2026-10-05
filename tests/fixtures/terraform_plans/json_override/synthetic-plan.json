@@ -1,0 +1,137 @@
+{
+ "applyable": true,
+ "complete": true,
+ "configuration": {
+  "provider_config": {
+   "terraform": {
+    "full_name": "terraform.io/builtin/terraform",
+    "name": "terraform"
+   }
+  },
+  "root_module": {
+   "resources": [
+    {
+     "address": "terraform_data.attachment",
+     "expressions": {
+      "input": {
+       "constant_value": "${replace(terraform_data.reviewed_policy.id, \"/^.*$/\", \"p-FullAWSAccess\")}",
+       "references": [
+        "terraform_data.reviewed_policy.id",
+        "terraform_data.reviewed_policy"
+       ]
+      }
+     },
+     "mode": "managed",
+     "name": "attachment",
+     "provider_config_key": "terraform",
+     "schema_version": 0,
+     "type": "terraform_data"
+    },
+    {
+     "address": "terraform_data.reviewed_policy",
+     "expressions": {
+      "input": {
+       "constant_value": "synthetic"
+      }
+     },
+     "mode": "managed",
+     "name": "reviewed_policy",
+     "provider_config_key": "terraform",
+     "schema_version": 0,
+     "type": "terraform_data"
+    }
+   ]
+  }
+ },
+ "errored": false,
+ "format_version": "1.2",
+ "planned_values": {
+  "root_module": {
+   "resources": [
+    {
+     "address": "terraform_data.attachment",
+     "mode": "managed",
+     "name": "attachment",
+     "provider_name": "terraform.io/builtin/terraform",
+     "schema_version": 0,
+     "sensitive_values": {},
+     "type": "terraform_data",
+     "values": {
+      "triggers_replace": null
+     }
+    },
+    {
+     "address": "terraform_data.reviewed_policy",
+     "mode": "managed",
+     "name": "reviewed_policy",
+     "provider_name": "terraform.io/builtin/terraform",
+     "schema_version": 0,
+     "sensitive_values": {},
+     "type": "terraform_data",
+     "values": {
+      "input": "synthetic",
+      "triggers_replace": null
+     }
+    }
+   ]
+  }
+ },
+ "relevant_attributes": [
+  {
+   "attribute": [
+    "id"
+   ],
+   "resource": "terraform_data.reviewed_policy"
+  }
+ ],
+ "resource_changes": [
+  {
+   "address": "terraform_data.attachment",
+   "change": {
+    "actions": [
+     "create"
+    ],
+    "after": {
+     "triggers_replace": null
+    },
+    "after_sensitive": {},
+    "after_unknown": {
+     "id": true,
+     "input": true,
+     "output": true
+    },
+    "before": null,
+    "before_sensitive": false
+   },
+   "mode": "managed",
+   "name": "attachment",
+   "provider_name": "terraform.io/builtin/terraform",
+   "type": "terraform_data"
+  },
+  {
+   "address": "terraform_data.reviewed_policy",
+   "change": {
+    "actions": [
+     "create"
+    ],
+    "after": {
+     "input": "synthetic",
+     "triggers_replace": null
+    },
+    "after_sensitive": {},
+    "after_unknown": {
+     "id": true,
+     "output": true
+    },
+    "before": null,
+    "before_sensitive": false
+   },
+   "mode": "managed",
+   "name": "reviewed_policy",
+   "provider_name": "terraform.io/builtin/terraform",
+   "type": "terraform_data"
+  }
+ ],
+ "terraform_version": "1.15.8",
+ "timestamp": "2026-10-05T19:47:29Z"
+}

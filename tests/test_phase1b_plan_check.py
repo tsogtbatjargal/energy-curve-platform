@@ -480,3 +480,69 @@ def test_an_unreadable_source_stops(plan: dict, tmp_path: Path) -> None:
 
 def test_the_real_source_passes(plan: dict) -> None:
     assert p1b.check_source(ROOT / "infra" / "org") == []
+
+
+# --- F1, third report (review of c82197a): files Terraform loads that the check did not read -----
+# Terraform loads *.tf and *.tf.json, and merges override.tf(.json) and *_override.tf(.json) over
+# them. The check read only *.tf, so a JSON override could replace the reviewed expression while the
+# plan still showed only the direct references and an unknown value. infra/org uses neither JSON
+# configuration nor overrides, so the check refuses both rather than parse and merge them.
+
+REVIEWED_JSON_OVERRIDE = json.dumps({"resource": {"aws_organizations_policy_attachment": {
+    "workloads_protect": {"policy_id":
+        f'${{replace({PROTECT}.id, "/^.*$/", "p-FullAWSAccess")}}'}}}})  # fmt: skip
+
+
+def test_terraform_honours_a_json_override_invisibly() -> None:
+    """The real offline plan (tests/fixtures/terraform_plans/json_override): the override is in
+    effect, yet plan JSON shows exactly the direct references and an unknown value."""
+    real = json.loads((ROOT / "tests/fixtures/terraform_plans/json_override/synthetic-plan.json")
+                      .read_text())  # fmt: skip
+    config = next(r for r in real["configuration"]["root_module"]["resources"]
+                  if r["address"] == "terraform_data.attachment")  # fmt: skip
+    change_ = next(r for r in real["resource_changes"]
+                   if r["address"] == "terraform_data.attachment")["change"]  # fmt: skip
+    assert set(config["expressions"]["input"]["references"]) == {
+        "terraform_data.reviewed_policy.id", "terraform_data.reviewed_policy"}  # fmt: skip
+    assert change_["after_unknown"]["input"] is True
+
+
+@pytest.mark.parametrize("name", ["override.tf.json", "scps_override.tf.json",
+                                  "override.tf", "scps_override.tf"])  # fmt: skip
+def test_an_override_file_stops(plan: dict, tmp_path: Path, name: str) -> None:
+    stack(tmp_path)
+    if name.endswith(".json"):
+        (tmp_path / name).write_text(REVIEWED_JSON_OVERRIDE)
+    else:
+        (tmp_path / name).write_text(
+            'resource "aws_organizations_policy_attachment" "workloads_protect" {\n'
+            f'  policy_id = replace({PROTECT}.id, "/^.*$/", "p-FullAWSAccess")\n}}\n')  # fmt: skip
+    assert f"override files are not allowed in the stack: {name}" in p1b.check(plan, tmp_path)[0]
+
+
+def test_json_configuration_stops(plan: dict, tmp_path: Path) -> None:
+    """A plain *.tf.json file could declare or reconfigure resources the check would not read."""
+    stack(tmp_path)
+    (tmp_path / "extra.tf.json").write_text(json.dumps({"output": {"x": {"value": "y"}}}))
+    assert p1b.check(plan, tmp_path)[0] == [
+        "JSON configuration is not allowed in the stack: extra.tf.json"
+    ]
+
+
+@pytest.mark.parametrize("name", [".override.tf.json", "override.tf.json~", "#override.tf#",
+                                  "override.tf.json.bak", "notes.json"])  # fmt: skip
+def test_files_terraform_ignores_are_ignored(plan: dict, tmp_path: Path, name: str) -> None:
+    stack(tmp_path)
+    (tmp_path / name).write_text(REVIEWED_JSON_OVERRIDE)
+    assert p1b.check(plan, tmp_path)[0] == []
+
+
+def test_module_calls_stop(plan: dict) -> None:
+    """A module's configuration lives outside the stack directory the check reads."""
+    plan["configuration"]["root_module"]["module_calls"] = {"policies": {"source": "./policies"}}
+    assert "module calls are not allowed in the stack: policies" in p1b.check(plan)[0]
+
+
+def test_the_real_stack_has_no_json_or_override_files() -> None:
+    names = [p.name for p in (ROOT / "infra" / "org").iterdir()]
+    assert not [n for n in names if n.endswith(".tf.json") or p1b.is_override(n)]

@@ -10,7 +10,9 @@ Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is
 - create the two SCPs, each equal to its reviewed document in infra/org/policies/;
 - attach each to the Workloads OU, once, with policy_id exactly its own policy's id: checked in the
   plan (exact references, unknown value) and, because plan JSON drops functions and literals, in
-  the stack source (`replace(<policy>.id, ...)` has the same references);
+  the stack source (`replace(<policy>.id, ...)` has the same references). The source read is
+  exactly what Terraform loads; override files (override.tf(.json), *_override.tf(.json)) and
+  JSON configuration stop the check, and so do module calls, whose source lives elsewhere;
 - create the account `ecp-workloads` with parent_id the Workloads OU, the configured email
   (compared, never printed), `close_on_deletion = false`, the break-glass role name, billing
   access ALLOW and no GovCloud account, after both attachments (`depends_on`). AWS creates it
@@ -141,13 +143,41 @@ def check_attachment(
 OU_ID_EXPR = "${aws_organizations_organizational_unit.workloads.id}"
 
 
+# Terraform 1.15.8's own rules (internal/configs/parser_file_matcher.go, parser_config_dir.go):
+# it loads *.tf and *.tf.json, merges files whose base name is "override" or ends in "_override"
+# over the others, and ignores hidden, editor-backup and emacs lock files.
+def terraform_ignores(name: str) -> bool:
+    return (
+        name.startswith(".") or name.endswith("~") or (name.startswith("#") and name.endswith("#"))
+    )
+
+
+def config_ext(name: str) -> str | None:
+    return ".tf.json" if name.endswith(".tf.json") else ".tf" if name.endswith(".tf") else None
+
+
+def is_override(name: str) -> bool:
+    ext = config_ext(name)
+    base = name[: -len(ext)] if ext else None
+    return base is not None and (base == "override" or base.endswith("_override"))
+
+
+def config_files(stack_dir: Path) -> list[Path]:
+    """Exactly the configuration files Terraform loads from the stack directory."""
+    return sorted(
+        p
+        for p in stack_dir.iterdir()
+        if p.is_file() and not terraform_ignores(p.name) and config_ext(p.name)
+    )
+
+
 def source_attachments(stack_dir: Path) -> dict[str, list[dict[str, Any]]]:
     """Every aws_organizations_policy_attachment block in the stack source, by address."""
     import hcl2
     from hcl2.utils import SerializationOptions
 
     found: dict[str, list[dict[str, Any]]] = {}
-    for tf in sorted(stack_dir.glob("*.tf")):
+    for tf in config_files(stack_dir):
         with tf.open() as fh:
             doc = hcl2.load(fh, serialization_options=SerializationOptions(with_comments=False))
         for block in doc.get("resource", []):
@@ -165,6 +195,15 @@ def check_source(stack_dir: Path) -> list[str]:
     replace(<policy>.id, ...) looks exactly like <policy>.id there. Read the expressions from the
     source instead: each attachment is declared once, sets only policy_id and target_id, and both
     are the plain references. Run it from the clean checkout the saved plan was made from."""
+    # Overrides are merged over the reviewed expressions, and JSON configuration is not read here;
+    # infra/org uses neither, so either one stops the check instead of being parsed and merged.
+    loaded = config_files(stack_dir)
+    refused = [f"override files are not allowed in the stack: {p.name}" for p in loaded
+               if is_override(p.name)]  # fmt: skip
+    refused += [f"JSON configuration is not allowed in the stack: {p.name}" for p in loaded
+                if config_ext(p.name) == ".tf.json" and not is_override(p.name)]  # fmt: skip
+    if refused:
+        return refused
     try:
         found = source_attachments(stack_dir)
     except Exception as exc:  # noqa: BLE001 - any parse failure means the source is unverified
@@ -223,6 +262,9 @@ def check(
     planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
     problems += check_drift(plan, planned)
     problems += check_source(stack_dir)
+    root_module = (plan.get("configuration") or {}).get("root_module") or {}
+    for name in sorted(root_module.get("module_calls") or {}):
+        problems.append(f"module calls are not allowed in the stack: {name}")
     ou_id = (prior_values(plan, OU) or {}).get("id")
     seen = set()
     for rc in plan.get("resource_changes", []):
