@@ -23,9 +23,13 @@ variable "budget_alert_emails" {
   }
 }
 
-# Used from phase 1b, when the member account is created (ADR-0021); unused in phase 1a.
+# The workload account's root email (ADR-0021 phase 1b). Never committed: terraform.tfvars only.
 variable "workload_account_email" {
   type      = string
-  default   = null
   sensitive = true
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.workload_account_email))
+    error_message = "workload_account_email must be an email address."
+  }
 }

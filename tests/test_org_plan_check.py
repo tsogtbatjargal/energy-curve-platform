@@ -278,8 +278,10 @@ def target(ref: str) -> str:
 
 
 def test_org_imports_exactly_the_moved_resources_and_declares_them() -> None:
+    """Phase 1a's nine, plus the organization itself from phase 1b (to enable SCPs)."""
     org = load("org")
-    assert {target(b["to"]) for b in org["import"]} == opc.MOVED
+    imports = {target(b["to"]) for b in org["import"]}
+    assert imports == opc.MOVED | {"aws_organizations_organization.this"}
     assert addresses(org) >= opc.MOVED
 
 
