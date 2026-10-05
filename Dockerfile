@@ -3,7 +3,7 @@
 #   Fargate (pipeline): entryPoint ["python", "-m", "energy_curves.cloud"], command ["task", <run_id>]
 # Base images are pinned by their linux/amd64 digests. Runtime dependencies come from uv.lock,
 # installed by pip with --require-hashes, so the image gets exactly the locked, verified wheels.
-FROM ghcr.io/astral-sh/uv:0.12.17@sha256:1194b357d63b7bea6c121d8eef5d08d29c26ffbcfc64ec5ebcefd642ea759edb AS uv
+FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
 
 FROM public.ecr.aws/lambda/python:3.12@sha256:331a4f671a43eae58b8dfe1f3022928fe259540f535512d941ff0ec9352ab047
 # OS security updates at build time. Amazon Linux 2023 locks its repositories to the image's
