@@ -374,3 +374,109 @@ def test_an_attachment_resolving_to_a_known_policy_stops(plan: dict) -> None:
     attachment["after_unknown"]["policy_id"] = False
     attachment["after"]["policy_id"] = "p-other0000"
     assert problems(plan) == [f"{ATTACH_PROTECT}: must attach {PROTECT}"]
+
+
+# --- F1 again (review of 6401056): the expression itself, read from the source -----------------
+# replace(<policy>.id, "/^.*$/", "p-FullAWSAccess") has exactly the direct references and stays
+# unknown during planning, so no plan-JSON test can tell it from <policy>.id. The check must read
+# the attachment's policy_id expression from the stack source.
+
+ATTACHMENT_SOURCE = """
+resource "aws_organizations_policy_attachment" "workloads_baseline" {{
+  policy_id = {baseline}
+  target_id = aws_organizations_organizational_unit.workloads.id
+}}
+
+resource "aws_organizations_policy_attachment" "workloads_protect" {{
+  policy_id = {protect}
+  target_id = aws_organizations_organizational_unit.workloads.id
+}}
+"""
+
+
+def stack(tmp_path: Path, baseline: str = f"{BASELINE}.id", protect: str = f"{PROTECT}.id",
+          source: str = ATTACHMENT_SOURCE) -> Path:  # fmt: skip
+    (tmp_path / "scps.tf").write_text(source.format(baseline=baseline, protect=protect))
+    return tmp_path
+
+
+def test_direct_references_in_the_source_pass(plan: dict, tmp_path: Path) -> None:
+    assert p1b.check(plan, stack(tmp_path))[0] == []
+
+
+def test_a_rewritten_policy_id_in_the_source_stops(plan: dict, tmp_path: Path) -> None:
+    rewritten = f'replace({PROTECT}.id, "/^.*$/", "p-FullAWSAccess")'
+    assert p1b.check(plan, stack(tmp_path, protect=rewritten))[0] == [
+        f"{ATTACH_PROTECT}: policy_id must be exactly {PROTECT}.id in the source"
+    ]
+
+
+@pytest.mark.parametrize("expr", [
+    f'try("p-FullAWSAccess", {PROTECT}.id)',
+    f"coalesce({PROTECT}.id, {BASELINE}.id)",
+    f'var.override != "" ? var.override : {PROTECT}.id',
+    f"{BASELINE}.id",
+    '"p-FullAWSAccess"',
+    f"lower({PROTECT}.id)",
+])  # fmt: skip
+def test_any_other_policy_id_expression_stops(plan: dict, tmp_path: Path, expr: str) -> None:
+    assert p1b.check(plan, stack(tmp_path, protect=expr))[0] == [
+        f"{ATTACH_PROTECT}: policy_id must be exactly {PROTECT}.id in the source"
+    ]
+
+
+def test_a_rewritten_target_stops(plan: dict, tmp_path: Path) -> None:
+    source = ATTACHMENT_SOURCE.replace(
+        "target_id = aws_organizations_organizational_unit.workloads.id",
+        'target_id = "r-ab12"', 1)  # fmt: skip
+    assert p1b.check(plan, stack(tmp_path, source=source))[0] == [
+        f"{ATTACH_BASELINE}: target_id must be exactly the Workloads OU id"
+    ]
+
+
+@pytest.mark.parametrize("extra", [
+    "count = 1", 'for_each = toset(["a"])', "provider = aws.other",
+    "lifecycle {{\n    create_before_destroy = true\n  }}",  # braces escaped for str.format
+])  # fmt: skip
+def test_an_attachment_with_extra_arguments_stops(plan: dict, tmp_path: Path, extra: str) -> None:
+    source = ATTACHMENT_SOURCE.replace(
+        "  policy_id = {protect}", f"  {extra}\n  policy_id = {{protect}}"
+    )
+    assert p1b.check(plan, stack(tmp_path, source=source))[0] == [
+        f"{ATTACH_PROTECT}: may set only policy_id and target_id in the source"
+    ]
+
+
+def test_a_duplicate_or_missing_declaration_stops(plan: dict, tmp_path: Path) -> None:
+    stack(tmp_path)
+    (tmp_path / "more.tf").write_text(ATTACHMENT_SOURCE.split("\n\n")[1].format(
+        protect=f"{PROTECT}.id"))  # fmt: skip
+    assert p1b.check(plan, tmp_path)[0] == [
+        f"{ATTACH_PROTECT}: must be declared exactly once in the source"
+    ]
+    (tmp_path / "more.tf").unlink()
+    (tmp_path / "scps.tf").write_text("")
+    assert p1b.check(plan, tmp_path)[0] == [
+        f"{ATTACH_BASELINE}: must be declared exactly once in the source",
+        f"{ATTACH_PROTECT}: must be declared exactly once in the source",
+    ]
+
+
+def test_an_extra_attachment_in_the_source_stops(plan: dict, tmp_path: Path) -> None:
+    stack(tmp_path)
+    (tmp_path / "root.tf").write_text(
+        'resource "aws_organizations_policy_attachment" "root" {\n'
+        f"  policy_id = {BASELINE}.id\n  target_id = \"r-ab12\"\n}}\n")  # fmt: skip
+    assert p1b.check(plan, tmp_path)[0] == [
+        "unexpected attachment in the source: aws_organizations_policy_attachment.root"
+    ]
+
+
+def test_an_unreadable_source_stops(plan: dict, tmp_path: Path) -> None:
+    (tmp_path / "scps.tf").write_text('resource "x" {\n  policy_id = (\n')
+    found = p1b.check(plan, tmp_path)[0]
+    assert len(found) == 1 and found[0].startswith(f"cannot read the attachments from {tmp_path}")
+
+
+def test_the_real_source_passes(plan: dict) -> None:
+    assert p1b.check_source(ROOT / "infra" / "org") == []

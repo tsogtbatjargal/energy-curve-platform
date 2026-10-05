@@ -1,14 +1,16 @@
 """Pre-apply check of the saved infra/org plan for ADR-0021 phase 1b (the account and its SCPs).
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/phase1b_plan_check.py <plan.json>
+    python scripts/phase1b_plan_check.py <plan.json>   # from the checkout the plan was made from
 
 Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is "1 to import,
 5 to add, 1 to change, 0 to destroy":
 - import the organization and change only `enabled_policy_types`, from none to
   ["SERVICE_CONTROL_POLICY"]: the trusted-service principals and the feature set are unchanged;
 - create the two SCPs, each equal to its reviewed document in infra/org/policies/;
-- attach each to the Workloads OU, once;
+- attach each to the Workloads OU, once, with policy_id exactly its own policy's id: checked in the
+  plan (exact references, unknown value) and, because plan JSON drops functions and literals, in
+  the stack source (`replace(<policy>.id, ...)` has the same references);
 - create the account `ecp-workloads` with parent_id the Workloads OU, the configured email
   (compared, never printed), `close_on_deletion = false`, the break-glass role name, billing
   access ALLOW and no GovCloud account, after both attachments (`depends_on`). AWS creates it
@@ -136,6 +138,55 @@ def check_attachment(
     return problems
 
 
+OU_ID_EXPR = "${aws_organizations_organizational_unit.workloads.id}"
+
+
+def source_attachments(stack_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Every aws_organizations_policy_attachment block in the stack source, by address."""
+    import hcl2
+    from hcl2.utils import SerializationOptions
+
+    found: dict[str, list[dict[str, Any]]] = {}
+    for tf in sorted(stack_dir.glob("*.tf")):
+        with tf.open() as fh:
+            doc = hcl2.load(fh, serialization_options=SerializationOptions(with_comments=False))
+        for block in doc.get("resource", []):
+            for type_, named in block.items():
+                if type_.strip('"') != "aws_organizations_policy_attachment":
+                    continue
+                for name, body in named.items():
+                    address = f"aws_organizations_policy_attachment.{name.strip(chr(34))}"
+                    found.setdefault(address, []).append(body)
+    return found
+
+
+def check_source(stack_dir: Path) -> list[str]:
+    """Plan JSON keeps an expression's references but not its functions or literals, so
+    replace(<policy>.id, ...) looks exactly like <policy>.id there. Read the expressions from the
+    source instead: each attachment is declared once, sets only policy_id and target_id, and both
+    are the plain references. Run it from the clean checkout the saved plan was made from."""
+    try:
+        found = source_attachments(stack_dir)
+    except Exception as exc:  # noqa: BLE001 - any parse failure means the source is unverified
+        return [f"cannot read the attachments from {stack_dir}: {type(exc).__name__}"]
+    problems = []
+    for address in sorted(set(found) - set(ATTACHMENTS)):
+        problems.append(f"unexpected attachment in the source: {address}")
+    for address, policy in sorted(ATTACHMENTS.items()):
+        bodies = found.get(address, [])
+        if len(bodies) != 1:
+            problems.append(f"{address}: must be declared exactly once in the source")
+            continue
+        body = {k: v for k, v in bodies[0].items() if k != "__is_block__"}
+        if set(body) != {"policy_id", "target_id"}:
+            problems.append(f"{address}: may set only policy_id and target_id in the source")
+        if body.get("policy_id") != f"${{{policy}.id}}":
+            problems.append(f"{address}: policy_id must be exactly {policy}.id in the source")
+        if body.get("target_id") != OU_ID_EXPR:
+            problems.append(f"{address}: target_id must be exactly the Workloads OU id")
+    return problems
+
+
 def check_account(change: dict[str, Any], plan: dict[str, Any], ou_id: str | None) -> list[str]:
     after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
     problems = []
@@ -155,7 +206,9 @@ def check_account(change: dict[str, Any], plan: dict[str, Any], ou_id: str | Non
     return problems
 
 
-def check(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
+def check(
+    plan: dict[str, Any], stack_dir: Path = ROOT / "infra" / "org"
+) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     report: list[str] = []
     if plan.get("errored"):
@@ -169,6 +222,7 @@ def check(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
         problems.append("infra/org state is not exactly the phase 1a resources")
     planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
     problems += check_drift(plan, planned)
+    problems += check_source(stack_dir)
     ou_id = (prior_values(plan, OU) or {}).get("id")
     seen = set()
     for rc in plan.get("resource_changes", []):
