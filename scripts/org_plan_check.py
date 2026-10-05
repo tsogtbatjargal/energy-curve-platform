@@ -6,21 +6,27 @@
 Both plans are checked together, and exit 0 only when both do exactly what was reviewed:
 - `org`: import exactly the nine resources in MOVED, each with no change (a plain import), and
   create exactly one resource, the `Workloads` OU under the organization root. Nothing else: no
-  update, replacement, deletion or forget; no other import; no account, SCP, Identity Center or
-  root-access resource anywhere in the configuration; a fresh state (nothing in `prior_state`
-  but the resources being imported).
+  update, replacement, deletion or forget, except the budget import's state-only update when
+  only its sensitivity marks differ (the alert emails become sensitive; values identical); no
+  other import; no account, SCP, Identity Center or root-access resource anywhere in the
+  configuration; a fresh state (nothing in `prior_state` but the resources being imported).
 - `bootstrap`: forget exactly the same nine resources (`removed`, `destroy = false`) and change
-  nothing else; every output unchanged.
+  nothing else; every output unchanged. Refresh drift stops, except two reviewed cases on
+  resources planned no-op: the boundary policy's tags reading back as {} instead of null, and the
+  deploy role's stored inline policy catching up with `aws_iam_role_policy.gha_deploy_iam`.
 - `transfer`: each import is the very object bootstrap relinquishes (bucket name; budget account
   and name; tag key), in its import ID, `before` and `after`, with the expected values taken from
   the bootstrap plan's `forget` changes. Both plans are for the same account, the budget is in it,
   and the bucket is its `ecp-tfstate-<account>-` bucket.
 
-Plan summary for `org`: "9 to import, 1 to add, 0 to change, 0 to destroy". The one addition is the
-OU; the imports are not additions. For `bootstrap`: "0 to add, 0 to change, 0 to destroy", and the
-nine resources are listed as no longer managed (forgotten, not destroyed).
+Terraform's summary for `org`: "9 to import, 1 to add, 1 to change, 0 to destroy". The one addition
+is the OU; imports are not additions. The one change is the budget import's sensitivity marks: it
+is applied to state only, and Terraform makes no AWS call for it (Terraform 1.15.8,
+node_resource_abstract_instance.go). For `bootstrap`: "0 to add, 0 to change, 0 to destroy", and
+the nine resources are listed as no longer managed (forgotten, not destroyed); the apply also
+records the two refreshed values in state.
 
-Apply order: `org` first (both states then hold the nine resources; nothing changes them), then
+Apply order: `org` first (both states then hold the nine resources; no AWS object changes), then
 `bootstrap`. Plans hold sensitive values in plain text, so the report prints addresses, actions and
 attribute names only, never values (import IDs contain the account ID and are compared, not shown).
 """
@@ -72,16 +78,67 @@ def import_id(address: str, ident: tuple[Any, ...]) -> str:
     return ":".join(str(part) for part in ident)
 
 
-def common(plan: dict[str, Any]) -> list[str]:
-    problems = []
+DEPLOY_ROLE, DEPLOY_ROLE_POLICY = "aws_iam_role.gha_deploy", "aws_iam_role_policy.gha_deploy_iam"
+DEPLOY_INLINE_POLICY = "ecp-scoped-iam-and-state"
+WORKLOAD_BOUNDARY = "aws_iam_policy.workload_boundary"
+
+
+def prior_values(plan: dict[str, Any], address: str) -> dict[str, Any] | None:
+    prior = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
+    return next(
+        (r.get("values") for r in prior.get("resources", []) if r["address"] == address), None
+    )
+
+
+def explained_drift(plan: dict[str, Any], item: dict[str, Any]) -> str | None:
+    """The bootstrap plan's two reviewed refresh cases (2026-10-05), each on a resource planned
+    no-op; anything else is unexplained and stops. Refresh drift changes nothing in AWS; the apply
+    only records the refreshed values in state."""
+    address, change = item.get("address"), item.get("change") or {}
+    if change.get("actions") != ["update"]:
+        return None
+    planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
+    if planned.get(address) != ["no-op"]:
+        return None
+    before, after = change.get("before") or {}, change.get("after") or {}
+    differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+    if (
+        address == WORKLOAD_BOUNDARY
+        and differing == {"tags"}
+        and before.get("tags") is None
+        and after.get("tags") == {}
+    ):
+        return "tags null -> {}"
+    if address == DEPLOY_ROLE and differing == {"inline_policy"}:
+        old, new = before.get("inline_policy") or [], after.get("inline_policy") or []
+        role_policy = prior_values(plan, DEPLOY_ROLE_POLICY)
+        if (
+            len(old) == len(new) == 1
+            and old[0].get("name") == new[0].get("name") == DEPLOY_INLINE_POLICY
+            and planned.get(DEPLOY_ROLE_POLICY) == ["no-op"]
+            and role_policy is not None
+            and json.loads(new[0]["policy"]) == json.loads(role_policy["policy"])
+        ):
+            return f"inline_policy {DEPLOY_INLINE_POLICY} now equals {DEPLOY_ROLE_POLICY}"
+    return None
+
+
+def common(plan: dict[str, Any], allow_drift: bool = False) -> tuple[list[str], list[str]]:
+    """(problems, report). Drift stops, except the reviewed bootstrap cases when allow_drift."""
+    problems, report = [], []
     if plan.get("errored"):
         problems.append("the plan errored")
     if plan.get("complete") is False:
         problems.append("the plan is incomplete")
-    for key in ("resource_drift", "deferred_changes"):
-        for item in plan.get(key) or []:
-            problems.append(f"{key}: {item.get('address', '?')}")
-    return problems
+    for item in plan.get("resource_drift") or []:
+        reason = explained_drift(plan, item) if allow_drift else None
+        if reason is None:
+            problems.append(f"resource_drift: {item.get('address', '?')}")
+        else:
+            report.append(f"drift (refresh only, planned no-op) {item['address']}: {reason}")
+    for item in plan.get("deferred_changes") or []:
+        problems.append(f"deferred_changes: {item.get('address', '?')}")
+    return problems, report
 
 
 def configured_types(plan: dict[str, Any]) -> set[str]:
@@ -107,7 +164,7 @@ def already_owned(plan: dict[str, Any]) -> list[str]:
 
 
 def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
-    problems, report = common(plan), []
+    problems, report = common(plan)
     for address in already_owned(plan):
         problems.append(f"infra/org state already owns: {address}")
     for t in sorted(configured_types(plan)):
@@ -179,7 +236,7 @@ def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
 
 
 def check_bootstrap(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
-    problems, report = common(plan), []
+    problems, report = common(plan, allow_drift=True)
     forgotten = set()
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]

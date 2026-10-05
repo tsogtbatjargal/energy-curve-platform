@@ -514,3 +514,147 @@ def test_the_transfer_identity_check_still_applies_to_the_marked_budget(
 def test_a_budget_replacement_with_the_marks_stops(org_plan: dict, actions: list[str]) -> None:
     marks_only(org_plan)["actions"] = actions
     assert opc.check_org(org_plan)[0] == [f"{BUDGET}: the import is not a plain import ([])"]
+
+
+# --- refresh drift in the bootstrap plan (real bootstrap plan, 2026-10-05) ---------------------
+# Two drift entries, both planned no-op: the boundary policy's tags read back as {} where state had
+# null, and the deploy role's stored copy of its inline policy predates the R2 apply; the refreshed
+# copy equals aws_iam_role_policy.gha_deploy_iam. Only these exact cases pass.
+
+ROLE, ROLE_POLICY = "aws_iam_role.gha_deploy", "aws_iam_role_policy.gha_deploy_iam"
+BOUNDARY_POLICY = "aws_iam_policy.workload_boundary"
+INLINE = "ecp-scoped-iam-and-state"
+R2_POLICY = {"Version": "2012-10-17", "Statement": [
+    {"Sid": "RolesOnlyWithTheBoundary", "Effect": "Deny", "Action": "iam:CreateRole",
+     "Resource": "*"}]}  # fmt: skip
+OLD_POLICY = {"Version": "2012-10-17", "Statement": [
+    {"Sid": "ScopedIam", "Effect": "Allow", "Action": "iam:CreateRole",
+     "Resource": "*"}]}  # fmt: skip
+
+
+def drift(address: str, before: dict, after: dict) -> dict:
+    return {"address": address, "mode": "managed", "type": address.split(".")[0],
+            "change": {"actions": ["update"], "before": before, "after": after}}  # fmt: skip
+
+
+def inline(policy: dict, name: str = INLINE) -> list[dict]:
+    return [{"name": name, "policy": json.dumps(policy)}]
+
+
+def with_real_drift(plan: dict) -> dict:
+    """The bootstrap plan's two real drift entries, with the resources they refer to."""
+    plan["prior_state"]["values"]["root_module"]["resources"].append(
+        {"address": ROLE_POLICY, "mode": "managed",
+         "values": {"name": INLINE, "policy": json.dumps(R2_POLICY)}}
+    )  # fmt: skip
+    plan["resource_changes"] += [
+        rc(ROLE_POLICY, ["no-op"], {"name": INLINE}, {"name": INLINE}),
+        rc(BOUNDARY_POLICY, ["no-op"], {"name": "b"}, {"name": "b"}),
+    ]
+    role = {"name": "ecp-gha-deploy", "max_session_duration": 3600}
+    plan["resource_drift"] = [
+        drift(BOUNDARY_POLICY, {"name": "b", "tags": None}, {"name": "b", "tags": {}}),
+        drift(ROLE, {**role, "inline_policy": inline(OLD_POLICY)},
+              {**role, "inline_policy": inline(R2_POLICY)}),
+    ]  # fmt: skip
+    return plan
+
+
+def drift_item(plan: dict, address: str) -> dict:
+    return next(d for d in plan["resource_drift"] if d["address"] == address)["change"]
+
+
+def test_the_two_exact_refresh_cases_pass(bootstrap_plan: dict) -> None:
+    problems, report = opc.check_bootstrap(with_real_drift(bootstrap_plan))
+    assert problems == []
+    assert f"drift (refresh only, planned no-op) {BOUNDARY_POLICY}: tags null -> {{}}" in report
+    assert (
+        f"drift (refresh only, planned no-op) {ROLE}: inline_policy {INLINE} now equals "
+        f"{ROLE_POLICY}"
+    ) in report
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(None, {"k": "v"}), ({}, None), ({"k": "v"}, {}), (None, None)],
+)
+def test_other_boundary_tag_drift_stops(bootstrap_plan: dict, before: Any, after: Any) -> None:
+    c = drift_item(with_real_drift(bootstrap_plan), BOUNDARY_POLICY)
+    c["before"]["tags"], c["after"]["tags"] = before, after
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {BOUNDARY_POLICY}"]
+
+
+def test_boundary_drift_beyond_tags_stops(bootstrap_plan: dict) -> None:
+    drift_item(with_real_drift(bootstrap_plan), BOUNDARY_POLICY)["after"]["name"] = "other"
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {BOUNDARY_POLICY}"]
+
+
+def test_a_refreshed_inline_policy_unlike_the_role_policy_stops(bootstrap_plan: dict) -> None:
+    edited = {**R2_POLICY, "Statement": [*R2_POLICY["Statement"], *OLD_POLICY["Statement"]]}
+    drift_item(with_real_drift(bootstrap_plan), ROLE)["after"]["inline_policy"] = inline(edited)
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_another_inline_policy_name_stops(bootstrap_plan: dict) -> None:
+    c = drift_item(with_real_drift(bootstrap_plan), ROLE)
+    c["before"]["inline_policy"] = inline(OLD_POLICY, "other")
+    c["after"]["inline_policy"] = inline(R2_POLICY, "other")
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_an_extra_inline_policy_stops(bootstrap_plan: dict) -> None:
+    c = drift_item(with_real_drift(bootstrap_plan), ROLE)
+    c["after"]["inline_policy"] = inline(R2_POLICY) + inline(OLD_POLICY, "added-outside")
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_role_drift_beyond_the_inline_policy_stops(bootstrap_plan: dict) -> None:
+    drift_item(with_real_drift(bootstrap_plan), ROLE)["after"]["max_session_duration"] = 43200
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_role_drift_when_the_role_policy_itself_changes_stops(bootstrap_plan: dict) -> None:
+    change(with_real_drift(bootstrap_plan), ROLE_POLICY)["change"]["actions"] = ["update"]
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [
+        f"resource_drift: {ROLE}",
+        f"unexpected change: update {ROLE_POLICY}",
+    ]
+
+
+@pytest.mark.parametrize("address", [ROLE, BOUNDARY_POLICY])
+def test_drift_on_a_resource_with_a_planned_change_stops(
+    bootstrap_plan: dict, address: str
+) -> None:
+    change(with_real_drift(bootstrap_plan), address)["change"]["actions"] = ["update"]
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [
+        f"resource_drift: {address}",
+        f"unexpected change: update {address}",
+    ]
+
+
+def test_drift_on_any_other_resource_stops(bootstrap_plan: dict) -> None:
+    with_real_drift(bootstrap_plan)["resource_drift"].append(
+        drift("aws_iam_role.gha_plan", {"tags": None}, {"tags": {}})
+    )
+    assert opc.check_bootstrap(bootstrap_plan)[0] == ["resource_drift: aws_iam_role.gha_plan"]
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["create"], ["no-op"]])
+def test_a_drift_entry_that_is_not_an_update_stops(
+    bootstrap_plan: dict, actions: list[str]
+) -> None:
+    drift_item(with_real_drift(bootstrap_plan), BOUNDARY_POLICY)["actions"] = actions
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {BOUNDARY_POLICY}"]
+
+
+def test_the_same_drift_in_the_org_plan_stops(org_plan: dict) -> None:
+    org_plan["resource_changes"].append(rc(BOUNDARY_POLICY, ["no-op"], {}, {}))
+    org_plan["resource_drift"] = [
+        drift(BOUNDARY_POLICY, {"name": "b", "tags": None}, {"name": "b", "tags": {}})
+    ]
+    assert opc.check_org(org_plan)[0] == [f"resource_drift: {BOUNDARY_POLICY}"]
+
+
+def test_deferred_changes_still_stop_the_bootstrap_plan(bootstrap_plan: dict) -> None:
+    with_real_drift(bootstrap_plan)["deferred_changes"] = [{"address": ROLE}]
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"deferred_changes: {ROLE}"]
