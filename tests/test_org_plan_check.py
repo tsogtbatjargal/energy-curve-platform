@@ -53,7 +53,8 @@ def org_plan() -> dict:
     return {
         "complete": True,
         "prior_state": {"values": {"root_module": {"resources": [
-            {"address": "data.aws_caller_identity.current", "mode": "data", "values": {}},
+            {"address": "data.aws_caller_identity.current", "mode": "data",
+             "values": {"account_id": ACCOUNT}},
             *pending,
         ]}}},
         "configuration": {"root_module": {"resources": [
@@ -70,11 +71,16 @@ def org_plan() -> dict:
 
 @pytest.fixture
 def bootstrap_plan() -> dict:
+    # As tests/fixtures/terraform_plans/forget: `before` holds the object bootstrap relinquishes.
     return {
         "complete": True,
+        "prior_state": {"values": {"root_module": {"resources": [
+            {"address": "data.aws_caller_identity.current", "mode": "data",
+             "values": {"account_id": ACCOUNT}},
+        ]}}},
         "resource_changes": [
             rc("aws_iam_role.gha_deploy", ["no-op"], {"name": "d"}, {"name": "d"}),
-            *[rc(a, ["forget"], {"x": 1}, None) for a in sorted(opc.MOVED)],
+            *[rc(a, ["forget"], imported(a)["change"]["before"], None) for a in sorted(opc.MOVED)],
         ],
         "output_changes": {"state_bucket": {"actions": ["no-op"]}},
     }  # fmt: skip
@@ -117,10 +123,10 @@ def test_a_missing_or_extra_import_stops(org_plan: dict) -> None:
     assert "unexpected import: aws_s3_bucket.other" in problems
 
 
-def test_an_import_of_another_object_stops(org_plan: dict) -> None:
+def test_an_import_of_another_object_stops(org_plan: dict, bootstrap_plan: dict) -> None:
     change(org_plan, "aws_s3_bucket_policy.tfstate")["change"]["importing"]["id"] = "other-bucket"
-    assert opc.check_org(org_plan)[0] == [
-        "aws_s3_bucket_policy.tfstate: import ID is not the expected resource"
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "aws_s3_bucket_policy.tfstate: imports another object than bootstrap relinquishes"
     ]
 
 
@@ -231,19 +237,18 @@ def test_any_other_bootstrap_change_stops(bootstrap_plan: dict) -> None:
     ]
 
 
-def test_the_cli_exit_codes(tmp_path: Path, org_plan: dict) -> None:
-    import json
-
-    good = tmp_path / "org.json"
+def test_the_cli_exit_codes(tmp_path: Path, org_plan: dict, bootstrap_plan: dict) -> None:
+    good, boot = tmp_path / "org.json", tmp_path / "bootstrap.json"
     good.write_text(json.dumps(org_plan))
+    boot.write_text(json.dumps(bootstrap_plan))
     bad_plan = copy.deepcopy(org_plan)
     bad_plan["errored"] = True
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps(bad_plan))
-    assert opc.main(["org", str(good)]) == 0
-    assert opc.main(["org", str(bad)]) == 1
-    assert opc.main(["bootstrap", str(good)]) == 1  # the wrong plan for the mode
-    assert opc.main(["batch", str(good)]) == 2
+    assert opc.main([str(good), str(boot)]) == 0
+    assert opc.main([str(bad), str(boot)]) == 1
+    assert opc.main([str(good), str(good)]) == 1  # the org plan in the bootstrap slot
+    assert opc.main([str(good)]) == 2
 
 
 # --- the source: one owner for each resource ---------------------------------------------------
@@ -305,3 +310,110 @@ def test_the_tag_and_budget_cannot_be_destroyed_from_org() -> None:
             }:
                 (body,) = named.values()
                 assert body["lifecycle"][0]["prevent_destroy"] is True, t
+
+
+# --- F2 (review of b65ab7b): imports must be the objects bootstrap relinquishes ---------------
+
+OTHER_BUCKET = "unrelated-review-synthetic-bucket"
+OTHER_BUDGET = "unrelated-review-synthetic-budget"
+OTHER_ACCOUNT = "210987654321"
+S3_MOVED = sorted(a for a in opc.MOVED if a.startswith("aws_s3_"))
+
+
+def retarget(plan: dict, address: str, **values: str) -> None:
+    """Point an import at another object, self-consistently: before, after and the import ID."""
+    c = change(plan, address)["change"]
+    c["before"].update(values)
+    c["after"].update(values)
+    after = c["after"]
+    c["importing"]["id"] = opc.import_id(address, opc.identity(address, after))
+
+
+def test_the_correct_transfer_passes(org_plan: dict, bootstrap_plan: dict) -> None:
+    problems, report = opc.check_transfer(org_plan, bootstrap_plan)
+    assert problems == []
+    assert report[-1] == "transfer: all 9 imports are the objects bootstrap relinquishes"
+
+
+def test_a_self_consistent_import_of_another_bucket_stops(
+    org_plan: dict, bootstrap_plan: dict
+) -> None:
+    for address in S3_MOVED:
+        retarget(org_plan, address, bucket=OTHER_BUCKET)
+    assert opc.check_org(org_plan)[0] == []  # internally consistent, so the shape check passes
+    problems = opc.check_transfer(org_plan, bootstrap_plan)[0]
+    assert problems == [
+        f"{a}: imports another object than bootstrap relinquishes" for a in S3_MOVED
+    ]
+
+
+def test_a_self_consistent_import_of_another_budget_stops(
+    org_plan: dict, bootstrap_plan: dict
+) -> None:
+    retarget(org_plan, "aws_budgets_budget.project", name=OTHER_BUDGET)
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "aws_budgets_budget.project: imports another object than bootstrap relinquishes"
+    ]
+
+
+def test_a_self_consistent_import_from_another_account_stops(
+    org_plan: dict, bootstrap_plan: dict
+) -> None:
+    retarget(org_plan, "aws_budgets_budget.project", account_id=OTHER_ACCOUNT)
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "aws_budgets_budget.project: imports another object than bootstrap relinquishes"
+    ]
+
+
+def test_plans_for_different_accounts_stop(org_plan: dict, bootstrap_plan: dict) -> None:
+    identity = org_plan["prior_state"]["values"]["root_module"]["resources"][0]
+    identity["values"]["account_id"] = OTHER_ACCOUNT
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "the org and bootstrap plans are not for the same account"
+    ]
+
+
+def test_relinquished_objects_must_belong_to_the_account(
+    org_plan: dict, bootstrap_plan: dict
+) -> None:
+    """Both plans agree, but on a budget and bucket of another account: still a stop."""
+    for plan in (org_plan, bootstrap_plan):
+        plan["prior_state"]["values"]["root_module"]["resources"][0]["values"]["account_id"] = (
+            OTHER_ACCOUNT
+        )
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "aws_budgets_budget.project: the budget is not in the plans' account",
+        "aws_s3_bucket.tfstate: the bucket is not the account's state bucket",
+    ]
+
+
+def test_an_import_bootstrap_does_not_relinquish_stops(
+    org_plan: dict, bootstrap_plan: dict
+) -> None:
+    tag = change(bootstrap_plan, "aws_ce_cost_allocation_tag.project")
+    bootstrap_plan["resource_changes"].remove(tag)
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "aws_ce_cost_allocation_tag.project: bootstrap does not relinquish it"
+    ]
+
+
+def test_the_cli_needs_both_plans(tmp_path: Path, org_plan: dict, bootstrap_plan: dict) -> None:
+    org, boot = tmp_path / "org.json", tmp_path / "bootstrap.json"
+    org.write_text(json.dumps(org_plan))
+    boot.write_text(json.dumps(bootstrap_plan))
+    assert opc.main([str(org), str(boot)]) == 0
+    retarget(org_plan, "aws_budgets_budget.project", name=OTHER_BUDGET)
+    org.write_text(json.dumps(org_plan))
+    assert opc.main([str(org), str(boot)]) == 1
+    assert opc.main([str(boot), str(org)]) == 1  # swapped
+    assert opc.main(["org", str(org)]) == 2  # the org plan alone is not accepted
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_the_right_import_id_with_another_object_stops(
+    org_plan: dict, bootstrap_plan: dict, side: str
+) -> None:
+    change(org_plan, "aws_s3_bucket_versioning.tfstate")["change"][side]["bucket"] = OTHER_BUCKET
+    assert opc.check_transfer(org_plan, bootstrap_plan)[0] == [
+        "aws_s3_bucket_versioning.tfstate: imports another object than bootstrap relinquishes"
+    ]

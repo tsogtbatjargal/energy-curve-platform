@@ -1,10 +1,9 @@
 """Pre-apply check of the two saved plans for ADR-0021 phase 1a (ownership transfer and the OU).
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/org_plan_check.py org <plan.json>        # infra/org
-    python scripts/org_plan_check.py bootstrap <plan.json>  # the management infra/bootstrap
+    python scripts/org_plan_check.py <org-plan.json> <bootstrap-plan.json>
 
-Exit 0 only when the plan does exactly what was reviewed:
+Both plans are checked together, and exit 0 only when both do exactly what was reviewed:
 - `org`: import exactly the nine resources in MOVED, each with no change (a plain import), and
   create exactly one resource, the `Workloads` OU under the organization root. Nothing else: no
   update, replacement, deletion or forget; no other import; no account, SCP, Identity Center or
@@ -12,6 +11,10 @@ Exit 0 only when the plan does exactly what was reviewed:
   but the resources being imported).
 - `bootstrap`: forget exactly the same nine resources (`removed`, `destroy = false`) and change
   nothing else; every output unchanged.
+- `transfer`: each import is the very object bootstrap relinquishes (bucket name; budget account
+  and name; tag key), in its import ID, `before` and `after`, with the expected values taken from
+  the bootstrap plan's `forget` changes. Both plans are for the same account, the budget is in it,
+  and the bucket is its `ecp-tfstate-<account>-` bucket.
 
 Plan summary for `org`: "9 to import, 1 to add, 0 to change, 0 to destroy". The one addition is the
 OU; the imports are not additions. For `bootstrap`: "0 to add, 0 to change, 0 to destroy", and the
@@ -54,12 +57,18 @@ LATER_PHASE_TYPES = re.compile(
 )
 
 
-def expected_import_id(address: str, after: dict[str, Any]) -> str | None:
+def identity(address: str, values: dict[str, Any]) -> tuple[Any, ...]:
+    """What makes a moved resource that object: its tag key, the budget's account and name, or
+    the bucket name for each of the seven bucket resources."""
     if address == "aws_ce_cost_allocation_tag.project":
-        return "project"
+        return (values.get("tag_key"),)
     if address == "aws_budgets_budget.project":
-        return f"{after.get('account_id')}:{after.get('name')}"
-    return after.get("bucket")
+        return (values.get("account_id"), values.get("name"))
+    return (values.get("bucket"),)
+
+
+def import_id(address: str, ident: tuple[Any, ...]) -> str:
+    return ":".join(str(part) for part in ident)
 
 
 def common(plan: dict[str, Any]) -> list[str]:
@@ -116,8 +125,6 @@ def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
                 problems.append(f"unexpected import: {address}")
             elif actions != ["no-op"] or attrs:
                 problems.append(f"{address}: the import is not a plain import ({sorted(attrs)})")
-            elif importing.get("id") != expected_import_id(address, change.get("after") or {}):
-                problems.append(f"{address}: import ID is not the expected resource")
             imported.add(address)
             continue
         if actions in UNCHANGED:
@@ -178,22 +185,92 @@ def check_bootstrap(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
     return problems, report
 
 
-CHECKS = {"org": check_org, "bootstrap": check_bootstrap}
+def caller_account(plan: dict[str, Any]) -> str | None:
+    prior = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
+    for r in prior.get("resources", []):
+        if r["address"] == "data.aws_caller_identity.current":
+            return (r.get("values") or {}).get("account_id")
+    return None
+
+
+def check_transfer(org: dict[str, Any], bootstrap: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Each import must be the very object bootstrap relinquishes. The expected identities come
+    from the bootstrap plan's `forget` changes, whose `before` is read from bootstrap's own state,
+    not from the import being checked; an import that is merely consistent with itself (another
+    bucket, budget or account throughout) stops."""
+    problems: list[str] = []
+    account = caller_account(org)
+    if account is None or account != caller_account(bootstrap):
+        return ["the org and bootstrap plans are not for the same account"], []
+    relinquished = {
+        rc["address"]: rc["change"].get("before") or {}
+        for rc in bootstrap.get("resource_changes", [])
+        if rc["address"] in MOVED and rc["change"]["actions"] == ["forget"]
+    }
+    imports = {
+        rc["address"]: rc["change"]
+        for rc in org.get("resource_changes", [])
+        if rc["change"].get("importing") is not None
+    }
+    matched = 0
+    for address in sorted(MOVED):
+        if address not in relinquished:
+            problems.append(f"{address}: bootstrap does not relinquish it")
+            continue
+        want = identity(address, relinquished[address])
+        if None in want:
+            problems.append(f"{address}: bootstrap's record has no identity")
+            continue
+        if address == "aws_budgets_budget.project" and want[0] != account:
+            problems.append(f"{address}: the budget is not in the plans' account")
+        if address == "aws_s3_bucket.tfstate" and not str(want[0]).startswith(
+            f"ecp-tfstate-{account}-"
+        ):
+            problems.append(f"{address}: the bucket is not the account's state bucket")
+        change = imports.get(address)
+        if change is None:
+            continue  # check_org reports the missing import
+        if (
+            change["importing"].get("id") != import_id(address, want)
+            or identity(address, change.get("before") or {}) != want
+            or identity(address, change.get("after") or {}) != want
+        ):
+            problems.append(f"{address}: imports another object than bootstrap relinquishes")
+        else:
+            matched += 1
+    report = [
+        f"transfer: all {matched} imports are the objects bootstrap relinquishes"
+        if not problems and matched == len(MOVED)
+        else "transfer: not the objects bootstrap relinquishes"
+    ]
+    return problems, report
+
+
+def check(org: dict[str, Any], bootstrap: dict[str, Any]) -> tuple[list[str], list[str]]:
+    problems: list[str] = []
+    report: list[str] = []
+    for name, (p, r) in (
+        ("org", check_org(org)),
+        ("bootstrap", check_bootstrap(bootstrap)),
+        ("transfer", check_transfer(org, bootstrap)),
+    ):
+        problems += [f"{name}: {x}" for x in p]
+        report += [f"[{name}] {x}" for x in r]
+    return problems, report
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 2 or args[0] not in CHECKS:
-        print("usage: org_plan_check.py {org|bootstrap} <plan.json>", file=sys.stderr)
+    if len(args) != 2 or not all(a.endswith(".json") for a in args):
+        print("usage: org_plan_check.py <org-plan.json> <bootstrap-plan.json>", file=sys.stderr)
         return 2
-    problems, report = CHECKS[args[0]](json.loads(Path(args[1]).read_text()))
+    org, bootstrap = (json.loads(Path(a).read_text()) for a in args)
+    problems, report = check(org, bootstrap)
     print("\n".join(report))
     for p in problems:
         print(f"STOP  {p}")
     print(
-        f"OK: exactly the reviewed phase 1a {args[0]} change"
-        if not problems
-        else "STOP: do not apply this plan"
+        "OK: exactly the reviewed phase 1a transfer" if not problems else "STOP: apply neither plan"
     )
     return 1 if problems else 0
 
