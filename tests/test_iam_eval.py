@@ -85,3 +85,17 @@ def test_a_boundary_caps_what_the_identity_allows() -> None:
 def test_anything_unsupported_raises_rather_than_guesses(stmt: dict) -> None:
     with pytest.raises(ValueError, match="unsupported"):
         decide([policy(stmt)], "s3:GetObject", "*")
+
+
+def test_null_checks_whether_a_key_is_present() -> None:
+    """IAM "Null" operator: true means the key is absent, false that it is present (used by the
+    long-term-root SCP with aws:AssumedRoot, ADR-0021)."""
+    stmt = {"Effect": "Deny", "Action": "*", "Resource": "*",
+            "Condition": {"Null": {"aws:AssumedRoot": "true"}}}  # fmt: skip
+    deny_unless_assumed_root = {"Statement": [stmt]}
+    assert decide([deny_unless_assumed_root], "s3:GetObject", "*") == EXPLICIT_DENY
+    assert decide([deny_unless_assumed_root], "s3:GetObject", "*",
+                  {"aws:AssumedRoot": "true"}) == IMPLICIT_DENY  # fmt: skip
+    present = {"Statement": [{**stmt, "Condition": {"Null": {"aws:AssumedRoot": "false"}}}]}
+    assert decide([present], "s3:GetObject", "*", {"aws:AssumedRoot": "true"}) == EXPLICIT_DENY
+    assert decide([present], "s3:GetObject", "*") == IMPLICIT_DENY

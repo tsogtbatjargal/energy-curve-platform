@@ -5,7 +5,8 @@ It covers only what those policies use, and raises on anything else rather than 
   case-insensitively, resources case-sensitively.
 - Condition operators String(Not)Equals, String(Not)Like, Arn(Not)Equals, Arn(Not)Like, each
   over single-valued keys. A key missing from the request makes a positive operator false and
-  a negated one true (IAM User Guide, "Condition operators" and "missing keys").
+  a negated one true (IAM User Guide, "Condition operators" and "missing keys"). `Null` tests
+  presence: "true" holds when the key is absent, "false" when it is present.
 - Decision: an explicit Deny in any policy wins; otherwise the identity policies must Allow and,
   when a permissions boundary is given, so must the boundary.
 
@@ -44,6 +45,14 @@ def matches(pattern: str, value: str, *, case: bool = True) -> bool:
 
 def condition_holds(condition: dict[str, Any], context: dict[str, str]) -> bool:
     for operator, keys in condition.items():
+        if operator == "Null":
+            for key, value in keys.items():
+                present = any(k.lower() == key.lower() for k in context)
+                if value not in ("true", "false"):
+                    raise ValueError(f"Null takes 'true' or 'false', not {value!r}")
+                if present == (value == "true"):
+                    return False
+            continue
         if operator not in OPERATORS:
             raise ValueError(f"unsupported condition operator {operator}")
         negated, wildcards = OPERATORS[operator]

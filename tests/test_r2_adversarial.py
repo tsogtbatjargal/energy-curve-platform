@@ -487,7 +487,7 @@ def test_eval_resource_wildcards() -> None:
         {"StringEqualsIgnoreCase": {"aws:PrincipalTag/team": "ecp"}},
         {"StringEqualsIfExists": {PB: BOUNDARY}},
         {"ForAnyValue:StringEquals": {"aws:TagKeys": "x"}},
-        {"Null": {PB: "true"}},
+        {"Null": {PB: "maybe"}},  # Null is supported (ADR-0021 SCPs), but only "true"/"false"
     ],
 )
 def test_eval_unsupported_condition_raises(condition: dict) -> None:
