@@ -13,7 +13,8 @@ Both plans are checked together, and exit 0 only when both do exactly what was r
 - `bootstrap`: forget exactly the same nine resources (`removed`, `destroy = false`) and change
   nothing else; every output unchanged. Refresh drift stops, except two reviewed cases on
   resources planned no-op: the boundary policy's tags reading back as {} instead of null, and the
-  deploy role's stored inline policy catching up with `aws_iam_role_policy.gha_deploy_iam`.
+  deploy role's stored copy of `ecp-scoped-iam-and-state` catching up with
+  `aws_iam_role_policy.gha_deploy_iam` (its other inline policy, terraform-state-read, unchanged).
 - `transfer`: each import is the very object bootstrap relinquishes (bucket name; budget account
   and name; tag key), in its import ID, `before` and `after`, with the expected values taken from
   the bootstrap plan's `forget` changes. Both plans are for the same account, the budget is in it,
@@ -80,6 +81,11 @@ def import_id(address: str, ident: tuple[Any, ...]) -> str:
 
 DEPLOY_ROLE, DEPLOY_ROLE_POLICY = "aws_iam_role.gha_deploy", "aws_iam_role_policy.gha_deploy_iam"
 DEPLOY_INLINE_POLICY = "ecp-scoped-iam-and-state"
+# The deploy role's inline policies by name, and the role-policy resource that manages each.
+DEPLOY_INLINE_POLICIES = {
+    DEPLOY_INLINE_POLICY: DEPLOY_ROLE_POLICY,
+    "terraform-state-read": "aws_iam_role_policy.gha_deploy_state_read",
+}
 WORKLOAD_BOUNDARY = "aws_iam_policy.workload_boundary"
 
 
@@ -109,18 +115,39 @@ def explained_drift(plan: dict[str, Any], item: dict[str, Any]) -> str | None:
         and after.get("tags") == {}
     ):
         return "tags null -> {}"
-    if address == DEPLOY_ROLE and differing == {"inline_policy"}:
-        old, new = before.get("inline_policy") or [], after.get("inline_policy") or []
-        role_policy = prior_values(plan, DEPLOY_ROLE_POLICY)
-        if (
-            len(old) == len(new) == 1
-            and old[0].get("name") == new[0].get("name") == DEPLOY_INLINE_POLICY
-            and planned.get(DEPLOY_ROLE_POLICY) == ["no-op"]
-            and role_policy is not None
-            and json.loads(new[0]["policy"]) == json.loads(role_policy["policy"])
-        ):
-            return f"inline_policy {DEPLOY_INLINE_POLICY} now equals {DEPLOY_ROLE_POLICY}"
+    if (
+        address == DEPLOY_ROLE
+        and differing == {"inline_policy"}
+        and deploy_inline_caught_up(
+            plan, before.get("inline_policy") or [], after.get("inline_policy") or []
+        )
+    ):
+        return f"inline_policy {DEPLOY_INLINE_POLICY} now equals {DEPLOY_ROLE_POLICY}"
     return None
+
+
+def deploy_inline_caught_up(
+    plan: dict[str, Any], old: list[dict[str, Any]], new: list[dict[str, Any]]
+) -> bool:
+    """The role's two inline policies, each once; only ecp-scoped-iam-and-state changed; and every
+    refreshed entry equals the policy of the role-policy resource that manages it, each planned
+    no-op. Anything else (a policy added, removed or edited outside Terraform) is not this case."""
+    names = [e.get("name") for e in old], [e.get("name") for e in new]
+    if any(sorted(n) != sorted(DEPLOY_INLINE_POLICIES) for n in names):
+        return False
+    planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
+    before = {e["name"]: json.loads(e["policy"]) for e in old}
+    for entry in new:
+        name, refreshed = entry["name"], json.loads(entry["policy"])
+        if name != DEPLOY_INLINE_POLICY and refreshed != before[name]:
+            return False
+        resource = DEPLOY_INLINE_POLICIES[name]
+        state = prior_values(plan, resource)
+        if planned.get(resource) != ["no-op"] or state is None:
+            return False
+        if refreshed != json.loads(state["policy"]):
+            return False
+    return True
 
 
 def common(plan: dict[str, Any], allow_drift: bool = False) -> tuple[list[str], list[str]]:

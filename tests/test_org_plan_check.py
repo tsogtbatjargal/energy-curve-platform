@@ -522,6 +522,7 @@ def test_a_budget_replacement_with_the_marks_stops(org_plan: dict, actions: list
 # copy equals aws_iam_role_policy.gha_deploy_iam. Only these exact cases pass.
 
 ROLE, ROLE_POLICY = "aws_iam_role.gha_deploy", "aws_iam_role_policy.gha_deploy_iam"
+STATE_READ, STATE_READ_NAME = "aws_iam_role_policy.gha_deploy_state_read", "terraform-state-read"
 BOUNDARY_POLICY = "aws_iam_policy.workload_boundary"
 INLINE = "ecp-scoped-iam-and-state"
 R2_POLICY = {"Version": "2012-10-17", "Statement": [
@@ -537,18 +538,31 @@ def drift(address: str, before: dict, after: dict) -> dict:
             "change": {"actions": ["update"], "before": before, "after": after}}  # fmt: skip
 
 
-def inline(policy: dict, name: str = INLINE) -> list[dict]:
-    return [{"name": name, "policy": json.dumps(policy)}]
+STATE_READ_POLICY = {"Version": "2012-10-17", "Statement": [
+    {"Sid": "ReadState", "Effect": "Allow", "Action": "s3:GetObject",
+     "Resource": "*"}]}  # fmt: skip
+
+
+def inline(policy: dict, name: str = INLINE, state_read: bool = True) -> list[dict]:
+    """The deploy role's inline policies, as the real plan lists them: this one, then the
+    unchanged terraform-state-read policy."""
+    entries = [{"name": name, "policy": json.dumps(policy)}]
+    if state_read:
+        entries.append({"name": STATE_READ_NAME, "policy": json.dumps(STATE_READ_POLICY)})
+    return entries
 
 
 def with_real_drift(plan: dict) -> dict:
     """The bootstrap plan's two real drift entries, with the resources they refer to."""
-    plan["prior_state"]["values"]["root_module"]["resources"].append(
+    plan["prior_state"]["values"]["root_module"]["resources"] += [
         {"address": ROLE_POLICY, "mode": "managed",
-         "values": {"name": INLINE, "policy": json.dumps(R2_POLICY)}}
-    )  # fmt: skip
+         "values": {"name": INLINE, "policy": json.dumps(R2_POLICY)}},
+        {"address": STATE_READ, "mode": "managed",
+         "values": {"name": STATE_READ_NAME, "policy": json.dumps(STATE_READ_POLICY)}},
+    ]  # fmt: skip
     plan["resource_changes"] += [
         rc(ROLE_POLICY, ["no-op"], {"name": INLINE}, {"name": INLINE}),
+        rc(STATE_READ, ["no-op"], {"name": STATE_READ_NAME}, {"name": STATE_READ_NAME}),
         rc(BOUNDARY_POLICY, ["no-op"], {"name": "b"}, {"name": "b"}),
     ]
     role = {"name": "ecp-gha-deploy", "max_session_duration": 3600}
@@ -604,8 +618,37 @@ def test_another_inline_policy_name_stops(bootstrap_plan: dict) -> None:
 
 def test_an_extra_inline_policy_stops(bootstrap_plan: dict) -> None:
     c = drift_item(with_real_drift(bootstrap_plan), ROLE)
-    c["after"]["inline_policy"] = inline(R2_POLICY) + inline(OLD_POLICY, "added-outside")
+    c["after"]["inline_policy"] += inline(OLD_POLICY, "added-outside", state_read=False)
     assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_a_missing_inline_policy_stops(bootstrap_plan: dict) -> None:
+    c = drift_item(with_real_drift(bootstrap_plan), ROLE)
+    c["after"]["inline_policy"] = inline(R2_POLICY, state_read=False)
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_a_changed_state_read_policy_stops(bootstrap_plan: dict) -> None:
+    c = drift_item(with_real_drift(bootstrap_plan), ROLE)
+    c["after"]["inline_policy"][1]["policy"] = json.dumps(OLD_POLICY)
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_a_state_read_policy_unlike_its_resource_stops(bootstrap_plan: dict) -> None:
+    """Unchanged in the drift, but not what state holds for the role policy resource."""
+    plan = with_real_drift(bootstrap_plan)
+    for r in plan["prior_state"]["values"]["root_module"]["resources"]:
+        if r["address"] == STATE_READ:
+            r["values"]["policy"] = json.dumps(OLD_POLICY)
+    assert opc.check_bootstrap(plan)[0] == [f"resource_drift: {ROLE}"]
+
+
+def test_role_drift_when_the_state_read_policy_changes_stops(bootstrap_plan: dict) -> None:
+    change(with_real_drift(bootstrap_plan), STATE_READ)["change"]["actions"] = ["update"]
+    assert opc.check_bootstrap(bootstrap_plan)[0] == [
+        f"resource_drift: {ROLE}",
+        f"unexpected change: update {STATE_READ}",
+    ]
 
 
 def test_role_drift_beyond_the_inline_policy_stops(bootstrap_plan: dict) -> None:
@@ -658,3 +701,13 @@ def test_the_same_drift_in_the_org_plan_stops(org_plan: dict) -> None:
 def test_deferred_changes_still_stop_the_bootstrap_plan(bootstrap_plan: dict) -> None:
     with_real_drift(bootstrap_plan)["deferred_changes"] = [{"address": ROLE}]
     assert opc.check_bootstrap(bootstrap_plan)[0] == [f"deferred_changes: {ROLE}"]
+
+
+def test_a_changed_state_read_policy_stops_even_when_state_agrees(bootstrap_plan: dict) -> None:
+    """Only ecp-scoped-iam-and-state may change, whatever the role-policy resource holds."""
+    plan = with_real_drift(bootstrap_plan)
+    drift_item(plan, ROLE)["after"]["inline_policy"][1]["policy"] = json.dumps(OLD_POLICY)
+    for r in plan["prior_state"]["values"]["root_module"]["resources"]:
+        if r["address"] == STATE_READ:
+            r["values"]["policy"] = json.dumps(OLD_POLICY)
+    assert opc.check_bootstrap(plan)[0] == [f"resource_drift: {ROLE}"]
