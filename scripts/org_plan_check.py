@@ -8,7 +8,8 @@ Exit 0 only when the plan does exactly what was reviewed:
 - `org`: import exactly the nine resources in MOVED, each with no change (a plain import), and
   create exactly one resource, the `Workloads` OU under the organization root. Nothing else: no
   update, replacement, deletion or forget; no other import; no account, SCP, Identity Center or
-  root-access resource anywhere in the configuration; a fresh state.
+  root-access resource anywhere in the configuration; a fresh state (nothing in `prior_state`
+  but the resources being imported).
 - `bootstrap`: forget exactly the same nine resources (`removed`, `destroy = false`) and change
   nothing else; every output unchanged.
 
@@ -78,12 +79,27 @@ def configured_types(plan: dict[str, Any]) -> set[str]:
     return {r.get("type", "") for r in root.get("resources", [])}
 
 
+def already_owned(plan: dict[str, Any]) -> list[str]:
+    """Managed resources the destination state holds before this plan. Terraform also lists every
+    resource it is importing in `prior_state` (with `change.importing` set), even when no state
+    exists, so those are pending imports, not ownership."""
+    prior = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
+    importing = {
+        rc["address"]
+        for rc in plan.get("resource_changes", [])
+        if rc["change"].get("importing") is not None
+    }
+    return sorted(
+        r["address"]
+        for r in prior.get("resources", [])
+        if r.get("mode") == "managed" and r["address"] not in importing
+    )
+
+
 def check_org(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
     problems, report = common(plan), []
-    prior = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
-    managed = [r["address"] for r in prior.get("resources", []) if r.get("mode") == "managed"]
-    if managed:
-        problems.append(f"infra/org state is not fresh: {len(managed)} managed resources")
+    for address in already_owned(plan):
+        problems.append(f"infra/org state already owns: {address}")
     for t in sorted(configured_types(plan)):
         if LATER_PHASE_TYPES.match(t):
             problems.append(f"later-phase resource type in the configuration: {t}")

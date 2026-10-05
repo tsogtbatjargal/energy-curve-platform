@@ -5,6 +5,7 @@ The plans are synthetic but shaped like `terraform show -json` (Terraform 1.15.8
 """
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import pytest
 from hcl2.utils import SerializationOptions
 
 ROOT = Path(__file__).parents[1]
+REAL_PLANS = ROOT / "tests" / "fixtures" / "terraform_plans"
 ACCOUNT = "123456789012"
 BUCKET = f"ecp-tfstate-{ACCOUNT}-ca-central-1"
 
@@ -35,19 +37,31 @@ def imported(address: str) -> dict:
     return rc(address, ["no-op"], values, dict(values), importing={"id": import_id})
 
 
+def real_plan(name: str) -> dict:
+    return json.loads((REAL_PLANS / name / "synthetic-plan.json").read_text())
+
+
 @pytest.fixture
 def org_plan() -> dict:
+    imports = [imported(a) for a in sorted(opc.MOVED)]
+    # As Terraform 1.15.8 plans it (tests/fixtures/terraform_plans/pending_import): resources being
+    # imported are listed in prior_state although the destination state is empty.
+    pending = [
+        {"address": i["address"], "mode": "managed", "values": i["change"]["before"]}
+        for i in imports
+    ]
     return {
         "complete": True,
         "prior_state": {"values": {"root_module": {"resources": [
             {"address": "data.aws_caller_identity.current", "mode": "data", "values": {}},
+            *pending,
         ]}}},
         "configuration": {"root_module": {"resources": [
             {"address": a, "type": a.split(".")[0]} for a in [*sorted(opc.MOVED), opc.OU]
         ]}},
         "resource_changes": [
             rc("data.aws_organizations_organization.this", ["read"], None, {}),
-            *[imported(a) for a in sorted(opc.MOVED)],
+            *imports,
             rc(opc.OU, ["create"], None, {"name": "Workloads", "parent_id": "r-ab12"}),
         ],
         "output_changes": {"workloads_ou_id": {"actions": ["create"]}},
@@ -147,11 +161,34 @@ def test_later_phase_resources_stop(org_plan: dict, type_: str) -> None:
     assert f"later-phase resource in the plan: {type_}.x" in problems
 
 
-def test_a_non_fresh_org_state_stops(org_plan: dict) -> None:
+def test_a_resource_the_org_state_already_owns_stops(org_plan: dict) -> None:
     org_plan["prior_state"]["values"]["root_module"]["resources"].append(
-        {"address": "aws_s3_bucket.tfstate", "mode": "managed", "values": {}}
+        {"address": "aws_s3_bucket.leftover", "mode": "managed", "values": {}}
     )
-    assert "infra/org state is not fresh: 1 managed resources" in opc.check_org(org_plan)[0]
+    org_plan["resource_changes"].append(rc("aws_s3_bucket.leftover", ["no-op"], {}, {}))
+    assert opc.check_org(org_plan)[0] == ["infra/org state already owns: aws_s3_bucket.leftover"]
+
+
+def test_an_already_imported_moved_resource_stops(org_plan: dict) -> None:
+    """Imported by an earlier apply: in state, so this plan has no import for it."""
+    del change(org_plan, "aws_s3_bucket.tfstate")["change"]["importing"]
+    problems = opc.check_org(org_plan)[0]
+    assert "infra/org state already owns: aws_s3_bucket.tfstate" in problems
+    assert "missing import: aws_s3_bucket.tfstate" in problems
+
+
+# F1 (review of b65ab7b): real offline plans, Terraform 1.15.8.
+
+
+def test_a_real_pending_import_is_not_existing_ownership() -> None:
+    problems = opc.check_org(real_plan("pending_import"))[0]
+    assert not [p for p in problems if "already owns" in p or "not fresh" in p]
+
+
+def test_a_real_owned_resource_still_stops() -> None:
+    problems = opc.check_org(real_plan("owned_and_import"))[0]
+    assert "infra/org state already owns: terraform_data.existing" in problems
+    assert not [p for p in problems if "terraform_data.imported" in p and "owns" in p]
 
 
 @pytest.mark.parametrize("key", ["resource_drift", "deferred_changes"])
