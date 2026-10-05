@@ -1,11 +1,13 @@
 # The batch image (M4, ADR-0020): one image, two entry points.
 #   Lambda (staging):  the default CMD, energy_curves.cloud.lambda_handler
 #   Fargate (pipeline): entryPoint ["python", "-m", "energy_curves.cloud"], command ["task", <run_id>]
-# Base images are pinned by their linux/amd64 digests. Runtime dependencies come from uv.lock,
+# Base images are pinned by their multi-arch index (manifest-list) digests, the form Dependabot
+# proposes; an index digest fixes every platform's manifest. The build selects linux/amd64 with
+# `docker build --platform linux/amd64` (ADR-0020). Runtime dependencies come from uv.lock,
 # installed by pip with --require-hashes, so the image gets exactly the locked, verified wheels.
 FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
 
-FROM public.ecr.aws/lambda/python:3.12@sha256:331a4f671a43eae58b8dfe1f3022928fe259540f535512d941ff0ec9352ab047
+FROM public.ecr.aws/lambda/python:3.12@sha256:517bcc7dc1a3ba62e324961c1563cc54a2bd6dc1060188f9d376211ecb7b2926
 # OS security updates at build time. Amazon Linux 2023 locks its repositories to the image's
 # release, so a plain upgrade misses fixes published since; --releasever=latest reaches them. The
 # deployed image is identified by its own digest, and CI scans it (trivy, fixed HIGH/CRITICAL).
