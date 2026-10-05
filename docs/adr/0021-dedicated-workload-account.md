@@ -43,11 +43,16 @@ Facts this plan relies on (AWS documentation, checked 2026-10-04):
 
 ### Ownership of the retained bucket, budget and cost allocation tag
 Nothing in the management account is left orphaned, and nothing is duplicated:
-- **The state bucket** (`ecp-tfstate-<management>-ca-central-1`, with its versioning, encryption, public-access-block and policy resources) moves from the management `infra/bootstrap` state into `infra/org`:
+- **The state bucket** (`ecp-tfstate-<management>-ca-central-1`, with its versioning, encryption, public-access-block, ownership-controls, lifecycle and policy resources: seven resources) moves from the management `infra/bootstrap` state into `infra/org`:
   - `import` blocks in `infra/org`;
   - `removed { lifecycle { destroy = false } }` blocks in the management `infra/bootstrap`.
 
   The bucket's `prevent_destroy` stays. It keeps holding `org/terraform.tfstate`, plus the old `bootstrap/terraform.tfstate` key until phase 5 archives it.
+  - **Bootstrap still names the bucket.** Its CI roles and the R2 boundary grant state access by the bucket's ARN. They now build it from the bucket name (`local.state_bucket_arn`), which renders the same policy documents, so the bootstrap plan shows no IAM change.
+  - **Phase 3 gives the member bootstrap its own bucket at a new address,** created only when a variable says so (true in the member account, false in the management one). The `removed` blocks then stay in place as no-ops for the member instance.
+- **Tags are kept as they are.** The imported bucket and budget keep `stack = "bootstrap"`, through a resource-level tag in `infra/org`, so the imports plan no change. Retagging them would be a separate, reviewed change. The OU gets `stack = "org"`.
+- **Apply order:** `infra/org` first, then the management bootstrap. In between, both states hold the nine resources, and neither plan changes them.
+- **`infra/org` is planned and applied locally by the Identity Center admin, never by CI.** The CI roles still live in the management account until phase 5, and their existing state-read grant covers the whole bucket, so they can read `org/terraform.tfstate`. In phase 1a that state holds the budget's alert address, which CI already has as a secret. Phase 5 removes those roles.
 - **The $40 budget** moves the same way: imported into `infra/org`, removed without destroying it from the management bootstrap. It is then **modified in place** to filter on the linked account `ecp-workloads` as well as the `project` tag. It is never re-created.
 - **The `project` cost allocation tag** (`aws_ce_cost_allocation_tag.project`) moves the same way: an `import` block in `infra/org` (ID `project`), and a `removed { lifecycle { destroy = false } }` block in the management bootstrap. A destroy would set the tag `Inactive` and blind the budget's tag filter, so it is never destroyed. Its status stays `Active` throughout. In `infra/org` the budget's `depends_on` points at it, as it does today.
 - **The `infra/bootstrap` code loses `budget.tf`:** both the budget and the cost allocation tag. Every instance of the stack, the member one included, therefore creates **neither**:
@@ -75,7 +80,7 @@ By default this role trusts the whole management account, so any management-acco
 ### Phases, each a separate authorization
 The pattern in every phase is plan, gate, exact-plan approval, apply, then evidence, as ADR-0018 set out.
 1. **`infra/org`** (management account):
-   - **1a:** import the state bucket, the $40 budget and the `project` cost allocation tag, with the matching `removed` blocks in the management bootstrap, which also drops `budget.tf`. The OU `Workloads`. **No** root-access, permission-set or account-specific change.
+   - **1a:** import the state bucket (seven resources), the $40 budget and the `project` cost allocation tag: nine imports. The matching `removed` blocks go in the management bootstrap, which also drops `budget.tf`. **Create** the OU `Workloads`, the phase's only new resource. **No** root-access, permission-set or account-specific change.
    - **1b:** create the account (`close_on_deletion = false`, `role_name = OrganizationAccountAccessRole`, email supplied at plan time and never committed) and attach the SCPs. The SCPs name no member account ID.
    - **1c** (everything that needs the account ID):
      - the Identity Center assignment (`AdministratorAccess`, plus a new `ecp-readonly` set);
@@ -131,8 +136,17 @@ These are free, and Organizations enforces them independently of IAM. Each is ev
 Each phase is accepted only when its checks pass. They are recorded, sanitized, under `docs/evidence/`.
 
 **Phase 1a: ownership transfer and the OU**
-- **The `infra/org` plan imports and changes nothing:** `N to import, 0 to add, 0 to change, 0 to destroy`, where the imports are exactly the bucket and its configuration resources, `aws_budgets_budget.project` and `aws_ce_cost_allocation_tag.project`; the only addition is the OU. `terraform state list` then shows them in `infra/org`.
-- **The management bootstrap plan forgets them:** the same resources appear as `removed` with `destroy = false`, and the plan shows `0 to destroy`. `aws_ce_cost_allocation_tag.project` in particular has no destroy or update action, so its status is never set to `Inactive`.
+- **The `infra/org` plan:** Terraform reports `9 to import, 1 to add, 1 to change, 0 to destroy`.
+  - **The 1 to add is the OU** `Workloads`, under the organization root. Imports are not counted as additions.
+  - **The 9 imports** are exactly the bucket's seven resources, `aws_budgets_budget.project` and `aws_ce_cost_allocation_tag.project`. Each is a plain import with no attribute change (tags included), with one exception: the budget.
+  - **The 1 to change is state-only: the budget import's sensitivity marks.** Found in the first real plan (2026-10-05). The import reads the alert emails from AWS unmarked, while the configuration's sensitive variable marks the whole `notification` set sensitive, so Terraform plans an update with every value identical. Terraform 1.15.8 applies an update that differs only in marks to state alone, without calling the provider (`internal/terraform/node_resource_abstract_instance.go`). The emails stay sensitive. The check accepts only this exact case: that address, action `update`, no value or unknown difference, `notification` newly and fully sensitive, and no other mark changed.
+  - **Each import is the very object bootstrap relinquishes:** the same bucket name, budget account and name, and tag key, in the import ID, `before` and `after`. The expected identities come from the bootstrap plan's `forget` changes, read from bootstrap's own state, not from the import itself. Both plans are for the same account, the budget is in it, and the bucket is that account's state bucket.
+  - `scripts/org_plan_check.py <org-plan.json> <bootstrap-plan.json>` checks both saved plans together: the shapes and the transfer. The policy gate passes with `--stack org` and `--stack bootstrap`. `terraform state list` then shows the nine resources in `infra/org`.
+- **The management bootstrap plan forgets them:** `0 to add, 0 to change, 0 to destroy`, and the same nine resources are listed as no longer managed (`removed` with `destroy = false`, the action `forget`). Nothing else changes, IAM policies and outputs included.
+  - **Two reviewed refresh-drift cases are accepted, both on resources planned `no-op`.** Found in the same plan. Drift changes nothing in AWS; the apply only records the refreshed values in state.
+    - `aws_iam_policy.workload_boundary`: tags read back as `{}` where state had null.
+    - `aws_iam_role.gha_deploy`: of its two inline policies, the stored copy of `ecp-scoped-iam-and-state` predates the R2 apply. Exactly those two names (that one and `terraform-state-read`) must be present, only that one may change, and each refreshed copy must equal its `aws_iam_role_policy` resource in state, planned `no-op`. The refreshed copy of `ecp-scoped-iam-and-state` holds R2's five Deny statements.
+  - **Any other drift, all drift in the org plan, and any deferred change stop.** The same `org_plan_check.py` run checks this. `aws_ce_cost_allocation_tag.project` in particular has no destroy or update action, so its status is never set to `Inactive`.
 - **The tag is still active:** `ce:ListCostAllocationTags` for key `project` shows `Active` before and after.
 - **The budget count is unchanged:** two budgets, the $20 and the $40. The $40's name, amount and alerts are unchanged (`budgets:DescribeBudgets`, sanitized).
 - **No root-access or permission-set change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` reports no enabled features afterwards.

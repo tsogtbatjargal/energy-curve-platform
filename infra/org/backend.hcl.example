@@ -1,0 +1,7 @@
+# Copy to backend.hcl (git-ignored), then: terraform init -backend-config=backend.hcl
+# The same bucket as the management bootstrap; this stack owns it from phase 1a (ADR-0021).
+bucket       = "ecp-tfstate-<account-id>-ca-central-1"
+key          = "org/terraform.tfstate"
+region       = "ca-central-1"
+encrypt      = true
+use_lockfile = true

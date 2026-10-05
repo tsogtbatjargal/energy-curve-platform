@@ -1,5 +1,5 @@
 output "state_bucket" {
-  value = aws_s3_bucket.tfstate.bucket
+  value = local.state_bucket
 }
 
 output "gha_plan_role_arn" {

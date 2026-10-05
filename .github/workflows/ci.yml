@@ -229,9 +229,9 @@ jobs:
             -backend-config="region=${AWS_REGION}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
+      # The budget and its alert emails moved to infra/org (ADR-0021 phase 1a), which CI never
+      # plans: it lives in the management account and is applied by the Identity Center admin.
       - name: terraform plan
-        env:
-          TF_VAR_budget_alert_emails: ${{ secrets.BUDGET_ALERT_EMAILS }}
         run: |
           terraform plan -input=false -lock-timeout=60s -out=tfplan
           terraform show -json tfplan > plan.json

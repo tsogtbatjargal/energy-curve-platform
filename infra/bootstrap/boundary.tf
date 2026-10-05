@@ -14,7 +14,7 @@ resource "aws_iam_policy" "workload_boundary" {
   description = "Permissions boundary for every role the ecp-gha-deploy role creates (PLAN.md R2)"
   policy = jsonencode(jsondecode(templatefile("${path.module}/policies/workload-boundary.json.tftpl", {
     account_id       = local.account_id
-    state_bucket_arn = aws_s3_bucket.tfstate.arn
+    state_bucket_arn = local.state_bucket_arn
   })))
 
   lifecycle {

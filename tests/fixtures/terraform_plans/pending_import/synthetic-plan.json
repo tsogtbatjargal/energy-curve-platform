@@ -1,0 +1,106 @@
+{
+ "applyable": true,
+ "complete": true,
+ "configuration": {
+  "provider_config": {
+   "terraform": {
+    "full_name": "terraform.io/builtin/terraform",
+    "name": "terraform"
+   }
+  },
+  "root_module": {
+   "resources": [
+    {
+     "address": "terraform_data.imported",
+     "mode": "managed",
+     "name": "imported",
+     "provider_config_key": "terraform",
+     "schema_version": 0,
+     "type": "terraform_data"
+    }
+   ]
+  }
+ },
+ "errored": false,
+ "format_version": "1.2",
+ "planned_values": {
+  "root_module": {
+   "resources": [
+    {
+     "address": "terraform_data.imported",
+     "mode": "managed",
+     "name": "imported",
+     "provider_name": "terraform.io/builtin/terraform",
+     "schema_version": 0,
+     "sensitive_values": {},
+     "type": "terraform_data",
+     "values": {
+      "id": "review-synthetic-id",
+      "input": null,
+      "output": null,
+      "triggers_replace": null
+     }
+    }
+   ]
+  }
+ },
+ "prior_state": {
+  "format_version": "1.0",
+  "terraform_version": "1.15.8",
+  "values": {
+   "root_module": {
+    "resources": [
+     {
+      "address": "terraform_data.imported",
+      "mode": "managed",
+      "name": "imported",
+      "provider_name": "terraform.io/builtin/terraform",
+      "schema_version": 0,
+      "sensitive_values": {},
+      "type": "terraform_data",
+      "values": {
+       "id": "review-synthetic-id",
+       "input": null,
+       "output": null,
+       "triggers_replace": null
+      }
+     }
+    ]
+   }
+  }
+ },
+ "resource_changes": [
+  {
+   "address": "terraform_data.imported",
+   "change": {
+    "actions": [
+     "no-op"
+    ],
+    "after": {
+     "id": "review-synthetic-id",
+     "input": null,
+     "output": null,
+     "triggers_replace": null
+    },
+    "after_sensitive": {},
+    "after_unknown": {},
+    "before": {
+     "id": "review-synthetic-id",
+     "input": null,
+     "output": null,
+     "triggers_replace": null
+    },
+    "before_sensitive": {},
+    "importing": {
+     "id": "review-synthetic-id"
+    }
+   },
+   "mode": "managed",
+   "name": "imported",
+   "provider_name": "terraform.io/builtin/terraform",
+   "type": "terraform_data"
+  }
+ ],
+ "terraform_version": "1.15.8",
+ "timestamp": "2026-10-05T15:29:50Z"
+}

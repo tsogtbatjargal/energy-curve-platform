@@ -1,0 +1,64 @@
+{
+ "applyable": true,
+ "complete": true,
+ "configuration": {
+  "root_module": {}
+ },
+ "errored": false,
+ "format_version": "1.2",
+ "planned_values": {
+  "root_module": {}
+ },
+ "prior_state": {
+  "format_version": "1.0",
+  "terraform_version": "1.15.8",
+  "values": {
+   "root_module": {
+    "resources": [
+     {
+      "address": "terraform_data.relinquished",
+      "mode": "managed",
+      "name": "relinquished",
+      "provider_name": "terraform.io/builtin/terraform",
+      "schema_version": 0,
+      "sensitive_values": {},
+      "type": "terraform_data",
+      "values": {
+       "id": "synthetic-owned-id",
+       "input": null,
+       "output": null,
+       "triggers_replace": null
+      }
+     }
+    ]
+   }
+  }
+ },
+ "resource_changes": [
+  {
+   "action_reason": "delete_because_no_resource_config",
+   "address": "terraform_data.relinquished",
+   "change": {
+    "actions": [
+     "forget"
+    ],
+    "after": null,
+    "after_sensitive": false,
+    "after_unknown": {},
+    "before": {
+     "id": "synthetic-owned-id",
+     "input": null,
+     "output": null,
+     "triggers_replace": null
+    },
+    "before_sensitive": {}
+   },
+   "mode": "managed",
+   "name": "relinquished",
+   "provider_name": "terraform.io/builtin/terraform",
+   "type": "terraform_data"
+  }
+ ],
+ "terraform_version": "1.15.8",
+ "timestamp": "2026-10-05T15:29:50Z"
+}
