@@ -111,14 +111,20 @@ After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workl
 **What is exposed.**
 - **W1, from creation to the move**, normally seconds: the account sits under the root with only `FullAWSAccess`, so none of the project SCPs apply. Attaching SCPs to the root to cover it would be an organization-wide change, so it is **not** done without the user's approval.
 - **W2, from creation to phase 3:** `OrganizationAccountAccessRole` trusts the whole management account until phase 3 replaces its trust policy, and the protect SCP stops anyone but the Identity Center admin from changing it. W1 lies inside W2.
-- **Who can act in the account then.** The root user has no password; it can only be recovered through the account email, which the user controls. Otherwise, any management-account principal allowed `sts:AssumeRole` on the role can. Simulated read-only on 2026-10-05 for every non-service role in the management account:
-  - the admin's `AWSReservedSSO_AdministratorAccess_*` role: **allowed**, as intended;
-  - **`ecp-gha-deploy`: allowed**, through PowerUserAccess. This was not intended;
-  - `ecp-gha-plan` and the other project's six roles: implicitly denied.
+- **Who can act in the account then.** The root user has no password; it can only be recovered through the account email, which the user controls. Otherwise, any management-account principal allowed `sts:AssumeRole` on the role can, and, once phase 1c turns on centralized root access, any principal allowed `sts:AssumeRoot` on the account's root.
+- **The sweep:** `iam:SimulatePrincipalPolicy` for every non-service role in the management account, for both `sts:AssumeRole` on `arn:aws:iam::<member>:role/OrganizationAccountAccessRole` and `sts:AssumeRoot` on `arn:aws:iam::<member>:root`.
+  - **First run** (2026-10-05):
+    - the admin's `AWSReservedSSO_AdministratorAccess_*` role: **allowed** both, as intended;
+    - **`ecp-gha-deploy`: allowed** both, through PowerUserAccess. This was not intended;
+    - `ecp-gha-plan` and the other project's six roles: implicitly denied both.
+  - **After PR #25 was applied** (2026-10-05): only the admin role is allowed; `ecp-gha-deploy` is explicitly denied both; the others are unchanged.
 
 **Proposed acceptance for the window (each item needs the user's approval):**
-1. **Before the apply,** close the unintended path. In the management bootstrap's deploy policy, explicitly deny `sts:AssumeRole`, `sts:TagSession` and `sts:SetSourceIdentity` on roles outside the deploy role's own account (`aws:ResourceAccount`), or at least on `arn:aws:iam::*:role/OrganizationAccountAccessRole`. This is a separate reviewed bootstrap change with its own saved plan. The same simulation must then show only the admin role allowed.
-2. **Immediately before the apply,** re-run that simulation, and confirm no workflow is running and nothing is merged to `main` during the apply. Today no workflow uses the `prod` environment or the deploy role.
+1. **Before the apply,** close the unintended path. **Done (2026-10-05):**
+   - PR #25 added `NoCrossAccountRoles` (`sts:AssumeRole`, `sts:TagSession` and `sts:SetSourceIdentity` on roles outside the deploy role's own account) and `NoRootSessions` (`sts:AssumeRoot` on every target) to the deploy policy (ADR-0018);
+   - it was applied from its approved saved plan, with locking on;
+   - the bootstrap re-plan shows no changes, `scripts/r2_accept.py` gives 16 cases and 0 differences, and the sweep shows only the admin role allowed.
+2. **Immediately before the apply,** re-run the sweep (both actions), and confirm no workflow is running and nothing is merged to `main` during the apply. Today no workflow uses the `prod` environment or the deploy role.
 3. **After the apply:**
    - the account's parent is `Workloads` (`organizations:ListParents`);
    - a re-plan shows no changes, and the account is not tainted;
