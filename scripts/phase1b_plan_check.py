@@ -9,9 +9,11 @@ Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is
   ["SERVICE_CONTROL_POLICY"]: the trusted-service principals and the feature set are unchanged;
 - create the two SCPs, each equal to its reviewed document in infra/org/policies/;
 - attach each to the Workloads OU, once;
-- create the account `ecp-workloads` in the Workloads OU, with the configured email (compared,
-  never printed), `close_on_deletion = false`, the break-glass role name, billing access ALLOW and
-  no GovCloud account, after both attachments (`depends_on`);
+- create the account `ecp-workloads` with parent_id the Workloads OU, the configured email
+  (compared, never printed), `close_on_deletion = false`, the break-glass role name, billing
+  access ALLOW and no GovCloud account, after both attachments (`depends_on`). AWS creates it
+  under the root and the provider then moves it into the OU (ADR-0021, the bootstrap window);
+  the plan shows only the final parent;
 - nothing else: every phase 1a resource unchanged; no Identity Center, root-access,
   service-access, delegated-administrator or budget change (phase 1c); no drift except the OU's
   tags reading back as {} where state had null, on the OU planned no-op.

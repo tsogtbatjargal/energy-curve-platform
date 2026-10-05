@@ -1,5 +1,7 @@
-# ADR-0021 phase 1b: the workload account, created directly in the Workloads OU after both SCPs
-# are attached there, so it is never outside the guardrails.
+# ADR-0021 phase 1b: the workload account. CreateAccount takes no parent, so AWS creates it under
+# the organization root; once creation succeeds, the provider moves it into the Workloads OU
+# (MoveAccount). Until that move it has only FullAWSAccess: the bootstrap window, its acceptance
+# and its failure recovery are in ADR-0021. depends_on makes both SCPs attached before creation.
 resource "aws_organizations_account" "workloads" {
   name                       = "ecp-workloads"
   email                      = var.workload_account_email

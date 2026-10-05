@@ -81,7 +81,8 @@ By default this role trusts the whole management account, so any management-acco
 The pattern in every phase is plan, gate, exact-plan approval, apply, then evidence, as ADR-0018 set out.
 1. **`infra/org`** (management account):
    - **1a:** import the state bucket (seven resources), the $40 budget and the `project` cost allocation tag: nine imports. The matching `removed` blocks go in the management bootstrap, which also drops `budget.tf`. **Create** the OU `Workloads`, the phase's only new resource. **No** root-access, permission-set or account-specific change.
-   - **1b:** enable SCPs (the organization import above), create the two SCPs and attach them to `Workloads`, then create the account in `Workloads` (`depends_on` both attachments, so it is never outside the guardrails).
+   - **1b:** enable SCPs (the organization import above), create the two SCPs and attach them to `Workloads`, then create the account (`depends_on` both attachments) with `parent_id` set to `Workloads`.
+     - **Create, then move.** *(Corrected 2026-10-05: this first said the account is created in `Workloads` and "never outside the guardrails".)* `CreateAccount` takes no parent, so AWS creates the account under the organization **root**. The provider (6.67.0, `resourceAccountCreate`) waits for creation to succeed (polling every 10 s, 10-minute timeout), saves the account ID, then calls `MoveAccount` into `Workloads`. Until the move, the account has only `FullAWSAccess`: see *The bootstrap window* below. The plan shows only the final `parent_id`.
      - The account has `close_on_deletion = false`, `role_name = OrganizationAccountAccessRole` and `iam_user_access_to_billing = ALLOW`.
      - It has `prevent_destroy`, and `role_name` is under `ignore_changes`, because Organizations cannot read it back.
      - The email comes from the git-ignored `terraform.tfvars` and is a sensitive variable.
@@ -105,6 +106,34 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
 5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket, budget and cost allocation tag are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
 
 After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workloads`.
+
+### The bootstrap window (phase 1b)
+**What is exposed.**
+- **W1, from creation to the move**, normally seconds: the account sits under the root with only `FullAWSAccess`, so none of the project SCPs apply. Attaching SCPs to the root to cover it would be an organization-wide change, so it is **not** done without the user's approval.
+- **W2, from creation to phase 3:** `OrganizationAccountAccessRole` trusts the whole management account until phase 3 replaces its trust policy, and the protect SCP stops anyone but the Identity Center admin from changing it. W1 lies inside W2.
+- **Who can act in the account then.** The root user has no password; it can only be recovered through the account email, which the user controls. Otherwise, any management-account principal allowed `sts:AssumeRole` on the role can. Simulated read-only on 2026-10-05 for every non-service role in the management account:
+  - the admin's `AWSReservedSSO_AdministratorAccess_*` role: **allowed**, as intended;
+  - **`ecp-gha-deploy`: allowed**, through PowerUserAccess. This was not intended;
+  - `ecp-gha-plan` and the other project's six roles: implicitly denied.
+
+**Proposed acceptance for the window (each item needs the user's approval):**
+1. **Before the apply,** close the unintended path. In the management bootstrap's deploy policy, explicitly deny `sts:AssumeRole`, `sts:TagSession` and `sts:SetSourceIdentity` on roles outside the deploy role's own account (`aws:ResourceAccount`), or at least on `arn:aws:iam::*:role/OrganizationAccountAccessRole`. This is a separate reviewed bootstrap change with its own saved plan. The same simulation must then show only the admin role allowed.
+2. **Immediately before the apply,** re-run that simulation, and confirm no workflow is running and nothing is merged to `main` during the apply. Today no workflow uses the `prod` environment or the deploy role.
+3. **After the apply:**
+   - the account's parent is `Workloads` (`organizations:ListParents`);
+   - a re-plan shows no changes, and the account is not tainted;
+   - the window is recorded: the `CreateAccount` and `MoveAccount` event times from the management account's CloudTrail (us-east-1);
+   - at phase 2, with read access in the account, its CloudTrail shows no `AssumeRole` of `OrganizationAccountAccessRole` and no write events between creation and the move, other than AWS's own setup of that role.
+
+**Failure and recovery.** Each recovery step is a new plan or state operation, and needs its own approval. No replacement plan is ever applied without one.
+- **The apply fails before `CreateAccount`** (enabling SCPs, a policy or an attachment): no account exists; what succeeded is in state. Re-plan, gate, approve.
+- **`CreateAccount` is rejected or ends `FAILED`** (for example `EMAIL_ALREADY_EXISTS`): no account exists; the error carries the failure reason. Fix the input, then a new plan and approval.
+- **The wait times out, or the apply is interrupted, while creation is in progress:** Terraform has no ID, but the account may still finish, under the root. Do not simply re-apply. Find it read-only (`DescribeCreateAccountStatus`, `ListAccounts`). Then a recovery plan with an `import` block for that account ID and `parent_id = Workloads` shows an import plus an in-place move. Gate it and approve it. A second account must never be created.
+- **The account is created but `MoveAccount` fails:** the account stays under the root with its ID in state, and Terraform 1.15.8 marks it **tainted** (`maybeTainted`). The next plan proposes a replacement, which `prevent_destroy` refuses, so the account cannot be destroyed or re-created. Recovery:
+  1. an approved `terraform untaint aws_organizations_account.workloads` (state only);
+  2. a plan that shows an in-place `parent_id` update (the provider's update calls `MoveAccount`), gated and approved, then applied.
+
+  Until the move, treat the account as an incident: do not use it, and check its activity at phase 2.
 
 ### SCPs on `Workloads`
 These are free, and Organizations enforces them independently of IAM.
@@ -166,12 +195,13 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 **Phase 1b: account and SCPs**
 - **The plan:** Terraform reports `1 to import, 5 to add, 1 to change, 0 to destroy`. `scripts/phase1b_plan_check.py` must print `OK: exactly the reviewed phase 1b change`, which means:
   - the 1 import (and the 1 change) is the organization, with only `enabled_policy_types` changing, from none to `SERVICE_CONTROL_POLICY`; the feature set and trusted-service principals are unchanged;
-  - the 5 additions are the two SCPs (each equal to its reviewed document), their two attachments to `Workloads`, and the account. The account is `ecp-workloads`, in `Workloads`, with the configured email, still sensitive, `close_on_deletion = false`, the break-glass role name, billing access `ALLOW` and no GovCloud account, created after both attachments;
+  - the 5 additions are the two SCPs (each equal to its reviewed document), their two attachments to `Workloads`, and the account. Each attachment references exactly its own new policy, and its `policy_id` is unknown at plan time. The account is `ecp-workloads`, with `parent_id` `Workloads` (created under the root, then moved), the configured email, still sensitive, `close_on_deletion = false`, the break-glass role name, billing access `ALLOW` and no GovCloud account, created after both attachments;
   - every phase 1a resource is unchanged, and the state holds exactly them;
   - no other change, no deferral, and no drift except the OU's `tags` reading back as `{}` where state had null, with the OU planned `no-op` (the same provider normalization as in phase 1a).
 - **The policy gate passes** with `--stack org`.
 - **After the apply:** SCPs are enabled on the root; `Workloads` has `FullAWSAccess` plus the two project SCPs; the organization has 2 accounts.
 - **The account:** `ecp-workloads` is `ACTIVE`, in OU `Workloads`, with `FullAWSAccess` plus the project SCPs attached.
+- **The bootstrap window:** the proposed acceptance above, if the user approves it.
 - **Still no root-access change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` still reports none enabled.
 - **SCP simulations** in `ecp-workloads`:
   - a long-term root principal (no `aws:AssumedRoot`) is denied;
