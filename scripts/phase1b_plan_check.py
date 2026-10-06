@@ -1,7 +1,12 @@
 """Pre-apply check of the saved infra/org plan for ADR-0021 phase 1b (the account and its SCPs).
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/phase1b_plan_check.py <plan.json>   # from the checkout the plan was made from
+    python scripts/phase1b_plan_check.py [--mode full|account-only] <plan.json>
+    # run from the clean checkout the plan was made from
+
+`account-only` is the recovery after the 2026-10-06 apply, which completed everything but the
+account (CreateAccount FAILED, EMAIL_ALREADY_EXISTS): the plan may only create the account, and
+the already-applied SCP enablement, SCPs and attachments are checked in the plan's prior state.
 
 Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is "1 to import,
 5 to add, 1 to change, 0 to destroy":
@@ -237,6 +242,10 @@ def check_account(change: dict[str, Any], plan: dict[str, Any], ou_id: str | Non
     email = ((plan.get("variables") or {}).get("workload_account_email") or {}).get("value")
     if unknown.get("email") or not email or after.get("email") != email:
         problems.append(f"{ACCOUNT}: email must be the configured workload_account_email")
+    alert = ((plan.get("variables") or {}).get("budget_alert_emails") or {}).get("value") or []
+    if email and email.lower() in {str(a).lower() for a in alert}:
+        # 2026-10-06: CreateAccount failed EMAIL_ALREADY_EXISTS with the alert address.
+        problems.append(f"{ACCOUNT}: email must not be the budget alert address")
     if (change.get("after_sensitive") or {}).get("email") is not True:
         problems.append(f"{ACCOUNT}: email must stay sensitive")
     depends = set(config_resource(plan, ACCOUNT).get("depends_on") or [])
@@ -304,16 +313,106 @@ def check(
     return problems, report
 
 
+PHASE_1B_APPLIED = PHASE_1A_STATE | {ORG, *SCPS, *ATTACHMENTS}
+
+
+def check_applied_scps(plan: dict[str, Any], ou_id: str | None) -> list[str]:
+    """The part of phase 1b that the 2026-10-06 apply completed, as refreshed from AWS into the
+    plan's prior state: SCPs enabled, each SCP exactly its reviewed document, each attachment on
+    the Workloads OU and pointing at its own policy."""
+    problems = []
+    org = prior_values(plan, ORG) or {}
+    if org.get("enabled_policy_types") != ["SERVICE_CONTROL_POLICY"]:
+        problems.append(f"{ORG}: SCPs must be enabled, and nothing else")
+    if org.get("feature_set") != "ALL":
+        problems.append(f"{ORG}: feature set must be ALL")
+    for address, (name, doc, attachment) in sorted(SCPS.items()):
+        policy = prior_values(plan, address) or {}
+        if policy.get("name") != name or policy.get("type") != "SERVICE_CONTROL_POLICY":
+            problems.append(f"{address}: must be the applied SCP {name}")
+        if json.loads(policy.get("content") or "null") != document(doc):
+            problems.append(f"{address}: applied content differs from policies/{doc}")
+        attached = prior_values(plan, attachment) or {}
+        if ou_id is None or attached.get("target_id") != ou_id:
+            problems.append(f"{attachment}: must be attached to the Workloads OU")
+        if not policy.get("id") or attached.get("policy_id") != policy.get("id"):
+            problems.append(f"{attachment}: must attach {address}")
+    return problems
+
+
+def check_account_only(
+    plan: dict[str, Any], stack_dir: Path = ROOT / "infra" / "org"
+) -> tuple[list[str], list[str]]:
+    """Recovery after the phase 1b apply of 2026-10-06 created everything but the account
+    (CreateAccount FAILED, EMAIL_ALREADY_EXISTS; ADR-0021): the plan may only create the account.
+    Terraform's summary is "1 to add, 0 to change, 0 to destroy", with no import."""
+    problems: list[str] = []
+    report: list[str] = []
+    if plan.get("errored"):
+        problems.append("the plan errored")
+    if plan.get("complete") is False:
+        problems.append("the plan is incomplete")
+    for item in plan.get("deferred_changes") or []:
+        problems.append(f"deferred_changes: {item.get('address', '?')}")
+    if set(already_owned(plan)) != PHASE_1B_APPLIED:
+        problems.append("infra/org state is not exactly phase 1a plus the applied part of 1b")
+    planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
+    problems += check_drift(plan, planned)
+    problems += check_source(stack_dir)
+    root_module = (plan.get("configuration") or {}).get("root_module") or {}
+    for name in sorted(root_module.get("module_calls") or {}):
+        problems.append(f"module calls are not allowed in the stack: {name}")
+    ou_id = (prior_values(plan, OU) or {}).get("id")
+    problems += check_applied_scps(plan, ou_id)
+    created = False
+    for rc in plan.get("resource_changes", []):
+        address, change = rc["address"], rc["change"]
+        actions = change["actions"]
+        if change.get("importing") is not None:
+            problems.append(f"unexpected import: {address}")
+        if actions in UNCHANGED:
+            continue
+        report.append(f"{'+'.join(actions):8} {address}")
+        if address == ACCOUNT and actions == ["create"]:
+            problems += check_account(change, plan, ou_id)
+            created = True
+        else:
+            problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+    if not created:
+        problems.append(f"missing change: {ACCOUNT}")
+    for name, out in (plan.get("output_changes") or {}).items():
+        if out["actions"] not in UNCHANGED and (name, out["actions"]) != (
+            "workload_account_id",
+            ["create"],
+        ):
+            problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
+    report.append(
+        "summary: 0 to import, 1 to add (the account), 0 to change, 0 to destroy; the applied "
+        "SCPs, attachments and SCP enablement verified unchanged"
+        if not problems
+        else "summary: not the reviewed shape"
+    )
+    return problems, report
+
+
+MODES = {"full": check, "account-only": check_account_only}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    mode = "full"
+    if len(args) == 3 and args[0] == "--mode" and args[1] in MODES:
+        mode, args = args[1], args[2:]
     if len(args) != 1:
-        print("usage: phase1b_plan_check.py <org-plan.json>", file=sys.stderr)
+        print("usage: phase1b_plan_check.py [--mode full|account-only] <org-plan.json>",
+              file=sys.stderr)  # fmt: skip
         return 2
-    problems, report = check(json.loads(Path(args[0]).read_text()))
+    problems, report = MODES[mode](json.loads(Path(args[0]).read_text()))
     print("\n".join(report))
     for p in problems:
         print(f"STOP  {p}")
-    print("OK: exactly the reviewed phase 1b change" if not problems else "STOP: do not apply")
+    print(f"OK: exactly the reviewed phase 1b {mode} change" if not problems
+          else "STOP: do not apply")  # fmt: skip
     return 1 if problems else 0
 
 
