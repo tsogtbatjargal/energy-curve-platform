@@ -87,10 +87,16 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
      - It has `prevent_destroy`, and `role_name` is under `ignore_changes`, because Organizations cannot read it back.
      - The email comes from the git-ignored `terraform.tfvars` and is a sensitive variable.
      - The SCPs name no member account ID.
-   - **1c** (everything that needs the account ID):
+   - **1c** (everything that needs the account ID; the code is `infra/org/identity_center.tf`, `root_access.tf` and `budget.tf`):
      - the Identity Center assignment (`AdministratorAccess`, plus a new `ecp-readonly` set);
      - the budget's linked-account filter;
      - the `AssumeRoot` scoping on the `AdministratorAccess` permission set, then centralized root access, in that order.
+     - **Decided (user, 2026-10-06):**
+       - **Q1, IAM trusted access:** one approved, out-of-band call before the plan, `aws organizations enable-aws-service-access --service-principal iam.amazonaws.com`, recorded as evidence. The pinned provider's `aws_iam_organizations_features` (6.67.0) requires it ("you must enable trusted access for AWS Identity and Access Management in AWS Organizations"), and so does the IAM User Guide (*Centralize root access for member accounts*). No standalone Terraform resource manages trusted access, and this stack ignores `aws_service_access_principals` so that Identity Center's integration can't be removed. A `precondition` on the features resource stops the plan until the call has been made.
+       - **Q2, the budget filter is an OR:** anything in `ecp-workloads`, **or** anything tagged `project = energy-curve-platform` (the management-account resources). A second `cost_filter` would be an AND. Provider 6.67.0 supports `filter_expression` with `or` blocks; it requires `metrics` and conflicts with `cost_filter` and `cost_types`, which the Budgets API marks deprecated. The metric is `UnblendedCost`, what the default cost types measured. The tag key is `user:project`: the Budgets user guide says user-defined tag keys in budget filters take the `user:` prefix. If AWS normalizes the expression differently, the post-apply re-plan shows it.
+       - **Q3, `ecp-readonly` is AWS-managed `ReadOnlyAccess`,** with 1-hour sessions. Its v190 document covers a read-only plan's refresh of the member stacks: `s3:Get*` and `s3:List*` (the state object and the bucket's configuration), `iam:Get*` and `iam:List*`. It has no `kms:Decrypt`, which the SSE-S3 state bucket doesn't need. A plan with it must use `-lock=false`: the S3 lock file is a write. It can read every object, state included.
+       - **Q4, the scoping applies wherever `AdministratorAccess` is provisioned,** the management account included. It only denies `sts:AssumeRoot`. A later member account needs the policy updated before `AssumeRoot` can recover it. The account ID comes from `aws_organizations_account.workloads.id`, never a literal; the plan check refuses any 12-digit number in the stack source.
+     - **The user name** for the assignments is a new sensitive variable, `identity_center_user_name`, in the git-ignored `terraform.tfvars`.
 2. **Access:**
    - the user adds a CLI profile `ecp-workloads` (SSO) and logs in;
    - the read-only session-start checklist runs;
@@ -158,7 +164,7 @@ After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workl
 ### SCPs on `Workloads`
 These are free, and Organizations enforces them independently of IAM.
 - **Enabling them comes first.** SCPs are off for the organization, so phase 1b imports `aws_organizations_organization` into `infra/org` and changes only `enabled_policy_types`, to `SERVICE_CONTROL_POLICY`.
-  - **Trusted service access is left alone:** `aws_service_access_principals` is under `ignore_changes`, so this stack can never remove Identity Center's integration. IAM's integration (phase 1c) gets its own resource.
+  - **Trusted service access is left alone:** `aws_service_access_principals` is under `ignore_changes`, so this stack can never remove Identity Center's integration. IAM's integration (phase 1c) is one approved, out-of-band call instead. *(Corrected 2026-10-06: this said it gets its own resource; no Terraform resource manages trusted access on its own.)*
   - **The organization has `prevent_destroy`.**
   - **Enabling the type attaches `FullAWSAccess` to the root, every OU and every account.** That changes no permission, and SCPs never restrict the management account.
 - **Two SCPs, both attached to `Workloads`:** `ecp-workloads-baseline` (the region, organization and root rules) and `ecp-workloads-protect` (the break-glass lock and the second R2 layer). With `FullAWSAccess`, that is 3 of the 10 SCPs an OU can have (Organizations quotas). Each document is far under the 10,240-character limit. They live in `infra/org/policies/`, and the plan check compares the planned content with them.
@@ -231,8 +237,15 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
   - `organizations:LeaveOrganization` is denied.
 
 **Phase 1c: assignment, budget scope, `AssumeRoot` scoping and root access**
-- **The plan** applies the permission-set inline policy and its provisioning before the root-access features, through `depends_on`; the gate checks that dependency in the saved plan.
-- **The budget:** its filter includes the linked account `ecp-workloads` and the `project` tag; it has no actions; still two budgets. The cost allocation tag is unchanged.
+- **Before the plan:** the approved trusted-access call; `organizations:ListAWSServiceAccessForOrganization` then lists exactly `iam.amazonaws.com` and `sso.amazonaws.com`. The sweep of every management-account role and IAM user is admin-only.
+- **The plan:** Terraform reports `6 to add, 1 to change, 0 to destroy`, with no import. `scripts/phase1c_plan_check.py` must print `OK: exactly the reviewed phase 1c change`, which means:
+  - the 6 additions are the scoping policy (equal to `policies/admin-assume-root.json.tftpl` rendered with the account ID from state, and referencing the account resource), `ecp-readonly` (PT1H, no relay state), its `ReadOnlyAccess` attachment, the two assignments (the configured user, the workload account only, the reference to the account resource), and root access (exactly both features);
+  - **the order, read from the plan's configuration:** root access and the admin assignment depend on the scoping policy, and the read-only assignment on its managed policy. The scoping resource provisions the permission set, so the admin role carries it before root access is enabled;
+  - the 1 change is the budget, in place: `filter_expression` exactly the OR above, `metrics` `UnblendedCost`, `cost_filter` and `cost_types` gone, nothing else changed;
+  - phase 1b is intact in the refreshed state (the account in `Workloads`, each SCP its document, each attachment on `Workloads`); the organization's trusted services are exactly `iam` and `sso`; one Identity Center instance; the permission set is `AdministratorAccess`; the user is the configured one;
+  - no other change, no drift (not even tags), no output change, and the phase 1b source rules (no override, JSON configuration or module call; no 12-digit literal);
+  - the policy gate passes with `--stack org`.
+- **The budget:** its filter is the OR of the linked account `ecp-workloads` and the `project` tag; it has no actions; still two budgets. The cost allocation tag is unchanged. A re-plan shows no changes.
 - **The assignment:** `AdministratorAccess` and `ecp-readonly` are assigned to the user for `ecp-workloads` only.
 - **Root access:** `iam:ListOrganizationsFeatures` shows root credentials management and root sessions enabled.
 - **`AssumeRoot` scoping** (`simulate-principal-policy` on the admin's Identity Center role, action `sts:AssumeRoot`, resource `arn:aws:iam::<ecp-workloads-id>:root`, context key `sts:TaskPolicyArn`):
