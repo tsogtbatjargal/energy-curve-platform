@@ -17,6 +17,7 @@ import pytest
 ROOT = Path(__file__).parents[1]
 ORG_ID, OU_ID, ROOT_ID = "o-ab12cd34ef", "ou-ab12-cdefgh34", "r-ab12"
 EMAIL = "workloads@example.com"
+MANAGEMENT_EMAIL = "Management@Example.com"  # the organization's existing (management) account
 BASELINE, PROTECT = (f"aws_organizations_policy.workloads_{n}" for n in ("baseline", "protect"))
 ATTACH_BASELINE, ATTACH_PROTECT = (f"aws_organizations_policy_attachment.workloads_{n}"
                                    for n in ("baseline", "protect"))  # fmt: skip
@@ -44,7 +45,9 @@ def plan() -> dict:
         "variables": {"workload_account_email": {"value": EMAIL}},
         "prior_state": {"values": {"root_module": {"resources": [
             {"address": "data.aws_organizations_organization.this", "mode": "data",
-             "values": {"id": ORG_ID}},
+             "values": {"id": ORG_ID, "master_account_email": MANAGEMENT_EMAIL,
+                        "accounts": [{"email": MANAGEMENT_EMAIL, "name": "management"}],
+                        "non_master_accounts": []}},
             *[{"address": a, "mode": "managed", "values": ou_values if a == opc.OU else {}}
               for a in phase_1a],
             {"address": p1b.ORG, "mode": "managed", "values": org_before},  # pending import
@@ -546,3 +549,62 @@ def test_module_calls_stop(plan: dict) -> None:
 def test_the_real_stack_has_no_json_or_override_files() -> None:
     names = [p.name for p in (ROOT / "infra" / "org").iterdir()]
     assert not [n for n in names if n.endswith(".tf.json") or p1b.is_override(n)]
+
+
+# --- the organization's own account emails (2026-10-06) ------------------------------------------
+# The second phase 1b account-only apply failed EMAIL_ALREADY_EXISTS: the account email was the
+# management account's own. The organization data source in the plan's prior state lists every
+# account's email, so the check refuses a match, case-insensitively, and fails closed without them.
+
+
+ORG_DATA = "data.aws_organizations_organization.this"
+
+
+def org_data(plan: dict) -> dict:
+    resources = plan["prior_state"]["values"]["root_module"]["resources"]
+    return next(r for r in resources if r["address"] == ORG_DATA)["values"]
+
+
+def use_email(plan: dict, email: str) -> None:
+    plan["variables"]["workload_account_email"]["value"] = email
+    change(plan, p1b.ACCOUNT)["after"]["email"] = email
+
+
+@pytest.mark.parametrize("email", [MANAGEMENT_EMAIL, MANAGEMENT_EMAIL.lower(),
+                                   MANAGEMENT_EMAIL.upper()])  # fmt: skip
+def test_the_management_account_email_stops(plan: dict, email: str) -> None:
+    use_email(plan, email)
+    assert problems(plan) == [f"{p1b.ACCOUNT}: email is already an organization account's email"]
+
+
+def test_a_member_account_email_stops(plan: dict) -> None:
+    member = {"email": "Member@Example.com", "name": "member"}
+    org_data(plan)["accounts"].append(member)
+    org_data(plan)["non_master_accounts"].append(member)
+    use_email(plan, "member@example.com")
+    assert problems(plan) == [f"{p1b.ACCOUNT}: email is already an organization account's email"]
+
+
+@pytest.mark.parametrize("missing", ["accounts", "master_account_email", "values", "data source"])
+def test_unavailable_organization_emails_fail_closed(plan: dict, missing: str) -> None:
+    resources = plan["prior_state"]["values"]["root_module"]["resources"]
+    if missing == "data source":
+        resources[:] = [r for r in resources if r["address"] != ORG_DATA]
+    elif missing == "values":
+        next(r for r in resources if r["address"] == ORG_DATA)["values"] = {}
+    else:
+        del org_data(plan)[missing]
+    assert f"{p1b.ACCOUNT}: the organization's account emails are unavailable" in problems(plan)
+
+
+@pytest.mark.parametrize("accounts", [
+    [], [{"name": "no email"}], [{"email": ""}], None,
+    [{"email": MANAGEMENT_EMAIL}, {"name": "no email"}]])  # fmt: skip
+def test_an_empty_or_emailless_account_list_fails_closed(plan: dict, accounts: Any) -> None:
+    org_data(plan)["accounts"] = accounts
+    assert f"{p1b.ACCOUNT}: the organization's account emails are unavailable" in problems(plan)
+
+
+def test_a_new_email_outside_the_organization_passes(plan: dict) -> None:
+    use_email(plan, "brand-new@example.org")
+    assert problems(plan) == []

@@ -364,3 +364,10 @@ def test_the_full_mode_still_refuses_scp_drift() -> None:
     plan = full.plan.__wrapped__()
     plan["resource_drift"].append(tags_drift(BASELINE))
     assert f"resource_drift: {BASELINE}" in p1b.check(plan)[0]
+
+
+def test_the_management_account_email_stops_the_recovery_plan(plan: dict) -> None:
+    """2026-10-06, second attempt: EMAIL_ALREADY_EXISTS with the management account's email."""
+    plan["variables"]["workload_account_email"]["value"] = full.MANAGEMENT_EMAIL.lower()
+    full.change(plan, p1b.ACCOUNT)["after"]["email"] = full.MANAGEMENT_EMAIL.lower()
+    assert problems(plan) == [f"{p1b.ACCOUNT}: email is already an organization account's email"]
