@@ -134,6 +134,18 @@ After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workl
 **Failure and recovery.** Each recovery step is a new plan or state operation, and needs its own approval. No replacement plan is ever applied without one.
 - **The apply fails before `CreateAccount`** (enabling SCPs, a policy or an attachment): no account exists; what succeeded is in state. Re-plan, gate, approve.
 - **`CreateAccount` is rejected or ends `FAILED`** (for example `EMAIL_ALREADY_EXISTS`): no account exists; the error carries the failure reason. Fix the input, then a new plan and approval.
+  - **This happened on 2026-10-06** with the approved plan `8bc85dc5…`. The organization import, SCP enablement, both SCPs and both attachments applied. `CreateAccount` then ended `FAILED` with `EMAIL_ALREADY_EXISTS`: the budget alert address already belongs to an AWS account outside the organization. No account exists, nothing is in state for it, and nothing is tainted ([evidence](../evidence/phase1b-partial-2026-10-06.md)).
+  - **Recovery, each step approved separately:**
+    1. the user sets an unused, delivery-tested `workload_account_email` in the local `terraform.tfvars`; the budget alert address is unchanged;
+    2. a new read-only plan from `main`;
+    3. both gates: the policy gate with `--stack org`, and `scripts/phase1b_plan_check.py --mode account-only`;
+    4. an apply approval for that exact hash.
+  - **`--mode account-only` accepts only this shape:** `0 to import, 1 to add (the account), 0 to change, 0 to destroy`. Specifically:
+    - the state is exactly phase 1a plus the organization, the two SCPs and the two attachments;
+    - from the plan's prior state, which Terraform refreshed from AWS: SCPs are enabled and nothing else; the feature set is `ALL`; each SCP has its name, its type and exactly its reviewed document; each attachment targets `Workloads` and points at its own policy's ID;
+    - every other resource is `no-op`, with no import;
+    - the account passes every full-mode rule, and its email is not the rejected alert address;
+    - the source, override, JSON, module-call and drift rules are unchanged.
 - **The wait times out, or the apply is interrupted, while creation is in progress:** Terraform has no ID, but the account may still finish, under the root. Do not simply re-apply. Find it read-only (`DescribeCreateAccountStatus`, `ListAccounts`). Then a recovery plan with an `import` block for that account ID and `parent_id = Workloads` shows an import plus an in-place move. Gate it and approve it. A second account must never be created.
 - **The account is created but `MoveAccount` fails:** the account stays under the root with its ID in state, and Terraform 1.15.8 marks it **tainted** (`maybeTainted`). The next plan proposes a replacement, which `prevent_destroy` refuses, so the account cannot be destroyed or re-created. Recovery:
   1. an approved `terraform untaint aws_organizations_account.workloads` (state only);
@@ -199,6 +211,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **No root-access or permission-set change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` reports no enabled features afterwards.
 
 **Phase 1b: account and SCPs**
+- **After the partial apply of 2026-10-06,** the remaining plan creates only the account; `--mode account-only` checks it (see *Failure and recovery*). The post-apply checks below are unchanged.
 - **The plan:** Terraform reports `1 to import, 5 to add, 1 to change, 0 to destroy`. `scripts/phase1b_plan_check.py` must print `OK: exactly the reviewed phase 1b change`, which means:
   - the 1 import (and the 1 change) is the organization, with only `enabled_policy_types` changing, from none to `SERVICE_CONTROL_POLICY`; the feature set and trusted-service principals are unchanged;
   - the 5 additions are the two SCPs (each equal to its reviewed document), their two attachments to `Workloads`, and the account. Each attachment references exactly its own new policy, and its `policy_id` is unknown at plan time. Plan JSON drops functions and literals, so `replace(<policy>.id, ...)` would look the same there. The check therefore also reads the stack source: each attachment is declared once, sets only `policy_id` and `target_id`, and both are the plain references. It reads exactly the files Terraform 1.15.8 loads. An override file (`override.tf`, `override.tf.json`, `*_override.tf`, `*_override.tf.json`) would be merged over the reviewed expression unseen, so it stops the check; so do any JSON configuration and any module call. `infra/org` uses none of them. The check is run from the clean checkout the saved plan was made from. The account is `ecp-workloads`, with `parent_id` `Workloads` (created under the root, then moved), the configured email, still sensitive, `close_on_deletion = false`, the break-glass role name, billing access `ALLOW` and no GovCloud account, created after both attachments;
