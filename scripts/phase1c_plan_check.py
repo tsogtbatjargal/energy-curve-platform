@@ -14,9 +14,10 @@ Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is
 - centralized root access (RootCredentialsManagement and RootSessions), which depends on the
   scoping policy; the admin assignment depends on it too, and the read-only assignment on its
   policy. The order is read from the plan's configuration;
-- the $40 budget updated in place: filter_expression OR(LINKED_ACCOUNT = the workload account,
-  tag user:project = energy-curve-platform), metrics UnblendedCost, and the deprecated cost_filter
-  and cost_types gone. Nothing else on it changes;
+- the $40 budget updated in place, its legacy cost_filter only: exactly LinkedAccount = the
+  workload account (referenced), the project tag filter gone, and no filter_expression or metrics
+  (user, 2026-10-06: the provider keeps cost_filter and cost_types next to a filter_expression,
+  and the Budgets API refuses both styles together). Nothing else on it changes;
 - before it: IAM trusted access enabled out-of-band (the organization's service principals are
   exactly iam and sso), and phase 1b intact in state (the account in Workloads, the SCPs, their
   documents and attachments);
@@ -73,7 +74,6 @@ PHASE_1B_STATE = PHASE_1B_APPLIED | {ACCOUNT}
 TRUSTED_SERVICES = ["iam.amazonaws.com", "sso.amazonaws.com"]
 ROOT_FEATURES = ["RootCredentialsManagement", "RootSessions"]
 READ_ONLY_ACCESS = "arn:aws:iam::aws:policy/ReadOnlyAccess"
-BUDGET_CHANGES = {"cost_filter", "cost_types", "filter_expression", "metrics"}
 DEPENDS_ON = {  # address -> what it must wait for (ADR-0021: scope first, then enable)
     FEATURES: INLINE,
     ADMIN_ASSIGNMENT: INLINE,
@@ -86,25 +86,6 @@ def assume_root_policy(account_id: str) -> Any:
     return policy_templates.render(
         "admin-assume-root", {"workload_account_id": account_id}, POLICIES
     )
-
-
-def expected_filter(account_id: str) -> dict[str, Any]:
-    return {
-        "or": [
-            {"dimensions": [{"key": "LINKED_ACCOUNT", "values": [account_id]}]},
-            {"tags": [{"key": "user:project", "values": ["energy-curve-platform"]}]},
-        ]
-    }
-
-
-def pruned(value: Any) -> Any:
-    """A filter_expression without the empty blocks and unset attributes the plan spells out."""
-    if isinstance(value, dict):
-        kept = {k: pruned(v) for k, v in value.items()}
-        return {k: v for k, v in kept.items() if v not in (None, [], {})}
-    if isinstance(value, list):
-        return [pruned(v) for v in value]
-    return value
 
 
 def nested_references(plan: dict[str, Any], address: str, attribute: str) -> set[str]:
@@ -240,21 +221,17 @@ def check_create(address: str, change: dict[str, Any], plan: dict[str, Any],
 def check_budget(change: dict[str, Any], plan: dict[str, Any], account_id: str | None) -> list[str]:
     after = change.get("after") or {}
     problems = []
-    attrs = changed_attributes(change)
-    if not ({"filter_expression", "metrics"} <= attrs <= BUDGET_CHANGES):
-        problems.append(f"{BUDGET}: may change only {sorted(BUDGET_CHANGES)}")
-    if after.get("cost_filter") or after.get("cost_types"):
-        problems.append(f"{BUDGET}: the deprecated cost_filter and cost_types must be gone")
-    if after.get("metrics") != ["UnblendedCost"]:
-        problems.append(f"{BUDGET}: metrics must be UnblendedCost")
-    expression = after.get("filter_expression") or []
-    if (
-        account_id is None
-        or len(expression) != 1
-        or pruned(expression[0]) != expected_filter(account_id)
-        or f"{ACCOUNT}.id" not in nested_references(plan, BUDGET, "filter_expression")
-    ):
-        problems.append(f"{BUDGET}: filter must be OR(the workload account, the project tag)")
+    if changed_attributes(change) != {"cost_filter"}:
+        problems.append(f"{BUDGET}: may change only cost_filter")
+    want = [{"name": "LinkedAccount", "values": [account_id]}]
+    if account_id is None or after.get("cost_filter") != want:
+        problems.append(
+            f"{BUDGET}: the filter must be exactly LinkedAccount = the workload account"
+        )
+    if f"{ACCOUNT}.id" not in nested_references(plan, BUDGET, "cost_filter"):
+        problems.append(f"{BUDGET}: the account ID must come from {ACCOUNT}")
+    if after.get("filter_expression") or after.get("metrics"):
+        problems.append(f"{BUDGET}: no filter_expression or metrics")
     return problems
 
 

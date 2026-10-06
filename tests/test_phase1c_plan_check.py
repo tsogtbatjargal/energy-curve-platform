@@ -24,26 +24,22 @@ ADMIN_SET_ARN = f"{INSTANCE}/ps-0123456789abcdef".replace(":::instance/", ":::pe
 USER_ID, USER_NAME = "9067-user-0001", "admin-user"
 
 
-def leaf(**kind: list[dict]) -> dict:
-    """One filter_expression block as the plan shows it: every nested block present."""
-    blocks = {"and": [], "cost_categories": [], "dimensions": [], "not": [], "or": [], "tags": []}
-    return {**blocks, **kind}
+TAG_FILTER = {"name": "TagKeyValue", "values": ["user:project$energy-curve-platform"]}
 
 
-def budget_filter(account_id: str = ACCOUNT_ID) -> list[dict]:
-    dims = {"key": "LINKED_ACCOUNT", "values": [account_id], "match_options": None}
-    tag = {"key": "user:project", "values": ["energy-curve-platform"], "match_options": None}
-    return [leaf(**{"or": [leaf(dimensions=[dims]), leaf(tags=[tag])]})]
+def linked_account(*ids: str) -> dict:
+    return {"name": "LinkedAccount", "values": list(ids or (ACCOUNT_ID,))}
 
 
+# The budget as imported in phase 1a (its Read fills cost_types from the API), and the reviewed
+# in-place update (user, 2026-10-06, option 1): the same legacy cost_filter, now LinkedAccount =
+# the workload account, the tag filter gone. cost_types is Optional+Computed, so it stays.
 BUDGET_BEFORE = {
     "name": "energy-curve-platform", "limit_amount": "40.0", "time_unit": "MONTHLY",
-    "cost_filter": [{"name": "TagKeyValue", "values": ["user:project$energy-curve-platform"]}],
-    "cost_types": [{"include_tax": True, "use_blended": False}],
+    "cost_filter": [TAG_FILTER], "cost_types": [{"include_tax": True, "use_blended": False}],
     "filter_expression": [], "metrics": None,
 }  # fmt: skip
-BUDGET_AFTER = {**BUDGET_BEFORE, "cost_filter": [], "cost_types": [],
-                "filter_expression": budget_filter(), "metrics": ["UnblendedCost"]}  # fmt: skip
+BUDGET_AFTER = {**BUDGET_BEFORE, "cost_filter": [linked_account()]}
 
 
 IAM_SSO = ["iam.amazonaws.com", "sso.amazonaws.com"]
@@ -127,8 +123,9 @@ def plan() -> dict:
          "expressions": {"target_id": {"references": account_ref},
                          "permission_set_arn": {"references": readonly_ref}}},
         {"address": p1c.FEATURES, "depends_on": [p1c.INLINE]},
-        {"address": p1c.BUDGET, "expressions": {"filter_expression": [
-            {"or": [{"dimensions": [{"values": {"references": account_ref}}]}]}]}},
+        {"address": p1c.BUDGET, "expressions": {"cost_filter": [
+            {"name": {"constant_value": "LinkedAccount"},
+             "values": {"references": account_ref}}]}},
     ]  # fmt: skip
     p["variables"]["identity_center_user_name"] = {"value": USER_NAME}
     p["output_changes"] = {"workloads_ou_id": {"actions": ["no-op"]},
@@ -321,78 +318,66 @@ def test_the_source_declares_the_order() -> None:
 # --- the budget --------------------------------------------------------------------------------
 
 
-def test_another_budget_change_stops(plan: dict) -> None:
-    after(plan, p1c.BUDGET)["limit_amount"] = "400.0"
-    assert problems(plan) == [f"{p1c.BUDGET}: may change only {sorted(p1c.BUDGET_CHANGES)}"]
-
-
-@pytest.mark.parametrize("key", ["cost_filter", "cost_types"])
-def test_the_deprecated_filters_must_be_gone(plan: dict, key: str) -> None:
-    after(plan, p1c.BUDGET)[key] = BUDGET_BEFORE[key]
-    assert problems(plan) == [
-        f"{p1c.BUDGET}: the deprecated cost_filter and cost_types must be gone"
-    ]
-
-
-def test_the_provider_s_real_switch_plan_stops(plan: dict) -> None:
-    """Disposable probe, 2026-10-06 (provider 6.67.0, plan -refresh=false on a state holding the
-    legacy filter): cost_filter and cost_types are Optional+Computed, so the planned update keeps
-    them next to filter_expression and metrics. UpdateBudget would then get both filter styles,
-    which the Budgets API refuses ("Either FilterExpression and Metrics or CostFilters and
-    CostTypes, not both")."""
-    for key in ("cost_filter", "cost_types"):
-        after(plan, p1c.BUDGET)[key] = BUDGET_BEFORE[key]
-    assert problems(plan) == [
-        f"{p1c.BUDGET}: the deprecated cost_filter and cost_types must be gone"
-    ]
-
-
-@pytest.mark.parametrize("metrics", [["BlendedCost"], ["AmortizedCost"], None])
-def test_metrics_must_be_unblended(plan: dict, metrics: Any) -> None:
-    after(plan, p1c.BUDGET)["metrics"] = metrics
-    expected = [f"{p1c.BUDGET}: metrics must be UnblendedCost"]
-    if metrics is None:  # then metrics is not a change at all
-        expected.insert(0, f"{p1c.BUDGET}: may change only {sorted(p1c.BUDGET_CHANGES)}")
-    assert problems(plan) == expected
-
-
-def and_filter() -> list[dict]:
-    expression = budget_filter()
-    expression[0]["and"], expression[0]["or"] = expression[0]["or"], []
-    return expression
-
-
-def account_only_filter() -> list[dict]:
-    expression = budget_filter()
-    expression[0]["or"] = expression[0]["or"][:1]
-    return expression
-
-
-def tag_without_prefix() -> list[dict]:
-    expression = budget_filter()
-    expression[0]["or"][1]["tags"][0]["key"] = "project"
-    return expression
-
-
-@pytest.mark.parametrize("expression", [and_filter(), account_only_filter(), tag_without_prefix(),
-                                        budget_filter(OTHER_ACCOUNT_ID), []])  # fmt: skip
-def test_a_filter_other_than_the_reviewed_or_stops(plan: dict, expression: list) -> None:
-    after(plan, p1c.BUDGET)["filter_expression"] = expression
-    assert f"{p1c.BUDGET}: filter must be OR(the workload account, the project tag)" in problems(
-        plan
-    )
-
-
-def test_a_filter_whose_account_is_not_the_reference_stops(plan: dict) -> None:
-    config(plan, p1c.BUDGET)["expressions"]["filter_expression"] = []
-    assert problems(plan) == [
-        f"{p1c.BUDGET}: filter must be OR(the workload account, the project tag)"
-    ]
+ONLY_FILTER = f"{p1c.BUDGET}: may change only cost_filter"
+EXACT_FILTER = f"{p1c.BUDGET}: the filter must be exactly LinkedAccount = the workload account"
+NO_NEW_STYLE = f"{p1c.BUDGET}: no filter_expression or metrics"
 
 
 def test_the_budget_must_be_updated_in_place(plan: dict) -> None:
     change(plan, p1c.BUDGET)["actions"] = ["delete", "create"]
     assert problems(plan) == [f"unexpected change: delete+create {p1c.BUDGET}"]
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("limit_amount", "400.0"),
+    ("time_unit", "DAILY"),
+    ("cost_types", []),  # what dropping the legacy cost types would look like
+])  # fmt: skip
+def test_only_the_filter_may_change(plan: dict, key: str, value: Any) -> None:
+    after(plan, p1c.BUDGET)[key] = value
+    assert problems(plan) == [ONLY_FILTER]
+
+
+def test_the_tag_filter_must_be_gone(plan: dict) -> None:
+    after(plan, p1c.BUDGET)["cost_filter"] = [linked_account(), TAG_FILTER]
+    assert problems(plan) == [EXACT_FILTER]
+
+
+@pytest.mark.parametrize("cost_filter", [
+    [linked_account(OTHER_ACCOUNT_ID)],
+    [linked_account(ACCOUNT_ID, OTHER_ACCOUNT_ID)],
+    [{"name": "Service", "values": [ACCOUNT_ID]}],
+    [],
+])  # fmt: skip
+def test_the_filter_must_be_exactly_the_workload_account(plan: dict, cost_filter: list) -> None:
+    after(plan, p1c.BUDGET)["cost_filter"] = cost_filter
+    assert problems(plan) == [EXACT_FILTER]
+
+
+def test_the_account_id_must_come_from_the_account_resource_in_the_filter(plan: dict) -> None:
+    config(plan, p1c.BUDGET)["expressions"]["cost_filter"][0]["values"]["references"] = []
+    assert problems(plan) == [f"{p1c.BUDGET}: the account ID must come from {p1c.ACCOUNT}"]
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("filter_expression", [{"dimensions": [{"key": "LINKED_ACCOUNT", "values": [ACCOUNT_ID]}]}]),
+    ("metrics", ["UnblendedCost"]),
+])  # fmt: skip
+def test_no_new_style_fields(plan: dict, key: str, value: Any) -> None:
+    after(plan, p1c.BUDGET)[key] = value
+    assert problems(plan) == [ONLY_FILTER, NO_NEW_STYLE]
+
+
+def test_the_rejected_or_switch_stops(plan: dict) -> None:
+    """The probed plan of the earlier design (2026-10-06): filter_expression and metrics added,
+    the legacy cost_filter and cost_types kept, which the Budgets API refuses together."""
+    after(plan, p1c.BUDGET).update(
+        cost_filter=[TAG_FILTER],
+        filter_expression=[{"or": [{"dimensions": [{"key": "LINKED_ACCOUNT",
+                                                    "values": [ACCOUNT_ID]}]}]}],
+        metrics=["UnblendedCost"],
+    )  # fmt: skip
+    assert problems(plan) == [ONLY_FILTER, EXACT_FILTER, NO_NEW_STYLE]
 
 
 # --- the state before the plan -----------------------------------------------------------------

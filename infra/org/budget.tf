@@ -1,6 +1,7 @@
 # Owned by this stack since ADR-0021 phase 1a, imported from the management bootstrap. Only the
 # management account can activate cost allocation tags, and destroying this resource would set the
-# tag Inactive and blind the budget's tag filter, so it is never destroyed or re-created.
+# tag Inactive (the budget filtered on it until ADR-0021 phase 1c; cost reports still group by it),
+# so it is never destroyed or re-created.
 import {
   to = aws_ce_cost_allocation_tag.project
   id = "project"
@@ -11,7 +12,7 @@ import {
   id = "${local.account_id}:energy-curve-platform"
 }
 
-# Cost allocation tags must be active before a tag-filtered budget sees spend (up to 24 h).
+# Cost allocation tags take up to 24 h to become active for cost data.
 resource "aws_ce_cost_allocation_tag" "project" {
   tag_key = "project"
   status  = "Active"
@@ -29,25 +30,14 @@ resource "aws_budgets_budget" "project" {
   time_unit    = "MONTHLY"
   tags         = local.imported_tags
 
-  # ADR-0021 phase 1c: everything in the workload account, or anything tagged with the project
-  # (its management-account resources). The OR needs filter_expression, which replaces the
-  # deprecated cost_filter and requires metrics in place of cost_types; UnblendedCost is what the
-  # default cost types measured.
-  metrics = ["UnblendedCost"]
-
-  filter_expression {
-    or {
-      dimensions {
-        key    = "LINKED_ACCOUNT"
-        values = [aws_organizations_account.workloads.id]
-      }
-    }
-    or {
-      tags {
-        key    = "user:project" # user-defined cost allocation tags take the user: prefix
-        values = ["energy-curve-platform"]
-      }
-    }
+  # ADR-0021 phase 1c (user, 2026-10-06): everything in the workload account. The legacy
+  # cost_filter is changed in place; filter_expression could express "or the project tag", but
+  # the provider keeps the Optional+Computed cost_filter and cost_types next to it, and the
+  # Budgets API refuses both filter styles together. Tagged costs left in the management account
+  # (the state bucket) are no longer counted.
+  cost_filter {
+    name   = "LinkedAccount"
+    values = [aws_organizations_account.workloads.id]
   }
 
   dynamic "notification" {
