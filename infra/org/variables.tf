@@ -33,3 +33,15 @@ variable "workload_account_email" {
     error_message = "workload_account_email must be an email address."
   }
 }
+
+# The Identity Center user given access to the workload account (ADR-0021 phase 1c), by UserName.
+# Never committed: terraform.tfvars only.
+variable "identity_center_user_name" {
+  type      = string
+  sensitive = true
+
+  validation {
+    condition     = length(trimspace(var.identity_center_user_name)) > 0
+    error_message = "identity_center_user_name must be the Identity Center UserName."
+  }
+}

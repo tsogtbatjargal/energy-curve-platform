@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssumeRootOnlyIntoTheWorkloadAccount",
+      "Effect": "Deny",
+      "Action": "sts:AssumeRoot",
+      "NotResource": "arn:aws:iam::${workload_account_id}:root"
+    },
+    {
+      "Sid": "AssumeRootOnlyForTheFiveTasks",
+      "Effect": "Deny",
+      "Action": "sts:AssumeRoot",
+      "Resource": "*",
+      "Condition": {
+        "ArnNotEquals": {
+          "sts:TaskPolicyArn": [
+            "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
+            "arn:aws:iam::aws:policy/root-task/IAMCreateRootUserPassword",
+            "arn:aws:iam::aws:policy/root-task/IAMDeleteRootUserCredentials",
+            "arn:aws:iam::aws:policy/root-task/S3UnlockBucketPolicy",
+            "arn:aws:iam::aws:policy/root-task/SQSUnlockQueuePolicy"
+          ]
+        }
+      }
+    }
+  ]
+}
