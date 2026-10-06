@@ -7,6 +7,8 @@
 `account-only` is the recovery after the 2026-10-06 apply, which completed everything but the
 account (CreateAccount FAILED, EMAIL_ALREADY_EXISTS): the plan may only create the account, and
 the already-applied SCP enablement, SCPs and attachments are checked in the plan's prior state.
+The only drift it accepts is tags read back as {} where state had null, on the OU and the two
+SCPs, each planned no-op (the full mode accepts it on the OU only).
 
 Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is "1 to import,
 5 to add, 1 to change, 0 to destroy":
@@ -82,14 +84,18 @@ def references(plan: dict[str, Any], address: str, attribute: str) -> list[str]:
     return list(expr.get("references") or [])
 
 
-def check_drift(plan: dict[str, Any], planned: dict[str, list[str]]) -> list[str]:
+def check_drift(
+    plan: dict[str, Any], planned: dict[str, list[str]], tags_only: frozenset[str] = frozenset({OU})
+) -> list[str]:
+    """Refresh drift stops, except the provider's tags normalization (null read back as {}) on
+    the addresses in tags_only, with drift action update and planned action no-op."""
     problems = []
     for item in plan.get("resource_drift") or []:
         address, change = item.get("address"), item.get("change") or {}
         before, after = change.get("before") or {}, change.get("after") or {}
         differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
         if not (
-            address == OU
+            address in tags_only
             and change.get("actions") == ["update"]
             and planned.get(address) == ["no-op"]
             and differing == {"tags"}
@@ -314,6 +320,7 @@ def check(
 
 
 PHASE_1B_APPLIED = PHASE_1A_STATE | {ORG, *SCPS, *ATTACHMENTS}
+ACCOUNT_ONLY_TAGS_DRIFT = frozenset({OU, *SCPS})
 
 
 def check_applied_scps(plan: dict[str, Any], ou_id: str | None) -> list[str]:
@@ -357,7 +364,8 @@ def check_account_only(
     if set(already_owned(plan)) != PHASE_1B_APPLIED:
         problems.append("infra/org state is not exactly phase 1a plus the applied part of 1b")
     planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
-    problems += check_drift(plan, planned)
+    # The two SCPs created on 2026-10-06 read their tags back as {} (real plan, 2026-10-06).
+    problems += check_drift(plan, planned, ACCOUNT_ONLY_TAGS_DRIFT)
     problems += check_source(stack_dir)
     root_module = (plan.get("configuration") or {}).get("root_module") or {}
     for name in sorted(root_module.get("module_calls") or {}):
