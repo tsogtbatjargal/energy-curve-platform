@@ -243,6 +243,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
   - `organizations:LeaveOrganization` is denied.
 
 **Phase 1c: assignment, budget scope, `AssumeRoot` scoping and root access**
+- **Status (2026-10-06): applied** (plan `8c9e0a42…`, after a refresh-only apply of the phase 1b drift). Every post-apply check below passed ([evidence](../evidence/phase1c-2026-10-06.md)). One drift entry is accepted: `ecp-readonly`'s tags read back as `{}`, planned `no-op`.
 - **Before the plan:** the approved trusted-access call; `organizations:ListAWSServiceAccessForOrganization` then lists exactly `iam.amazonaws.com` and `sso.amazonaws.com`. The sweep of every management-account role and IAM user is admin-only.
 - **The plan:** Terraform reports `6 to add, 1 to change, 0 to destroy`, with no import. `scripts/phase1c_plan_check.py` must print `OK: exactly the reviewed phase 1c change`, which means:
   - the 6 additions are the scoping policy (equal to `policies/admin-assume-root.json.tftpl` rendered with the account ID from state, and referencing the account resource), `ecp-readonly` (PT1H, no relay state), its `ReadOnlyAccess` attachment, the two assignments (the configured user, the workload account only, the reference to the account resource), and root access (exactly both features);
