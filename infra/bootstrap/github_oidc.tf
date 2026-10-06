@@ -1,12 +1,24 @@
-# The GitHub OIDC provider is an account-wide singleton, already created by another project.
-# Reference it instead of managing it here.
+# The GitHub OIDC provider is an account-wide singleton. In the management account another project
+# created it, so it is only referenced there. ecp-workloads has none, so the member instance
+# creates and owns it (ADR-0021 phase 3).
 data "aws_iam_openid_connect_provider" "github" {
-  url = "https://token.actions.githubusercontent.com"
+  count = var.member_instance ? 0 : 1
+  url   = "https://token.actions.githubusercontent.com"
+}
+
+resource "aws_iam_openid_connect_provider" "github" {
+  count          = var.member_instance ? 1 : 0
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
 }
 
 locals {
   oidc_sub = "token.actions.githubusercontent.com:sub"
   oidc_aud = "token.actions.githubusercontent.com:aud"
+  github_oidc_provider_arn = (var.member_instance
+    ? aws_iam_openid_connect_provider.github[0].arn
+    : data.aws_iam_openid_connect_provider.github[0].arn
+  )
 }
 
 # --- Plan role: pull requests and main. Read-only AWS plus state lock files. ---
@@ -16,7 +28,7 @@ data "aws_iam_policy_document" "gha_plan_trust" {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [data.aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_provider_arn]
     }
     condition {
       test     = "StringEquals"
@@ -76,7 +88,7 @@ data "aws_iam_policy_document" "gha_deploy_trust" {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [data.aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_provider_arn]
     }
     condition {
       test     = "StringEquals"

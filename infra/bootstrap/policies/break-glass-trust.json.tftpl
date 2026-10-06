@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AdminIdentityCenterSessionsWithSourceIdentity",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::${management_account_id}:root"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:SetSourceIdentity"
+      ],
+      "Condition": {
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::${management_account_id}:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*"
+        },
+        "Null": {
+          "sts:SourceIdentity": "false"
+        }
+      }
+    }
+  ]
+}

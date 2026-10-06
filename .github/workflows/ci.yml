@@ -95,6 +95,12 @@ jobs:
           install_args: terraform opa trivy actionlint
       - name: terraform fmt
         run: terraform fmt -check -recursive infra
+      # ADR-0021 phase 3: the bootstrap stack's instance guard and member resources, planned
+      # against a mocked AWS provider. No credentials and no backend.
+      - name: terraform test (bootstrap, mocked provider)
+        run: |
+          terraform -chdir=infra/bootstrap init -backend=false -input=false
+          terraform -chdir=infra/bootstrap test
       - name: rego fmt, compile, unit tests
         run: |
           opa fmt --list --fail policy
@@ -221,6 +227,13 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: gha-plan-${{ github.run_id }}
           mask-aws-account-id: true
+      # The stack refuses to plan outside expected_account_id (infra/bootstrap/guard.tf,
+      # ADR-0021 phase 3). CI's account is the one in the plan role it assumes.
+      - name: expected account
+        env:
+          AWS_PLAN_ROLE_ARN: ${{ vars.AWS_PLAN_ROLE_ARN }}
+        run: |
+          echo "TF_VAR_expected_account_id=$(cut -d: -f5 <<< "$AWS_PLAN_ROLE_ARN")" >> "$GITHUB_ENV"
       - name: terraform init
         run: |
           terraform init -input=false \
