@@ -237,6 +237,20 @@ def check_source(stack_dir: Path) -> list[str]:
     return problems
 
 
+def organization_emails(plan: dict[str, Any]) -> set[str] | None:
+    """Every account email the organization data source holds, lowercased; None when they are not
+    all there (no data source, no account list, an account without an email, no management email),
+    so the caller fails closed."""
+    org = prior_values(plan, "data.aws_organizations_organization.this") or {}
+    accounts, master = org.get("accounts"), org.get("master_account_email")
+    if not isinstance(accounts, list) or not accounts or not master:
+        return None
+    if not all(isinstance(a, dict) and a.get("email") for a in accounts):
+        return None
+    others = [a.get("email") for a in org.get("non_master_accounts") or [] if isinstance(a, dict)]
+    return {str(e).lower() for e in [master, *[a["email"] for a in accounts], *others] if e}
+
+
 def check_account(change: dict[str, Any], plan: dict[str, Any], ou_id: str | None) -> list[str]:
     after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
     problems = []
@@ -252,6 +266,13 @@ def check_account(change: dict[str, Any], plan: dict[str, Any], ou_id: str | Non
     if email and email.lower() in {str(a).lower() for a in alert}:
         # 2026-10-06: CreateAccount failed EMAIL_ALREADY_EXISTS with the alert address.
         problems.append(f"{ACCOUNT}: email must not be the budget alert address")
+    # 2026-10-06: the second attempt failed EMAIL_ALREADY_EXISTS with the management account's own
+    # email. This cannot see accounts outside the organization; AWS still decides those.
+    known = organization_emails(plan)
+    if known is None:
+        problems.append(f"{ACCOUNT}: the organization's account emails are unavailable")
+    elif email and email.lower() in known:
+        problems.append(f"{ACCOUNT}: email is already an organization account's email")
     if (change.get("after_sensitive") or {}).get("email") is not True:
         problems.append(f"{ACCOUNT}: email must stay sensitive")
     depends = set(config_resource(plan, ACCOUNT).get("depends_on") or [])
