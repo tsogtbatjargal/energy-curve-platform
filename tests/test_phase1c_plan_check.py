@@ -46,6 +46,22 @@ BUDGET_AFTER = {**BUDGET_BEFORE, "cost_filter": [], "cost_types": [],
                 "filter_expression": budget_filter(), "metrics": ["UnblendedCost"]}  # fmt: skip
 
 
+IAM_SSO = ["iam.amazonaws.com", "sso.amazonaws.com"]
+
+
+def principals_drift(before: list[str], after: list[str], actions: list[str] | None = None,
+                     address: str = recovered.p1b.ORG, **other: Any) -> dict:  # fmt: skip
+    """Refresh drift on the organization, shaped like the disposable probe of 2026-10-06
+    (Terraform 1.15.8, provider 6.67.0, local moto): an ignore_changes attribute changed
+    out-of-band is still reported, as an update, while the resource is planned no-op."""
+    org = {"id": full.ORG_ID, "feature_set": "ALL",
+           "enabled_policy_types": ["SERVICE_CONTROL_POLICY"]}  # fmt: skip
+    return {"address": address, "change": {
+        "actions": actions or ["update"],
+        "before": {**org, "aws_service_access_principals": before},
+        "after": {**org, "aws_service_access_principals": after, **other}}}  # fmt: skip
+
+
 def scoping(account_id: str = ACCOUNT_ID) -> str:
     return json.dumps(p1c.assume_root_policy(account_id))
 
@@ -56,10 +72,15 @@ def plan() -> dict:
     account = {"id": ACCOUNT_ID, "name": "ecp-workloads", "parent_id": full.OU_ID,
                "status": "ACTIVE"}  # fmt: skip
     resources = p["prior_state"]["values"]["root_module"]["resources"]
+    # After the out-of-band call, refresh reads [iam, sso] into the data source and the
+    # organization; the organization ignores the attribute, so it is planned no-op, with drift.
     for r in resources:
-        if r["address"] == p1c.ORG_DATA:
-            r["values"]["aws_service_access_principals"] = ["sso.amazonaws.com",
-                                                            "iam.amazonaws.com"]  # fmt: skip
+        if r["address"] in (p1c.ORG_DATA, recovered.p1b.ORG):
+            r["values"]["aws_service_access_principals"] = list(IAM_SSO)
+    org_change = full.change(p, recovered.p1b.ORG)
+    for side in ("before", "after"):
+        org_change[side] = {**org_change[side], "aws_service_access_principals": list(IAM_SSO)}
+    p["resource_drift"] = [principals_drift(["sso.amazonaws.com"], list(IAM_SSO))]
     resources += [
         {"address": p1c.ACCOUNT, "mode": "managed", "values": account},
         {"address": p1c.BUDGET, "mode": "managed", "values": BUDGET_BEFORE},
@@ -313,6 +334,19 @@ def test_the_deprecated_filters_must_be_gone(plan: dict, key: str) -> None:
     ]
 
 
+def test_the_provider_s_real_switch_plan_stops(plan: dict) -> None:
+    """Disposable probe, 2026-10-06 (provider 6.67.0, plan -refresh=false on a state holding the
+    legacy filter): cost_filter and cost_types are Optional+Computed, so the planned update keeps
+    them next to filter_expression and metrics. UpdateBudget would then get both filter styles,
+    which the Budgets API refuses ("Either FilterExpression and Metrics or CostFilters and
+    CostTypes, not both")."""
+    for key in ("cost_filter", "cost_types"):
+        after(plan, p1c.BUDGET)[key] = BUDGET_BEFORE[key]
+    assert problems(plan) == [
+        f"{p1c.BUDGET}: the deprecated cost_filter and cost_types must be gone"
+    ]
+
+
 @pytest.mark.parametrize("metrics", [["BlendedCost"], ["AmortizedCost"], None])
 def test_metrics_must_be_unblended(plan: dict, metrics: Any) -> None:
     after(plan, p1c.BUDGET)["metrics"] = metrics
@@ -440,6 +474,60 @@ def test_an_import_stops(plan: dict) -> None:
 def test_any_drift_stops_even_tags(plan: dict) -> None:
     plan["resource_drift"] = [recovered.tags_drift(p1c.ACCOUNT)]
     assert problems(plan) == [f"resource_drift: {p1c.ACCOUNT}"]
+
+
+def test_the_reviewed_plan_without_the_trusted_access_drift_passes(plan: dict) -> None:
+    plan["resource_drift"] = []  # e.g. a re-plan once the drift is recorded in state
+    assert problems(plan) == []
+
+
+@pytest.mark.parametrize(("before", "after"), [
+    (["sso.amazonaws.com"], ["iam.amazonaws.com"]),  # sso removed
+    (["sso.amazonaws.com"], [*IAM_SSO, "config.amazonaws.com"]),  # one more than iam
+    (["sso.amazonaws.com"], ["config.amazonaws.com", "sso.amazonaws.com"]),  # not iam
+    ([], IAM_SSO),
+    (["config.amazonaws.com", "sso.amazonaws.com"], IAM_SSO),
+    (IAM_SSO, ["sso.amazonaws.com"]),  # iam removed
+])  # fmt: skip
+def test_any_other_principals_change_stops(plan: dict, before: list, after: list) -> None:
+    plan["resource_drift"] = [principals_drift(before, after)]
+    assert f"resource_drift: {recovered.p1b.ORG}" in problems(plan)
+
+
+def test_the_principals_drift_with_another_attribute_stops(plan: dict) -> None:
+    plan["resource_drift"] = [principals_drift(["sso.amazonaws.com"], IAM_SSO,
+                                               enabled_policy_types=[])]  # fmt: skip
+    assert problems(plan) == [f"resource_drift: {recovered.p1b.ORG}"]
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["create"], ["no-op"]])
+def test_the_principals_drift_with_another_action_stops(plan: dict, actions: list) -> None:
+    plan["resource_drift"] = [principals_drift(["sso.amazonaws.com"], IAM_SSO, actions)]
+    assert problems(plan) == [f"resource_drift: {recovered.p1b.ORG}"]
+
+
+def test_the_principals_drift_on_a_planned_organization_change_stops(plan: dict) -> None:
+    change(plan, recovered.p1b.ORG)["actions"] = ["update"]
+    assert problems(plan) == [
+        f"resource_drift: {recovered.p1b.ORG}",
+        f"unexpected change: update {recovered.p1b.ORG}",
+    ]
+
+
+def test_the_same_drift_on_another_address_stops(plan: dict) -> None:
+    plan["resource_drift"] = [principals_drift(["sso.amazonaws.com"], IAM_SSO,
+                                               address=p1c.ACCOUNT)]  # fmt: skip
+    assert problems(plan) == [f"resource_drift: {p1c.ACCOUNT}"]
+
+
+def test_the_principals_drift_does_not_excuse_other_drift(plan: dict) -> None:
+    plan["resource_drift"].append(recovered.tags_drift(p1c.ACCOUNT))
+    assert problems(plan) == [f"resource_drift: {p1c.ACCOUNT}"]
+
+
+def test_the_principals_drift_must_appear_at_most_once(plan: dict) -> None:
+    plan["resource_drift"] *= 2
+    assert problems(plan) == [f"resource_drift: {recovered.p1b.ORG}"]
 
 
 def test_an_output_change_stops(plan: dict) -> None:

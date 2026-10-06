@@ -20,8 +20,10 @@ Exit 0 only when the plan does exactly what was reviewed. Terraform's summary is
 - before it: IAM trusted access enabled out-of-band (the organization's service principals are
   exactly iam and sso), and phase 1b intact in state (the account in Workloads, the SCPs, their
   documents and attachments);
-- nothing else: every other resource no-op, no drift, no output change, the phase 1b source rules
-  (no overrides, JSON configuration or module calls; the attachments as reviewed).
+- nothing else: every other resource no-op, no output change, no drift but the refresh of the
+  out-of-band call (the organization's principals [sso] -> [iam, sso], an update, planned
+  no-op), and the phase 1b source rules (no overrides, JSON configuration or module calls; the
+  attachments as reviewed).
 
 Plans hold sensitive values in plain text, so the report prints addresses and actions only.
 """
@@ -39,6 +41,7 @@ from bootstrap_plan_check import UNCHANGED, changed_attributes
 from org_plan_check import OU, already_owned, prior_values
 from phase1b_plan_check import (
     ACCOUNT,
+    ORG,
     PHASE_1B_APPLIED,
     check_applied_scps,
     check_drift,
@@ -116,6 +119,24 @@ def nested_references(plan: dict[str, Any], address: str, attribute: str) -> set
         return set()
 
     return walk(config_resource(plan, address).get("expressions", {}).get(attribute))
+
+
+def is_trusted_access_drift(item: dict[str, Any], planned: dict[str, list[str]]) -> bool:
+    """The refresh after the approved out-of-band call (Q1): the organization ignores
+    aws_service_access_principals, so it is planned no-op, but refresh still reports the change as
+    drift (disposable probe, 2026-10-06: Terraform 1.15.8, provider 6.67.0, local moto). Exactly
+    [sso] -> [iam, sso], as an update, and no other attribute."""
+    change = item.get("change") or {}
+    before, after = change.get("before") or {}, change.get("after") or {}
+    differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+    return (
+        item.get("address") == ORG
+        and change.get("actions") == ["update"]
+        and planned.get(ORG) == ["no-op"]
+        and differing == {"aws_service_access_principals"}
+        and before.get("aws_service_access_principals") == ["sso.amazonaws.com"]
+        and sorted(after.get("aws_service_access_principals") or []) == TRUSTED_SERVICES
+    )
 
 
 def check_literals(stack_dir: Path) -> list[str]:
@@ -249,7 +270,10 @@ def check(plan: dict[str, Any], stack_dir: Path = STACK) -> tuple[list[str], lis
     if set(already_owned(plan)) != PHASE_1B_STATE:
         problems.append("infra/org state is not exactly phase 1b as applied")
     planned = {rc["address"]: rc["change"]["actions"] for rc in plan.get("resource_changes", [])}
-    problems += check_drift(plan, planned, frozenset())
+    drift = plan.get("resource_drift") or []
+    trusted = [d for d in drift if is_trusted_access_drift(d, planned)]
+    rest = [d for d in drift if d not in trusted] + trusted[1:]  # at most once
+    problems += check_drift({"resource_drift": rest}, planned, frozenset())
     problems += check_source(stack_dir)
     problems += check_literals(stack_dir)
     root_module = (plan.get("configuration") or {}).get("root_module") or {}
