@@ -122,12 +122,13 @@ After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workl
 - **W1, from creation to the move**, normally seconds: the account sits under the root with only `FullAWSAccess`, so none of the project SCPs apply. Attaching SCPs to the root to cover it would be an organization-wide change, so it is **not** done without the user's approval.
 - **W2, from creation to phase 3:** `OrganizationAccountAccessRole` trusts the whole management account until phase 3 replaces its trust policy, and the protect SCP stops anyone but the Identity Center admin from changing it. W1 lies inside W2.
 - **Who can act in the account then.** The root user has no password; it can only be recovered through the account email, which the user controls. Otherwise, any management-account principal allowed `sts:AssumeRole` on the role can, and, once phase 1c turns on centralized root access, any principal allowed `sts:AssumeRoot` on the account's root.
-- **The sweep:** `iam:SimulatePrincipalPolicy` for every non-service role in the management account, for both `sts:AssumeRole` on `arn:aws:iam::<member>:role/OrganizationAccountAccessRole` and `sts:AssumeRoot` on `arn:aws:iam::<member>:root`.
+- **The sweep:** `iam:SimulatePrincipalPolicy` for every non-service role **and IAM user** in the management account, for both `sts:AssumeRole` on `arn:aws:iam::<member>:role/OrganizationAccountAccessRole` and `sts:AssumeRoot` on `arn:aws:iam::<member>:root`.
   - **First run** (2026-10-05):
     - the admin's `AWSReservedSSO_AdministratorAccess_*` role: **allowed** both, as intended;
     - **`ecp-gha-deploy`: allowed** both, through PowerUserAccess. This was not intended;
     - `ecp-gha-plan` and the other project's six roles: implicitly denied both.
   - **After PR #25 was applied** (2026-10-05): only the admin role is allowed; `ecp-gha-deploy` is explicitly denied both; the others are unchanged.
+  - **Widened to IAM users** (2026-10-06, before the third account apply). *(Correction: the runs above covered roles only.)* The other project's admin IAM user was **allowed** both, through its group's `PowerUserAccess`. The user approved an **out-of-band** inline deny on that group, `ecp-no-cross-account-sts`: the deploy role's `NoCrossAccountRoles` and `NoRootSessions` statements. It is in no Terraform state. Afterwards only the admin role is allowed; that user is explicitly denied both. Its reversal, and the risk that the other project's IaC removes it, are in the [phase 1b evidence](../evidence/phase1b-2026-10-06.md#the-sweep-and-an-out-of-band-iam-change). The sweep is re-run before every later phase.
 
 **Proposed acceptance for the window (each item needs the user's approval):**
 1. **Before the apply,** close the unintended path. **Done (2026-10-05):**
@@ -224,6 +225,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 
 **Phase 1b: account and SCPs**
 - **After the partial apply of 2026-10-06,** the remaining plan creates only the account; `--mode account-only` checks it (see *Failure and recovery*). The post-apply checks below are unchanged.
+- **Status (2026-10-06): applied** on the third attempt (plan `7a68242d…`). The post-apply checks and the bootstrap-window times passed ([evidence](../evidence/phase1b-2026-10-06.md)). The SCP simulations inside `ecp-workloads` and the window's in-account activity check wait for phase 2.
 - **The plan:** Terraform reports `1 to import, 5 to add, 1 to change, 0 to destroy`. `scripts/phase1b_plan_check.py` must print `OK: exactly the reviewed phase 1b change`, which means:
   - the 1 import (and the 1 change) is the organization, with only `enabled_policy_types` changing, from none to `SERVICE_CONTROL_POLICY`; the feature set and trusted-service principals are unchanged;
   - the 5 additions are the two SCPs (each equal to its reviewed document), their two attachments to `Workloads`, and the account. Each attachment references exactly its own new policy, and its `policy_id` is unknown at plan time. Plan JSON drops functions and literals, so `replace(<policy>.id, ...)` would look the same there. The check therefore also reads the stack source: each attachment is declared once, sets only `policy_id` and `target_id`, and both are the plain references. It reads exactly the files Terraform 1.15.8 loads. An override file (`override.tf`, `override.tf.json`, `*_override.tf`, `*_override.tf.json`) would be merged over the reviewed expression unseen, so it stops the check; so do any JSON configuration and any module call. `infra/org` uses none of them. The check is run from the clean checkout the saved plan was made from. The account is `ecp-workloads`, with `parent_id` `Workloads` (created under the root, then moved), the configured email, still sensitive, `close_on_deletion = false`, the break-glass role name, billing access `ALLOW` and no GovCloud account, created after both attachments;
@@ -287,6 +289,6 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **More moving parts:** a second account, profile and state bucket, an `infra/org` stack, and imports across state files.
 - **R2 must be re-accepted in the member account.** M4c's Terraform can be written in parallel, but it is planned and applied only after phases 1 to 5.
 - **Decided for phase 1 (user, 2026-10-04 and 2026-10-05):**
-  - the account email is the budget alert address, kept in the git-ignored `infra/org/terraform.tfvars`;
+  - the account email is the budget alert address, kept in the git-ignored `infra/org/terraform.tfvars`. *(Superseded 2026-10-06: that address belongs to an AWS account outside the organization, so the account uses a separate, unused address, in the same file.)*;
   - the account name is `ecp-workloads`;
   - both recommended SCPs (the second R2 layer and the break-glass lock) are included, in `ecp-workloads-protect`.
