@@ -278,3 +278,89 @@ def test_the_account_must_be_a_plain_create(plan: dict, actions: list[str]) -> N
     found = problems(plan)
     assert f"unexpected change: {'+'.join(actions)} {p1b.ACCOUNT}" in found
     assert f"missing change: {p1b.ACCOUNT}" in found
+
+
+# --- refresh drift on the applied SCPs (the real account-only plan, 2026-10-06) ------------------
+# Terraform's refresh read both SCPs' tags back as {} where state had null, the same normalization
+# as the OU's. Both are planned no-op. Account-only mode accepts exactly that, on exactly those two
+# addresses; every other drift still stops, and the full mode is unchanged.
+
+
+def tags_drift(address: str, before: Any = None, after: Any = None,
+               actions: list[str] | None = None, **other: Any) -> dict:  # fmt: skip
+    b = {"name": "n", "content": "c", "tags": before}
+    a = {"name": "n", "content": "c", "tags": {} if after is None and not other else after}
+    a.update(other)
+    return {"address": address, "change": {"actions": actions or ["update"], "before": b,
+                                           "after": a}}  # fmt: skip
+
+
+def real_scp_drift(plan: dict) -> dict:
+    plan["resource_drift"] = [tags_drift(BASELINE), tags_drift(PROTECT)]
+    return plan
+
+
+def test_the_two_real_scp_tags_drifts_pass(plan: dict) -> None:
+    assert problems(real_scp_drift(plan)) == []
+
+
+@pytest.mark.parametrize("address", [BASELINE, PROTECT])
+def test_each_real_scp_tags_drift_passes_alone(plan: dict, address: str) -> None:
+    plan["resource_drift"] = [tags_drift(address)]
+    assert problems(plan) == []
+
+
+@pytest.mark.parametrize(("before", "after"), [(None, {"k": "v"}), ({}, None), ({"a": "b"}, {}),
+                                               (None, None), ({}, {"k": "v"})])  # fmt: skip
+def test_other_scp_tag_changes_stop(plan: dict, before: Any, after: Any) -> None:
+    item = tags_drift(PROTECT, before)
+    item["change"]["after"]["tags"] = after
+    plan["resource_drift"] = [item]
+    assert problems(plan) == [f"resource_drift: {PROTECT}"]
+
+
+@pytest.mark.parametrize("other", [{"content": "edited"}, {"name": "other"},
+                                   {"type": "TAG_POLICY"}, {"description": "x"}])  # fmt: skip
+def test_tags_drift_with_a_policy_change_stops(plan: dict, other: dict) -> None:
+    item = tags_drift(BASELINE)
+    item["change"]["after"].update(other)
+    plan["resource_drift"] = [item]
+    assert problems(plan) == [f"resource_drift: {BASELINE}"]
+
+
+@pytest.mark.parametrize("address", [
+    ATTACH_BASELINE, ATTACH_PROTECT, p1b.ORG, opc.BUDGET, "aws_organizations_policy.other",
+    "aws_s3_bucket.tfstate"])  # fmt: skip
+def test_the_same_tags_drift_on_another_address_stops(plan: dict, address: str) -> None:
+    plan["resource_drift"] = [tags_drift(address)]
+    assert problems(plan) == [f"resource_drift: {address}"]
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["create"], ["no-op"], ["delete", "create"]])
+def test_a_drift_action_other_than_update_stops(plan: dict, actions: list[str]) -> None:
+    plan["resource_drift"] = [tags_drift(BASELINE, actions=actions)]
+    assert problems(plan) == [f"resource_drift: {BASELINE}"]
+
+
+@pytest.mark.parametrize("planned", [["update"], ["delete", "create"], ["delete"]])
+def test_scp_tags_drift_with_a_planned_change_stops(plan: dict, planned: list[str]) -> None:
+    real_scp_drift(plan)
+    full.change(plan, PROTECT)["actions"] = planned
+    found = problems(plan)
+    assert f"resource_drift: {PROTECT}" in found
+    assert f"unexpected change: {'+'.join(planned)} {PROTECT}" in found
+
+
+def test_scp_tags_drift_with_content_unlike_the_document_still_stops(plan: dict) -> None:
+    """The content check reads the refreshed state, so the drift exception cannot hide it."""
+    real_scp_drift(plan)
+    state_values(plan, BASELINE)["content"] = json.dumps({"Statement": []})
+    assert problems(plan) == [
+        f"{BASELINE}: applied content differs from policies/scp-workloads-baseline.json"
+    ]
+
+
+def test_the_full_mode_still_refuses_scp_drift() -> None:
+    plan = full.plan.__wrapped__()
+    plan["resource_drift"].append(tags_drift(BASELINE))
+    assert f"resource_drift: {BASELINE}" in p1b.check(plan)[0]
