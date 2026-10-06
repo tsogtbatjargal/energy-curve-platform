@@ -62,7 +62,7 @@ Nothing in the management account is left orphaned, and nothing is duplicated:
 ### Root access: credentials removed, scoped `AssumeRoot` recovery kept
 - **Timing: after the account exists.** The scoping names the target account, and `AssumeRoot`'s resource is that account's root ARN, so it cannot be written before phase 1b returns the ID. All root-access work is therefore in **phase 1c**: nothing about root access, the permission set or `AssumeRoot` is in 1a or 1b. Before 1c, centralized root access is off, so no `AssumeRoot` session can be started against any account.
 - **Order within 1c:** first the scoping policy is provisioned on the permission set, then centralized root access is enabled (`depends_on`). There is never a moment when `AssumeRoot` works and is not yet scoped.
-- **Credentials removed.** Centralized root access is enabled in `infra/org` (root credentials management and privileged root sessions), and the new account's root credentials are deleted (`IAMDeleteRootUserCredentials`, phase 2).
+- **Credentials removed.** Centralized root access is enabled in `infra/org` (root credentials management and privileged root sessions), and the new account's root credentials are audited in phase 2 and any that exist are deleted (`IAMDeleteRootUserCredentials`). *(Amended 2026-10-06: the audit found none, so nothing was deleted; see phase 2.)*
 - **Who may call `sts:AssumeRoot`.** Only the admin's Identity Center role in the management account (`AWSReservedSSO_AdministratorAccess_*`), through an inline policy on the `AdministratorAccess` permission set. It denies `sts:AssumeRoot` unless both:
   - `sts:TaskPolicyArn` is one of the five task policies above;
   - the resource is `arn:aws:iam::<ecp-workloads-id>:root` (a `NotResource` deny), with the ID taken from the `aws_organizations_account` resource, never typed in.
@@ -102,9 +102,9 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
        - **Q4, the scoping applies wherever `AdministratorAccess` is provisioned,** the management account included. It only denies `sts:AssumeRoot`. A later member account needs the policy updated before `AssumeRoot` can recover it. The account ID comes from `aws_organizations_account.workloads.id`, never a literal; the plan check refuses any 12-digit number in the stack source.
      - **The user name** for the assignments is a new sensitive variable, `identity_center_user_name`, in the git-ignored `terraform.tfvars`.
 2. **Access:**
-   - the user adds a CLI profile `ecp-workloads` (SSO) and logs in;
+   - the user adds CLI profiles for the account (SSO) and logs in. *(Deviation, 2026-10-06: two profiles, `ecp-workloads-readonly` and `ecp-workloads-admin`, instead of one `ecp-workloads`, so neither can be mistaken for `ecp-admin`; no `[default]` profile was added.)*;
    - the read-only session-start checklist runs;
-   - the root credentials are deleted through `AssumeRoot` (`IAMDeleteRootUserCredentials`).
+   - the root credentials are audited through `AssumeRoot` (`IAMAuditRootUserCredentials`), and any that exist are deleted (`IAMDeleteRootUserCredentials`), each session with its own approval.
 3. **Member bootstrap** (into `ecp-workloads`):
    - the same stack, parameterized by account, with no budget and no cost allocation tag;
    - the GitHub OIDC provider becomes a managed resource;
@@ -140,7 +140,7 @@ After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workl
    - the account's parent is `Workloads` (`organizations:ListParents`);
    - a re-plan shows no changes, and the account is not tainted;
    - the window is recorded: the `CreateAccount` and `MoveAccount` event times from the management account's CloudTrail (us-east-1);
-   - at phase 2, with read access in the account, its CloudTrail shows no `AssumeRole` of `OrganizationAccountAccessRole` and no write events between creation and the move, other than AWS's own setup of that role.
+   - at phase 2, with read access in the account, its CloudTrail shows no `AssumeRole` of `OrganizationAccountAccessRole` and no write events between creation and the move, other than AWS's own setup of that role. **Done (2026-10-06):** none, across every Region ([evidence](../evidence/phase2-2026-10-06.md)).
 
 **Failure and recovery.** Each recovery step is a new plan or state operation, and needs its own approval. No replacement plan is ever applied without one.
 - **The apply fails before `CreateAccount`** (enabling SCPs, a policy or an attachment): no account exists; what succeeded is in state. Re-plan, gate, approve.
@@ -236,7 +236,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **The account:** `ecp-workloads` is `ACTIVE`, in OU `Workloads`, with `FullAWSAccess` plus the project SCPs attached.
 - **The bootstrap window:** the proposed acceptance above, if the user approves it.
 - **Still no root-access change:** the plan contains no `aws_ssoadmin_*` or root-access resource, and `iam:ListOrganizationsFeatures` still reports none enabled.
-- **SCP simulations** in `ecp-workloads`:
+- **SCP simulations** in `ecp-workloads` (done in phase 2, 2026-10-06, all as expected; [evidence](../evidence/phase2-2026-10-06.md)):
   - a long-term root principal (no `aws:AssumedRoot`) is denied;
   - a request with `aws:AssumedRoot` = `true` under `S3UnlockBucketPolicy` is not denied by the SCP;
   - a request outside the allowed regions is denied;
@@ -263,7 +263,8 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **Other management-account principals** get the same simulation. Any that is allowed `sts:AssumeRoot` is listed for the user, unchanged.
 
 **Phase 2: access and root credentials**
-- `sts:AssumeRoot` with `IAMAuditRootUserCredentials` from the admin's Identity Center role succeeds. `iam:GetLoginProfile`, `ListAccessKeys` and `ListMFADevices` for the root user then show **no** credentials after `IAMDeleteRootUserCredentials`.
+- **Status (2026-10-06): accepted** ([evidence](../evidence/phase2-2026-10-06.md)), with steps 7 and 8 skipped as recorded deviations.
+- `sts:AssumeRoot` with `IAMAuditRootUserCredentials` from the admin's Identity Center role succeeds, and the audit shows **no** root credentials: no login profile, access keys, MFA devices or signing certificates. **Any that exist are deleted** through `IAMDeleteRootUserCredentials`, then audited again, each session with its own approval. *(Amended 2026-10-06: this said the audit shows no credentials "after `IAMDeleteRootUserCredentials`". The first audit found none, so no delete or re-audit session was opened. AWS documents that new Organizations accounts have no root credentials by default, and that with centralized root access, member accounts can't sign in to their root user or recover its password.)*
 - The read-only session-start checklist runs clean against `ecp-workloads`.
 
 **Phase 3: member bootstrap and break-glass**
