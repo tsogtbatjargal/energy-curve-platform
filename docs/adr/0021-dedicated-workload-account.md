@@ -105,13 +105,45 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
    - the user adds CLI profiles for the account (SSO) and logs in. *(Deviation, 2026-10-06: two profiles, `ecp-workloads-readonly` and `ecp-workloads-admin`, instead of one `ecp-workloads`, so neither can be mistaken for `ecp-admin`; no `[default]` profile was added.)*;
    - the read-only session-start checklist runs;
    - the root credentials are audited through `AssumeRoot` (`IAMAuditRootUserCredentials`), and any that exist are deleted (`IAMDeleteRootUserCredentials`), each session with its own approval.
-3. **Member bootstrap** (into `ecp-workloads`):
-   - the same stack, parameterized by account, with no budget and no cost allocation tag;
-   - the GitHub OIDC provider becomes a managed resource;
-   - `OrganizationAccountAccessRole` is imported with the restricted trust policy;
-   - first apply with local state, then `terraform init -migrate-state` into its new bucket;
-   - `scripts/bootstrap_plan_check.py` gains a first-apply mode with the expected resource set;
-   - R2 is re-accepted (`scripts/r2_accept.py`).
+3. **Member bootstrap** (into `ecp-workloads`). *(Design detailed 2026-10-06, phase 3 code PR.)*
+   - **The same stack, a second instance:** `member_instance = true` selects it; the default, `false`, keeps the management instance exactly as it was. The member instance:
+     - creates its own state bucket at new addresses (`member_state.tf`), so the `removed` blocks stay no-ops;
+     - creates the GitHub OIDC provider, since `ecp-workloads` has none;
+     - imports `OrganizationAccountAccessRole` with the restricted trust template (`policies/break-glass-trust.json.tftpl`, `break_glass.tf`). The management account's ID comes from the organization data source, never a literal.
+
+     No budget and no cost allocation tag.
+   - **The instance guard** (`guard.tf`): each instance sets `expected_account_id` in its own git-ignored tfvars. The plan stops unless the caller is that account, and unless `member_instance` matches whether it is the organization's management account. Tested offline with a mocked provider (`infra/bootstrap/tests/`, run in CI's `iac-static`). CI derives the value from the plan role it assumes. **The management instance's tfvars needs `expected_account_id` added before its next plan.**
+   - **Separate instance files:**
+     - the member instance runs with `TF_DATA_DIR=.terraform-member`, `-backend-config=backend-member.hcl` and `-var-file=member.tfvars`;
+     - the management instance keeps `.terraform`, `backend.hcl` and `terraform.tfvars`;
+     - all of them are git-ignored (`backend*.hcl`, `.terraform-*/`, `*.tfvars`).
+   - **First apply with local state:**
+     - through a temporary, uncommitted `backend_override.tf` (`backend "local"`). It deliberately isn't git-ignored, so a leftover shows in `git status`.
+     - After the apply, it is deleted, then `terraform init -migrate-state` moves the state into the new bucket.
+     - Probed offline: `init -backend=false` cannot plan.
+   - **The plan check:** `scripts/bootstrap_plan_check.py --change first-apply` accepts exactly the 16 creates and the break-glass import changing only its trust and tags.
+   - **R2 is re-accepted** (`scripts/r2_accept.py`, 16 cases).
+   - **Steps, each a separate approval:**
+     1. the code PR;
+     2. read-only prechecks:
+        - **no GitHub OIDC provider in the member account**;
+        - the bucket name is free;
+        - the role's current trust;
+        - the member admin role's name matches the protect SCP's exemption;
+        - the management sweep;
+     3. the read-only first-apply plan, with `ecp-workloads-readonly`, the policy gate (`--stack bootstrap`) and the first-apply check, then the hash;
+     4. the apply, with `ecp-workloads-admin` (the protect SCP lets only that session create the boundary or change the role), under **the phase 1b pre-apply gates and stop rules**:
+        - re-hash;
+        - `main` unchanged and a clean tree, apart from the temporary override;
+        - no workflow running and no open PR;
+        - the sweep admin-only;
+        - apply exactly the saved plan;
+        - on any failure, stop: no retry, re-plan, untaint, import or recovery without approval;
+     5. the state migration;
+     6. read-only verification;
+     7. the simulations;
+     8. **the live break-glass test, required:** the management admin assumes the role with a source identity and makes one read call; the same assumption without a source identity is denied;
+     9. the evidence PR.
 4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap.
 5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket, budget and cost allocation tag are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
 
@@ -268,11 +300,13 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - The read-only session-start checklist runs clean against `ecp-workloads`.
 
 **Phase 3: member bootstrap and break-glass**
+- **The management instance, after the phase 3 code change:** a read-only plan shows no changes, and no drift beyond what is already accepted.
 - **The plan:** the first-apply check prints `OK`, with the expected resources only. **No `aws_budgets_budget` and no `aws_ce_cost_allocation_tag`** appear anywhere in the plan. A Rego rule and a test fail the member bootstrap on either, and the bootstrap code has no `budget.tf`.
 - **The break-glass role's trust policy** (`iam:GetRole`) equals the reviewed template: management account, `ArnLike aws:PrincipalArn` limited to `AWSReservedSSO_AdministratorAccess_*`, `sts:SetSourceIdentity` required, `MaxSessionDuration` of 3600. `scripts/role_trust_review.py` lists no unconditioned cross-account trust.
 - **The break-glass lock:** simulating `iam:UpdateAssumeRolePolicy` on the role by the member CI deploy role is denied (SCP plus boundary).
-- **R2 re-acceptance:** `scripts/r2_accept.py` gives 13 cases and 0 differences in `ecp-workloads`. The simulator now also evaluates the project SCPs.
+- **R2 re-acceptance:** `scripts/r2_accept.py` gives 16 cases and 0 differences in `ecp-workloads`. *(Corrected 2026-10-06: this said 13; the script has 16 since PR #25 added the cross-account cases.)* The simulator now also evaluates the project SCPs.
 - **The second R2 layer:** simulating `iam:DeleteRolePermissionsBoundary` by an admin-like test identity is denied by the SCP.
+- **The live break-glass test (required):** the management admin's Identity Center session can assume `OrganizationAccountAccessRole` with a source identity, and the same assumption without one is denied.
 
 **Phase 4: CI**
 - CI's `terraform-plan` runs against the member bootstrap with the member plan role, with 0 failures through the gate.
