@@ -122,6 +122,10 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
      - After the apply, it is deleted, then `terraform init -migrate-state` moves the state into the new bucket.
      - Probed offline: `init -backend=false` cannot plan.
    - **The plan check:** `scripts/bootstrap_plan_check.py --change first-apply` accepts exactly the 16 creates and the break-glass import changing only its trust and tags.
+     - **It also reads the stack source,** as phases 1b and 1c do. The deploy policy and the CI trust documents are unknown at plan time, so the plan cannot show them, and an override file would merge over them unseen.
+     - Over exactly the files Terraform 1.15.8 loads, the one allowed override is `backend_override.tf`, whose content must be exactly the local backend block. Every other override file, any JSON configuration and any module call stops the check, and so does a source file it cannot parse.
+     - Terraform rejects the one-line `terraform { backend "local" {} }` (a one-line block may hold only one argument), so the required content is the same block in `terraform fmt` layout, over three lines. The report prints its SHA-256.
+     - A run without the override stops.
    - **R2 is re-accepted** (`scripts/r2_accept.py`, 16 cases).
    - **Steps, each a separate approval:**
      1. the code PR;
@@ -131,7 +135,7 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
         - the role's current trust;
         - the member admin role's name matches the protect SCP's exemption;
         - the management sweep;
-     3. the read-only first-apply plan, with `ecp-workloads-readonly`, the policy gate (`--stack bootstrap`) and the first-apply check, then the hash;
+     3. the read-only first-apply plan, with `ecp-workloads-readonly`, the policy gate (`--stack bootstrap`) and the first-apply check (plan and source, including the override's SHA-256), then the hash;
      4. the apply, with `ecp-workloads-admin` (the protect SCP lets only that session create the boundary or change the role), under **the phase 1b pre-apply gates and stop rules**:
         - re-hash;
         - `main` unchanged and a clean tree, apart from the temporary override;
@@ -144,7 +148,7 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
      7. the simulations;
      8. **the live break-glass test, required:** the management admin assumes the role with a source identity and makes one read call; the same assumption without a source identity is denied;
      9. the evidence PR.
-4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap.
+4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap. **CI also needs `member_instance=true`** (`TF_VAR_member_instance`): without it, the instance guard stops the member plan. `expected_account_id` already comes from the plan role's ARN.
 5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket, budget and cost allocation tag are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
 
 After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workloads`.
