@@ -37,8 +37,12 @@ derby.log
 test-results/
 playwright-report/
 
-# Backend config contains the account ID
+# Backend config contains the account ID (the bucket name). One file per instance of a stack,
+# e.g. infra/bootstrap/backend-member.hcl (ADR-0021 phase 3).
 backend.hcl
+backend*.hcl
+# Per-instance Terraform data directories (TF_DATA_DIR), e.g. .terraform-member/
+.terraform-*/
 
 # Local db-backup output (may contain real alert history)
 backups/

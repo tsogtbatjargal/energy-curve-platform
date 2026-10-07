@@ -1,7 +1,11 @@
 """Pre-apply check of a saved bootstrap plan for a reviewed IAM change.
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account] <plan.json>
+    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account|first-apply] <plan.json>
+
+`first-apply` (ADR-0021 phase 3): the member instance's first apply into ecp-workloads; see
+check_first_apply. It also reads infra/bootstrap's source, so run it from the clean checkout the
+saved plan was made from, with the temporary backend_override.tf still in place.
 
 `no-cross-account` (ADR-0021, before phase 1b): update `aws_iam_role_policy.gha_deploy_iam` with
 only `policy` changing, to the deploy-iam template, which now denies the deploy role
@@ -155,16 +159,288 @@ def check(plan: dict[str, Any], change: str = "r2") -> tuple[list[str], list[str
     return problems, report
 
 
+# --- ADR-0021 phase 3: the member bootstrap's first apply, into ecp-workloads ------------------
+
+STACK = Path(__file__).resolve().parents[1] / "infra" / "bootstrap"
+BREAK_GLASS = 'aws_iam_role.break_glass["OrganizationAccountAccessRole"]'
+_S3 = "aws_s3_bucket"
+FIRST_APPLY_CREATES = frozenset(
+    {
+        f"{_S3}.member_state[0]",
+        f"{_S3}_versioning.member_state[0]",
+        f"{_S3}_server_side_encryption_configuration.member_state[0]",
+        f"{_S3}_public_access_block.member_state[0]",
+        f"{_S3}_ownership_controls.member_state[0]",
+        f"{_S3}_lifecycle_configuration.member_state[0]",
+        f"{_S3}_policy.member_state[0]",
+        "aws_iam_openid_connect_provider.github[0]",
+        "aws_iam_role.gha_plan",
+        "aws_iam_role_policy_attachment.gha_plan_readonly",
+        "aws_iam_role_policy.gha_plan_state",
+        "aws_iam_role.gha_deploy",
+        "aws_iam_role_policy_attachment.gha_deploy_poweruser",
+        "aws_iam_role_policy.gha_deploy_iam",
+        "aws_iam_role_policy.gha_deploy_state_read",
+        BOUNDARY,
+    }
+)
+FIRST_APPLY_OUTPUTS = frozenset(
+    {"state_bucket", "gha_plan_role_arn", "gha_deploy_role_arn", "workload_boundary_arn"}
+)
+ORG_ONLY_TYPES = frozenset({"aws_budgets_budget", "aws_ce_cost_allocation_tag"})
+BREAK_GLASS_MAY_CHANGE = {"assume_role_policy", "tags", "tags_all"}
+GITHUB_OIDC_URL = "https://token.actions.githubusercontent.com"
+# (address, attribute path, required value): each create's reviewed settings.
+FIRST_APPLY_SETTINGS = [
+    (f"{_S3}_versioning.member_state[0]", ("versioning_configuration", 0, "status"), "Enabled"),
+    (f"{_S3}_server_side_encryption_configuration.member_state[0]",
+     ("rule", 0, "apply_server_side_encryption_by_default", 0, "sse_algorithm"), "AES256"),
+    *[(f"{_S3}_public_access_block.member_state[0]", (flag,), True)
+      for flag in ("block_public_acls", "block_public_policy", "ignore_public_acls",
+                   "restrict_public_buckets")],
+    (f"{_S3}_ownership_controls.member_state[0]", ("rule", 0, "object_ownership"),
+     "BucketOwnerEnforced"),
+    (f"{_S3}_lifecycle_configuration.member_state[0]", ("rule", 0, "id"),
+     "expire-noncurrent-state"),
+    (f"{_S3}_lifecycle_configuration.member_state[0]", ("rule", 0, "status"), "Enabled"),
+    (f"{_S3}_lifecycle_configuration.member_state[0]",
+     ("rule", 0, "noncurrent_version_expiration", 0, "noncurrent_days"), 90),
+    ("aws_iam_openid_connect_provider.github[0]", ("url",), GITHUB_OIDC_URL),
+    ("aws_iam_openid_connect_provider.github[0]", ("client_id_list",), ["sts.amazonaws.com"]),
+    ("aws_iam_role.gha_plan", ("name",), "ecp-gha-plan"),
+    ("aws_iam_role.gha_plan", ("max_session_duration",), 3600),
+    ("aws_iam_role.gha_plan", ("permissions_boundary",), None),
+    ("aws_iam_role_policy_attachment.gha_plan_readonly", ("policy_arn",),
+     "arn:aws:iam::aws:policy/ReadOnlyAccess"),
+    ("aws_iam_role_policy.gha_plan_state", ("name",), "terraform-state-read"),
+    ("aws_iam_role.gha_deploy", ("name",), "ecp-gha-deploy"),
+    ("aws_iam_role.gha_deploy", ("max_session_duration",), 3600),
+    ("aws_iam_role.gha_deploy", ("permissions_boundary",), None),
+    ("aws_iam_role_policy_attachment.gha_deploy_poweruser", ("policy_arn",),
+     "arn:aws:iam::aws:policy/PowerUserAccess"),
+    ("aws_iam_role_policy.gha_deploy_iam", ("name",), "ecp-scoped-iam-and-state"),
+    ("aws_iam_role_policy.gha_deploy_state_read", ("name",), "terraform-state-read"),
+]  # fmt: skip
+
+
+def dig(value: Any, path: tuple[Any, ...]) -> Any:
+    for key in path:
+        try:
+            value = value[key]
+        except (KeyError, IndexError, TypeError):
+            return KeyError
+    return value
+
+
+def variable(plan: dict[str, Any], name: str) -> Any:
+    return ((plan.get("variables") or {}).get(name) or {}).get("value")
+
+
+def check_first_apply(
+    plan: dict[str, Any], stack_dir: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """ADR-0021 phase 3: the member instance's first apply, from an empty local state in
+    ecp-workloads. Exactly the 16 creates in FIRST_APPLY_CREATES, each with its reviewed
+    settings, and the import of OrganizationAccountAccessRole changing only its trust policy
+    (to the break-glass template) and tags. No budget and no cost allocation tag anywhere, no
+    other import, no drift. The deploy policy is unknown at plan time (it names the deploy role's
+    ARN); the post-apply re-plan and r2_accept.py check it. Because the plan cannot show unknown
+    values, the stack source is checked too (check_first_apply_source)."""
+    from org_plan_check import already_owned
+
+    problems: list[str] = []
+    report: list[str] = []
+    if plan.get("errored"):
+        problems.append("the plan errored")
+    if plan.get("complete") is False:
+        problems.append("the plan is incomplete")
+    for item in plan.get("deferred_changes") or []:
+        problems.append(f"deferred_changes: {item.get('address', '?')}")
+    for item in plan.get("resource_drift") or []:
+        problems.append(f"resource_drift: {item.get('address', '?')}")
+    if already_owned(plan):
+        problems.append("the state is not empty: a first apply starts from no managed resources")
+
+    account = (prior(plan, "data.aws_caller_identity.current") or {}).get("account_id")
+    master = (prior(plan, "data.aws_organizations_organization.this") or {}).get(
+        "master_account_id"
+    )
+    region = variable(plan, "region")
+    if not account or account != variable(plan, "expected_account_id"):
+        problems.append("the caller is not expected_account_id")
+    if variable(plan, "member_instance") is not True:
+        problems.append("member_instance must be true")
+    if not master or master == account:
+        problems.append("this is the organization's management account, not a member")
+
+    root = (plan.get("configuration") or {}).get("root_module") or {}
+    for res in root.get("resources") or []:
+        if res.get("type") in ORG_ONLY_TYPES:
+            problems.append(
+                f"{res['address']}: the member bootstrap has no budget or cost allocation tag"
+            )
+
+    seen: set[str] = set()
+    for rc in plan.get("resource_changes", []):
+        address, change = rc["address"], rc["change"]
+        actions, importing = change["actions"], change.get("importing")
+        if rc.get("type") in ORG_ONLY_TYPES or address.split(".")[0] in ORG_ONLY_TYPES:
+            problems.append(f"{address}: the member bootstrap has no budget or cost allocation tag")
+            continue
+        if importing is not None and address != BREAK_GLASS:
+            problems.append(f"unexpected import: {address}")
+            continue
+        if actions in UNCHANGED and importing is None:
+            continue
+        report.append(f"{'+'.join(actions):8} {address}" + ("  (import)" if importing else ""))
+        if address in FIRST_APPLY_CREATES and actions == ["create"]:
+            seen.add(address)
+            problems += check_member_create(address, change, account, region)
+        elif address == BREAK_GLASS and importing is not None and actions == ["update"]:
+            seen.add(address)
+            problems += check_break_glass(change, master)
+        else:
+            problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+    for address in sorted(FIRST_APPLY_CREATES - seen):
+        problems.append(f"missing change: create {address}")
+    if BREAK_GLASS not in seen:
+        problems.append(f"missing change: import and update {BREAK_GLASS}")
+    for name, out in (plan.get("output_changes") or {}).items():
+        if out["actions"] not in UNCHANGED and not (
+            name in FIRST_APPLY_OUTPUTS and out["actions"] == ["create"]
+        ):
+            problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
+    for name in sorted(root.get("module_calls") or {}):
+        problems.append(f"module calls are not allowed in the stack: {name}")
+    source_problems, source_report = check_first_apply_source(stack_dir or STACK)
+    problems += source_problems
+    report += source_report
+    report.append(
+        "summary: 1 to import, 16 to add, 1 to change (the break-glass trust), 0 to destroy"
+        if not problems
+        else "summary: not the reviewed shape"
+    )
+    return problems, report
+
+
+# The first apply plans on local state (the member bucket does not exist yet) through exactly
+# this override file. Terraform rejects the one-line `terraform { backend "local" {} }`: a
+# one-line block may hold only one argument, so this is the same block in fmt layout.
+LOCAL_BACKEND_OVERRIDE = "backend_override.tf"
+LOCAL_BACKEND = 'terraform {\n  backend "local" {}\n}\n'
+
+
+def check_first_apply_source(stack_dir: Path) -> tuple[list[str], list[str]]:
+    """The plan JSON cannot show the deploy policy or the CI trust documents (unknown at plan
+    time), and an override file merges over the reviewed source unseen. So, over exactly the files
+    Terraform loads: the one allowed override is backend_override.tf with exactly LOCAL_BACKEND;
+    every other override, any JSON configuration and any module call stops the check. Run it from
+    the clean checkout the saved plan was made from."""
+    import hcl2
+    from hcl2.utils import SerializationOptions
+    from phase1b_plan_check import config_ext, config_files, is_override
+
+    problems: list[str] = []
+    report: list[str] = []
+    loaded = config_files(stack_dir)
+    for p in loaded:
+        if is_override(p.name) and p.name != LOCAL_BACKEND_OVERRIDE:
+            problems.append(
+                f"override files other than {LOCAL_BACKEND_OVERRIDE} are not allowed in the"
+                f" stack: {p.name}"
+            )
+        elif config_ext(p.name) == ".tf.json":
+            problems.append(f"JSON configuration is not allowed in the stack: {p.name}")
+    override = stack_dir / LOCAL_BACKEND_OVERRIDE
+    if override not in loaded:
+        problems.append(
+            f"{LOCAL_BACKEND_OVERRIDE} is missing: the first apply plans on local state"
+        )
+    else:
+        content = override.read_bytes()
+        report.append(
+            f"source: {LOCAL_BACKEND_OVERRIDE} sha256 {hashlib.sha256(content).hexdigest()}"
+        )
+        if content != LOCAL_BACKEND.encode():
+            problems.append(
+                f'{LOCAL_BACKEND_OVERRIDE} must be exactly terraform {{ backend "local" {{}} }}'
+                " (fmt layout)"
+            )
+    for p in loaded:
+        if config_ext(p.name) != ".tf" or p.name == LOCAL_BACKEND_OVERRIDE:
+            continue
+        try:
+            with p.open() as fh:
+                doc = hcl2.load(fh, serialization_options=SerializationOptions(with_comments=False))
+        except Exception:  # noqa: BLE001 - any parse failure means the source is unverified
+            problems.append(f"cannot read the stack source: {p.name}")
+            continue
+        for block in doc.get("module", []):
+            for name in block:
+                problems.append(
+                    f"module calls are not allowed in the stack: {name.strip(chr(34))} ({p.name})"
+                )
+    return problems, report
+
+
+def check_member_create(
+    address: str, change: dict[str, Any], account: str | None, region: str | None
+) -> list[str]:
+    after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
+    problems = []
+    if address == f"{_S3}.member_state[0]":
+        if not account or after.get("bucket") != f"ecp-tfstate-{account}-{region}":
+            problems.append(f"{address}: bucket must be named for this account")
+        if after.get("force_destroy"):
+            problems.append(f"{address}: force_destroy must be false")
+    for target, path, want in FIRST_APPLY_SETTINGS:
+        if target == address and dig(after, path) != want:
+            problems.append(f"{address}: not as reviewed ({path[0]})")
+    if address == BOUNDARY:
+        problems += boundary_identity(change)
+        values = {"account_id": account or "", "state_bucket_arn":
+                  f"arn:aws:s3:::ecp-tfstate-{account}-{region}"}  # fmt: skip
+        if unknown.get("policy") or json.loads(after.get("policy") or "null") != (
+            policy_templates.render("workload-boundary", values)
+        ):
+            problems.append(f"{BOUNDARY}: policy differs from the workload-boundary template")
+    if address == "aws_iam_role_policy.gha_deploy_iam" and not unknown.get("policy"):
+        problems.append(f"{address}: a known policy must equal the deploy-iam template")
+    return problems
+
+
+def check_break_glass(change: dict[str, Any], master: str | None) -> list[str]:
+    before, after = change.get("before") or {}, change.get("after") or {}
+    problems = []
+    if (change.get("importing") or {}).get("id") != "OrganizationAccountAccessRole":
+        problems.append(f"{BREAK_GLASS}: must import OrganizationAccountAccessRole")
+    attrs = changed_attributes(change)
+    if not ("assume_role_policy" in attrs and attrs <= BREAK_GLASS_MAY_CHANGE):
+        problems.append(f"{BREAK_GLASS}: may change only assume_role_policy and tags")
+    want = policy_templates.render("break-glass-trust", {"management_account_id": master or ""})
+    if not master or json.loads(after.get("assume_role_policy") or "null") != want:
+        problems.append(
+            f"{BREAK_GLASS}: trust policy differs from policies/break-glass-trust.json.tftpl"
+        )
+    only = f"{BREAK_GLASS}: may change only assume_role_policy and tags"
+    if only not in problems and (
+        after.get("max_session_duration") != 3600 or before.get("name") != after.get("name")
+    ):
+        problems.append(only)
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     change = "r2"
-    if len(args) == 3 and args[0] == "--change" and args[1] in CHANGES:
+    if len(args) == 3 and args[0] == "--change" and args[1] in (*CHANGES, "first-apply"):
         change, args = args[1], args[2:]
     if len(args) != 1:
-        print(f"usage: bootstrap_plan_check.py [--change {'|'.join(CHANGES)}] <plan.json>",
-              file=sys.stderr)  # fmt: skip
+        print(f"usage: bootstrap_plan_check.py [--change {'|'.join([*CHANGES, 'first-apply'])}]"
+              " <plan.json>", file=sys.stderr)  # fmt: skip
         return 2
-    problems, report = check(json.loads(Path(args[0]).read_text()), change)
+    plan = json.loads(Path(args[0]).read_text())
+    problems, report = check_first_apply(plan) if change == "first-apply" else check(plan, change)
     print("\n".join(report))
     for p in problems:
         print(f"STOP  {p}")

@@ -292,7 +292,13 @@ def test_bootstrap_forgets_exactly_them_without_destroying() -> None:
         b["lifecycle"] == [{"destroy": False, "__is_block__": True}] for b in boot["removed"]
     )
     assert not opc.MOVED & addresses(boot)
-    assert "import" not in boot
+    # Phase 3 adds exactly one import: the break-glass role, in the member instance only
+    # (ADR-0021). Nothing may re-import what infra/org owns.
+    imports = boot.get("import", [])
+    assert [(b["to"], b["id"], b["for_each"]) for b in imports] == [
+        ("${aws_iam_role.break_glass[each.key]}", "${each.key}", "${local.break_glass}")
+    ]
+    assert not {target(b["to"]) for b in imports} & opc.MOVED
 
 
 def test_no_stack_but_org_declares_a_budget_or_cost_allocation_tag() -> None:
