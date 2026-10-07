@@ -151,6 +151,9 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
      9. the evidence PR.
 4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap. **CI also needs `member_instance=true`** (`TF_VAR_member_instance`): without it, the instance guard stops the member plan. The `terraform-plan` job takes it from the repo variable `TF_MEMBER_INSTANCE`, defaulting to `false`, so the code can merge first and the user switches `AWS_PLAN_ROLE_ARN`, `TF_STATE_BUCKET`, `TF_MEMBER_INSTANCE=true` and `prod`'s `AWS_DEPLOY_ROLE_ARN` together; a hard-coded value would make every CI plan fail the guard until the settings change. `expected_account_id` already comes from the plan role's ARN.
 5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket, budget and cost allocation tag are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
+   - **The plan:** `terraform plan -destroy` of the management instance, whose whole state is exactly these 8 resources: the two roles, their 3 inline policies and 2 attachments, and the boundary.
+   - **The gate:** `scripts/bootstrap_plan_check.py --change decommission` accepts exactly the 8 deletes, each matched by name in its `before` values, as the whole prior state, and the 4 output deletes. It also requires `member_instance = false` in the management account; refuses any other change, import, drift, budget or cost allocation tag; and, from the source, refuses any override file, JSON configuration or module call.
+   - **No policy gate on this plan.** `scripts/policy_gate.py` counts only resources that remain, so it exits 2 (`VACUOUS`) on a plan that only deletes. That guard stays as it is for every other plan, and a test pins both behaviours.
 
 After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workloads`.
 
@@ -320,7 +323,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - No GitHub variable or secret names a management-account role.
 
 **Phase 5: decommission**
-- **The management bootstrap plan** destroys exactly `ecp-gha-plan`, `ecp-gha-deploy`, their policies and attachments, and `ecp-workload-boundary`, with **0** changes to the bucket, budget or cost allocation tag. That is checked by an expected-change check like `bootstrap_plan_check.py`.
+- **The management bootstrap plan** destroys exactly `ecp-gha-plan`, `ecp-gha-deploy`, their policies and attachments, and `ecp-workload-boundary`, with **0** changes to the bucket, budget or cost allocation tag. That is checked by `bootstrap_plan_check.py --change decommission`, this plan's gate (the policy gate does not apply to a plan that only deletes).
 - **Afterwards:**
   - no `ecp-*` role or policy remains in the management account;
   - the other project's roles, OIDC provider and $20 budget are unchanged (the same `role_trust_review.py` lines, the same budget);

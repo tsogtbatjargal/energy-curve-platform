@@ -1,7 +1,13 @@
 """Pre-apply check of a saved bootstrap plan for a reviewed IAM change.
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account|first-apply] <plan.json>
+    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account|first-apply|decommission] \
+        <plan.json>
+
+`decommission` (ADR-0021 phase 5): `terraform plan -destroy` of the management instance; see
+check_decommission. It is this plan's gate: policy_gate.py exits 2 (VACUOUS) on a plan that only
+deletes, by design. It also reads infra/bootstrap's source, so run it from the clean checkout the
+saved plan was made from.
 
 `first-apply` (ADR-0021 phase 3): the member instance's first apply into ecp-workloads; see
 check_first_apply. It also reads infra/bootstrap's source, so run it from the clean checkout the
@@ -336,8 +342,6 @@ def check_first_apply_source(stack_dir: Path) -> tuple[list[str], list[str]]:
     Terraform loads: the one allowed override is backend_override.tf with exactly LOCAL_BACKEND;
     every other override, any JSON configuration and any module call stops the check. Run it from
     the clean checkout the saved plan was made from."""
-    import hcl2
-    from hcl2.utils import SerializationOptions
     from phase1b_plan_check import config_ext, config_files, is_override
 
     problems: list[str] = []
@@ -366,9 +370,19 @@ def check_first_apply_source(stack_dir: Path) -> tuple[list[str], list[str]]:
                 f'{LOCAL_BACKEND_OVERRIDE} must be exactly terraform {{ backend "local" {{}} }}'
                 " (fmt layout)"
             )
-    for p in loaded:
-        if config_ext(p.name) != ".tf" or p.name == LOCAL_BACKEND_OVERRIDE:
-            continue
+    problems += module_call_problems(
+        [p for p in loaded if config_ext(p.name) == ".tf" and p.name != LOCAL_BACKEND_OVERRIDE]
+    )
+    return problems, report
+
+
+def module_call_problems(files: list[Path]) -> list[str]:
+    """Every module block in these .tf files, and any file that cannot be parsed."""
+    import hcl2
+    from hcl2.utils import SerializationOptions
+
+    problems = []
+    for p in files:
         try:
             with p.open() as fh:
                 doc = hcl2.load(fh, serialization_options=SerializationOptions(with_comments=False))
@@ -380,7 +394,7 @@ def check_first_apply_source(stack_dir: Path) -> tuple[list[str], list[str]]:
                 problems.append(
                     f"module calls are not allowed in the stack: {name.strip(chr(34))} ({p.name})"
                 )
-    return problems, report
+    return problems
 
 
 def check_member_create(
@@ -430,17 +444,129 @@ def check_break_glass(change: dict[str, Any], master: str | None) -> list[str]:
     return problems
 
 
+# --- ADR-0021 phase 5: decommission the management instance -----------------------------------
+
+
+# address -> the `before` identity each delete must match: the management instance's whole state.
+DECOMMISSION = {
+    "aws_iam_role.gha_plan": {"name": "ecp-gha-plan"},
+    "aws_iam_role_policy_attachment.gha_plan_readonly": {
+        "role": "ecp-gha-plan", "policy_arn": "arn:aws:iam::aws:policy/ReadOnlyAccess"},
+    "aws_iam_role_policy.gha_plan_state": {"role": "ecp-gha-plan", "name": "terraform-state-read"},
+    "aws_iam_role.gha_deploy": {"name": "ecp-gha-deploy"},
+    "aws_iam_role_policy_attachment.gha_deploy_poweruser": {
+        "role": "ecp-gha-deploy", "policy_arn": "arn:aws:iam::aws:policy/PowerUserAccess"},
+    "aws_iam_role_policy.gha_deploy_iam": {
+        "role": "ecp-gha-deploy", "name": "ecp-scoped-iam-and-state"},
+    "aws_iam_role_policy.gha_deploy_state_read": {
+        "role": "ecp-gha-deploy", "name": "terraform-state-read"},
+    BOUNDARY: {"name": BOUNDARY_NAME, "path": BOUNDARY_PATH},
+}  # fmt: skip
+
+
+def check_decommission(
+    plan: dict[str, Any], stack_dir: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """ADR-0021 phase 5: `terraform plan -destroy` of the management instance deletes exactly the
+    two CI roles, their policies and attachments, and the workload boundary (DECOMMISSION, each
+    matched by name), which must be the whole state, and every output. Nothing else: no create,
+    update, replace or import, no budget or cost allocation tag (infra/org owns them), no drift.
+    Run in the organization's management account with member_instance = false, from a source with
+    no override file, no JSON configuration and no module call."""
+    from phase1b_plan_check import config_ext, config_files, is_override
+
+    problems: list[str] = []
+    report: list[str] = []
+    if plan.get("errored"):
+        problems.append("the plan errored")
+    if plan.get("complete") is False:
+        problems.append("the plan is incomplete")
+    for key in ("deferred_changes", "resource_drift"):
+        for item in plan.get(key) or []:
+            problems.append(f"{key}: {item.get('address', '?')}")
+
+    account = (prior(plan, "data.aws_caller_identity.current") or {}).get("account_id")
+    master = (prior(plan, "data.aws_organizations_organization.this") or {}).get(
+        "master_account_id"
+    )
+    if not account or account != variable(plan, "expected_account_id"):
+        problems.append("the caller is not expected_account_id")
+    if not master or master != account:
+        problems.append("this is not the organization's management account")
+    if variable(plan, "member_instance") is not False:
+        problems.append("member_instance must be false")
+
+    state = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
+    held = {r["address"] for r in state.get("resources") or [] if r.get("mode") == "managed"}
+    for address in sorted(held - set(DECOMMISSION)):
+        problems.append(f"the state holds {address}, outside the reviewed destroy set")
+
+    seen: set[str] = set()
+    for rc in plan.get("resource_changes", []):
+        address, change = rc["address"], rc["change"]
+        actions = change["actions"]
+        if address.split(".")[0] in ORG_ONLY_TYPES:
+            problems.append(f"{address}: owned by infra/org, never by this stack")
+            continue
+        if change.get("importing") is not None:
+            problems.append(f"unexpected import: {address}")
+            continue
+        if actions in UNCHANGED:
+            continue
+        before = change.get("before") or {}
+        if address in DECOMMISSION and actions == ["delete"]:
+            seen.add(address)
+            report.append(f"delete   {address}  ({before.get('name') or before.get('policy_arn')})")
+            for attr, want in DECOMMISSION[address].items():
+                if before.get(attr) != want:
+                    problems.append(f"{address}: not the reviewed object ({attr})")
+        else:
+            problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+    for address in sorted(set(DECOMMISSION) - seen):
+        problems.append(f"missing change: delete {address}")
+
+    outputs = plan.get("output_changes") or {}
+    for name, out in outputs.items():
+        if out["actions"] not in UNCHANGED and not (
+            name in FIRST_APPLY_OUTPUTS and out["actions"] == ["delete"]
+        ):
+            problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
+    for name in sorted(FIRST_APPLY_OUTPUTS):
+        if (outputs.get(name) or {}).get("actions") != ["delete"]:
+            problems.append(f"missing output change: delete {name}")
+
+    root = (plan.get("configuration") or {}).get("root_module") or {}
+    for name in sorted(root.get("module_calls") or {}):
+        problems.append(f"module calls are not allowed in the stack: {name}")
+    loaded = config_files(stack_dir or STACK)
+    for p in loaded:
+        if is_override(p.name):
+            problems.append(f"override files are not allowed in the stack: {p.name}")
+        elif config_ext(p.name) == ".tf.json":
+            problems.append(f"JSON configuration is not allowed in the stack: {p.name}")
+    problems += module_call_problems([p for p in loaded if config_ext(p.name) == ".tf"])
+    report.append("source: no override, no JSON configuration, no module call")
+    report.append(
+        "summary: 0 to add, 0 to change, 8 to destroy (the management CI roles and boundary)"
+        if not problems
+        else "summary: not the reviewed shape"
+    )
+    return problems, report
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     change = "r2"
-    if len(args) == 3 and args[0] == "--change" and args[1] in (*CHANGES, "first-apply"):
+    modes = [*CHANGES, "first-apply", "decommission"]
+    if len(args) == 3 and args[0] == "--change" and args[1] in modes:
         change, args = args[1], args[2:]
     if len(args) != 1:
-        print(f"usage: bootstrap_plan_check.py [--change {'|'.join([*CHANGES, 'first-apply'])}]"
-              " <plan.json>", file=sys.stderr)  # fmt: skip
+        print(f"usage: bootstrap_plan_check.py [--change {'|'.join(modes)}] <plan.json>",
+              file=sys.stderr)  # fmt: skip
         return 2
     plan = json.loads(Path(args[0]).read_text())
-    problems, report = check_first_apply(plan) if change == "first-apply" else check(plan, change)
+    checks = {"first-apply": check_first_apply, "decommission": check_decommission}
+    problems, report = checks[change](plan) if change in checks else check(plan, change)
     print("\n".join(report))
     for p in problems:
         print(f"STOP  {p}")
