@@ -315,6 +315,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **The live break-glass test (required):** the management admin's Identity Center session can assume `OrganizationAccountAccessRole` with a source identity, and the same assumption without one is denied. *(Done 2026-10-07.)* CloudTrail records the denial only in the management account, and without request parameters, so it is matched by time, caller and error code.
 
 **Phase 4: CI**
+- **Status (2026-10-07): done** ([evidence](../evidence/phase4-2026-10-07.md)). After the user's settings switch, CI's `terraform-plan` plans the member instance: `No changes.`, 17 resources, 0 gate failures. No GitHub variable names a management-account role. A re-run of `main`'s job picked up the current repository variables (observed in this run; GitHub's documentation was not relied on).
 - CI's `terraform-plan` runs against the member bootstrap with the member plan role and `TF_MEMBER_INSTANCE=true`, with 0 failures through the gate.
 - No GitHub variable or secret names a management-account role.
 
