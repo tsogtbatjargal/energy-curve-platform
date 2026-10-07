@@ -7,7 +7,9 @@ IDs are placeholders.
 """
 
 import copy
+import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import bootstrap_plan_check as bpc
@@ -20,6 +22,25 @@ BOUNDARY_VALUES = {"account_id": MEMBER, "state_bucket_arn": f"arn:aws:s3:::{BUC
 OLD_TRUST = {"Version": "2012-10-17", "Statement": [{
     "Effect": "Allow", "Principal": {"AWS": f"arn:aws:iam::{MANAGEMENT}:root"},
     "Action": "sts:AssumeRole"}]}  # fmt: skip
+
+
+# The first apply plans on local state through this override; Terraform rejects the one-line
+# `terraform { backend "local" {} }` (a one-line block may hold only one argument).
+LOCAL_BACKEND = 'terraform {\n  backend "local" {}\n}\n'
+REPO_STACK = bpc.STACK
+
+
+@pytest.fixture(autouse=True)
+def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A copy of the bootstrap stack's .tf files (never its tfvars) with the allowed override."""
+    copy_dir = tmp_path / "bootstrap"
+    copy_dir.mkdir()
+    for tf in REPO_STACK.glob("*.tf"):
+        if tf.name != "backend_override.tf":
+            (copy_dir / tf.name).write_text(tf.read_text())
+    (copy_dir / "backend_override.tf").write_text(LOCAL_BACKEND)
+    monkeypatch.setattr(bpc, "STACK", copy_dir)
+    return copy_dir
 
 
 def break_glass_trust(management: str = MANAGEMENT) -> dict:
@@ -324,3 +345,82 @@ def test_the_cli_selects_first_apply(tmp_path: Any, plan: dict) -> None:
     change(plan, "aws_iam_role.gha_plan")["actions"] = ["delete"]
     path.write_text(json.dumps(plan))
     assert bpc.main(["--change", "first-apply", str(path)]) == 1
+
+
+# --- the source: overrides can change what the plan JSON cannot show (unknown policies) -------
+
+
+def test_the_exact_local_backend_override_passes_and_is_hashed(plan: dict) -> None:
+    found, report = bpc.check_first_apply(plan)
+    assert found == []
+    digest = hashlib.sha256(LOCAL_BACKEND.encode()).hexdigest()
+    assert f"source: backend_override.tf sha256 {digest}" in report
+
+
+def test_a_plain_run_without_the_override_stops(plan: dict, stack: Path) -> None:
+    (stack / "backend_override.tf").unlink()
+    assert problems(plan) == [
+        "backend_override.tf is missing: the first apply plans on local state"
+    ]
+
+
+@pytest.mark.parametrize("content", [
+    LOCAL_BACKEND + 'resource "aws_iam_role" "extra" {}\n',
+    LOCAL_BACKEND + 'locals {\n  x = 1\n}\n',
+    'terraform {\n  backend "local" {\n    path = "elsewhere.tfstate"\n  }\n}\n',
+    'terraform {\n  backend "s3" {}\n}\n',
+    LOCAL_BACKEND.rstrip("\n"),
+    "# comment\n" + LOCAL_BACKEND,
+])  # fmt: skip
+def test_an_override_with_other_content_stops(plan: dict, stack: Path, content: str) -> None:
+    (stack / "backend_override.tf").write_text(content)
+    assert problems(plan) == [
+        'backend_override.tf must be exactly terraform { backend "local" {} } (fmt layout)'
+    ]
+
+
+@pytest.mark.parametrize("name", ["override.tf", "main_override.tf", "override.tf.json",
+                                  "backend_override.tf.json", "boundary_override.tf"])  # fmt: skip
+def test_any_other_override_file_stops(plan: dict, stack: Path, name: str) -> None:
+    (stack / name).write_text("{}\n" if name.endswith(".json") else "locals {}\n")
+    assert problems(plan) == [
+        f"override files other than backend_override.tf are not allowed in the stack: {name}"
+    ]
+
+
+def test_json_configuration_stops(plan: dict, stack: Path) -> None:
+    (stack / "extra.tf.json").write_text("{}\n")
+    assert problems(plan) == ["JSON configuration is not allowed in the stack: extra.tf.json"]
+
+
+def test_a_module_call_in_the_source_stops(plan: dict, stack: Path) -> None:
+    (stack / "extra.tf").write_text('module "shadow" {\n  source = "./shadow"\n}\n')
+    assert problems(plan) == ["module calls are not allowed in the stack: shadow (extra.tf)"]
+
+
+def test_a_module_call_in_the_plan_configuration_stops(plan: dict) -> None:
+    plan["configuration"]["root_module"]["module_calls"] = {"shadow": {"source": "./shadow"}}
+    assert problems(plan) == ["module calls are not allowed in the stack: shadow"]
+
+
+def test_an_unreadable_source_file_stops(plan: dict, stack: Path) -> None:
+    (stack / "extra.tf").write_text('resource "aws_iam_role" "x" {\n')
+    assert problems(plan) == ["cannot read the stack source: extra.tf"]
+
+
+def test_files_terraform_does_not_load_are_ignored(plan: dict, stack: Path) -> None:
+    for name in (".hidden_override.tf", "override.tf~", "#override.tf#", "notes.txt"):
+        (stack / name).write_text("anything\n")
+    assert problems(plan) == []
+
+
+def test_the_cli_runs_the_source_check(tmp_path: Path, plan: dict, stack: Path) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(plan))
+    assert bpc.main(["--change", "first-apply", str(path)]) == 0
+    (stack / "backend_override.tf").unlink()
+    assert bpc.main(["--change", "first-apply", str(path)]) == 1
+
+
+def test_the_repository_commits_no_override() -> None:
+    assert not [p.name for p in REPO_STACK.iterdir() if "override" in p.name]

@@ -1,7 +1,11 @@
 """Pre-apply check of a saved bootstrap plan for a reviewed IAM change.
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account] <plan.json>
+    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account|first-apply] <plan.json>
+
+`first-apply` (ADR-0021 phase 3): the member instance's first apply into ecp-workloads; see
+check_first_apply. It also reads infra/bootstrap's source, so run it from the clean checkout the
+saved plan was made from, with the temporary backend_override.tf still in place.
 
 `no-cross-account` (ADR-0021, before phase 1b): update `aws_iam_role_policy.gha_deploy_iam` with
 only `policy` changing, to the deploy-iam template, which now denies the deploy role
@@ -157,6 +161,7 @@ def check(plan: dict[str, Any], change: str = "r2") -> tuple[list[str], list[str
 
 # --- ADR-0021 phase 3: the member bootstrap's first apply, into ecp-workloads ------------------
 
+STACK = Path(__file__).resolve().parents[1] / "infra" / "bootstrap"
 BREAK_GLASS = 'aws_iam_role.break_glass["OrganizationAccountAccessRole"]'
 _S3 = "aws_s3_bucket"
 FIRST_APPLY_CREATES = frozenset(
@@ -231,13 +236,16 @@ def variable(plan: dict[str, Any], name: str) -> Any:
     return ((plan.get("variables") or {}).get(name) or {}).get("value")
 
 
-def check_first_apply(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
+def check_first_apply(
+    plan: dict[str, Any], stack_dir: Path | None = None
+) -> tuple[list[str], list[str]]:
     """ADR-0021 phase 3: the member instance's first apply, from an empty local state in
     ecp-workloads. Exactly the 16 creates in FIRST_APPLY_CREATES, each with its reviewed
     settings, and the import of OrganizationAccountAccessRole changing only its trust policy
     (to the break-glass template) and tags. No budget and no cost allocation tag anywhere, no
     other import, no drift. The deploy policy is unknown at plan time (it names the deploy role's
-    ARN); the post-apply re-plan and r2_accept.py check it."""
+    ARN); the post-apply re-plan and r2_accept.py check it. Because the plan cannot show unknown
+    values, the stack source is checked too (check_first_apply_source)."""
     from org_plan_check import already_owned
 
     problems: list[str] = []
@@ -302,11 +310,76 @@ def check_first_apply(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
             name in FIRST_APPLY_OUTPUTS and out["actions"] == ["create"]
         ):
             problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
+    for name in sorted(root.get("module_calls") or {}):
+        problems.append(f"module calls are not allowed in the stack: {name}")
+    source_problems, source_report = check_first_apply_source(stack_dir or STACK)
+    problems += source_problems
+    report += source_report
     report.append(
         "summary: 1 to import, 16 to add, 1 to change (the break-glass trust), 0 to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )
+    return problems, report
+
+
+# The first apply plans on local state (the member bucket does not exist yet) through exactly
+# this override file. Terraform rejects the one-line `terraform { backend "local" {} }`: a
+# one-line block may hold only one argument, so this is the same block in fmt layout.
+LOCAL_BACKEND_OVERRIDE = "backend_override.tf"
+LOCAL_BACKEND = 'terraform {\n  backend "local" {}\n}\n'
+
+
+def check_first_apply_source(stack_dir: Path) -> tuple[list[str], list[str]]:
+    """The plan JSON cannot show the deploy policy or the CI trust documents (unknown at plan
+    time), and an override file merges over the reviewed source unseen. So, over exactly the files
+    Terraform loads: the one allowed override is backend_override.tf with exactly LOCAL_BACKEND;
+    every other override, any JSON configuration and any module call stops the check. Run it from
+    the clean checkout the saved plan was made from."""
+    import hcl2
+    from hcl2.utils import SerializationOptions
+    from phase1b_plan_check import config_ext, config_files, is_override
+
+    problems: list[str] = []
+    report: list[str] = []
+    loaded = config_files(stack_dir)
+    for p in loaded:
+        if is_override(p.name) and p.name != LOCAL_BACKEND_OVERRIDE:
+            problems.append(
+                f"override files other than {LOCAL_BACKEND_OVERRIDE} are not allowed in the"
+                f" stack: {p.name}"
+            )
+        elif config_ext(p.name) == ".tf.json":
+            problems.append(f"JSON configuration is not allowed in the stack: {p.name}")
+    override = stack_dir / LOCAL_BACKEND_OVERRIDE
+    if override not in loaded:
+        problems.append(
+            f"{LOCAL_BACKEND_OVERRIDE} is missing: the first apply plans on local state"
+        )
+    else:
+        content = override.read_bytes()
+        report.append(
+            f"source: {LOCAL_BACKEND_OVERRIDE} sha256 {hashlib.sha256(content).hexdigest()}"
+        )
+        if content != LOCAL_BACKEND.encode():
+            problems.append(
+                f'{LOCAL_BACKEND_OVERRIDE} must be exactly terraform {{ backend "local" {{}} }}'
+                " (fmt layout)"
+            )
+    for p in loaded:
+        if config_ext(p.name) != ".tf" or p.name == LOCAL_BACKEND_OVERRIDE:
+            continue
+        try:
+            with p.open() as fh:
+                doc = hcl2.load(fh, serialization_options=SerializationOptions(with_comments=False))
+        except Exception:  # noqa: BLE001 - any parse failure means the source is unverified
+            problems.append(f"cannot read the stack source: {p.name}")
+            continue
+        for block in doc.get("module", []):
+            for name in block:
+                problems.append(
+                    f"module calls are not allowed in the stack: {name.strip(chr(34))} ({p.name})"
+                )
     return problems, report
 
 
