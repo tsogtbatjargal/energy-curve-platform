@@ -149,7 +149,7 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
      7. the simulations;
      8. **the live break-glass test, required:** the management admin assumes the role with a source identity and makes one read call; the same assumption without a source identity is denied;
      9. the evidence PR.
-4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap. **CI also needs `member_instance=true`** (`TF_VAR_member_instance`): without it, the instance guard stops the member plan. `expected_account_id` already comes from the plan role's ARN.
+4. **CI switch** (GitHub settings, done by the user): the repo variables and the `prod` environment point to the member account's roles and bucket, and CI's `terraform-plan` plans the member bootstrap. **CI also needs `member_instance=true`** (`TF_VAR_member_instance`): without it, the instance guard stops the member plan. The `terraform-plan` job takes it from the repo variable `TF_MEMBER_INSTANCE`, defaulting to `false`, so the code can merge first and the user switches `AWS_PLAN_ROLE_ARN`, `TF_STATE_BUCKET`, `TF_MEMBER_INSTANCE=true` and `prod`'s `AWS_DEPLOY_ROLE_ARN` together; a hard-coded value would make every CI plan fail the guard until the settings change. `expected_account_id` already comes from the plan role's ARN.
 5. **Decommission** (management account): destroy `ecp-gha-plan`, `ecp-gha-deploy` and `ecp-workload-boundary` from the management bootstrap. The bucket, budget and cost allocation tag are already owned by `infra/org`, so this plan shows **0** changes to them. Then archive `bootstrap/terraform.tfstate`.
 
 After phase 5, M4c (`infra/batch`) is planned and applied **only** in `ecp-workloads`.
@@ -315,7 +315,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - **The live break-glass test (required):** the management admin's Identity Center session can assume `OrganizationAccountAccessRole` with a source identity, and the same assumption without one is denied. *(Done 2026-10-07.)* CloudTrail records the denial only in the management account, and without request parameters, so it is matched by time, caller and error code.
 
 **Phase 4: CI**
-- CI's `terraform-plan` runs against the member bootstrap with the member plan role, with 0 failures through the gate.
+- CI's `terraform-plan` runs against the member bootstrap with the member plan role and `TF_MEMBER_INSTANCE=true`, with 0 failures through the gate.
 - No GitHub variable or secret names a management-account role.
 
 **Phase 5: decommission**

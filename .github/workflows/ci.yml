@@ -213,6 +213,10 @@ jobs:
       STACK: ${{ matrix.stack }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       AWS_REGION: ${{ vars.AWS_REGION }}
+      # Which bootstrap instance CI plans (infra/bootstrap/guard.tf, ADR-0021 phase 4). A repo
+      # variable, so it flips together with AWS_PLAN_ROLE_ARN and TF_STATE_BUCKET; unset means
+      # the management instance.
+      TF_VAR_member_instance: ${{ vars.TF_MEMBER_INSTANCE || 'false' }}
       TF_IN_AUTOMATION: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
