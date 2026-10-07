@@ -120,6 +120,7 @@ The pattern in every phase is plan, gate, exact-plan approval, apply, then evide
    - **First apply with local state:**
      - through a temporary, uncommitted `backend_override.tf` (`backend "local"`). It deliberately isn't git-ignored, so a leftover shows in `git status`.
      - After the apply, it is deleted, then `terraform init -migrate-state` moves the state into the new bucket.
+     - *(Found 2026-10-07, [evidence](../evidence/phase3-2026-10-07.md).)* Migrating from a configured local backend leaves the local `terraform.tfstate` unchanged; Terraform empties it only when no backend was configured before. The copy in S3 started a new lineage at serial 1. Its resources, outputs and Terraform version are identical to the local state's, and `check_results` differs only in order. The unused local file is removed in a separate cleanup.
      - Probed offline: `init -backend=false` cannot plan.
    - **The plan check:** `scripts/bootstrap_plan_check.py --change first-apply` accepts exactly the 16 creates and the break-glass import changing only its trust and tags.
      - **It also reads the stack source,** as phases 1b and 1c do. The deploy policy and the CI trust documents are unknown at plan time, so the plan cannot show them, and an override file would merge over them unseen.
@@ -304,13 +305,14 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - The read-only session-start checklist runs clean against `ecp-workloads`.
 
 **Phase 3: member bootstrap and break-glass**
+- **Status (2026-10-07): applied, migrated and verified** (plan `606e2a94…`). Steps 2–8 passed, and the management instance's acceptance plan shows no changes and no drift ([evidence](../evidence/phase3-2026-10-07.md)).
 - **The management instance, after the phase 3 code change:** a read-only plan shows no changes, and no drift beyond what is already accepted.
 - **The plan:** the first-apply check prints `OK`, with the expected resources only. **No `aws_budgets_budget` and no `aws_ce_cost_allocation_tag`** appear anywhere in the plan. A Rego rule and a test fail the member bootstrap on either, and the bootstrap code has no `budget.tf`.
 - **The break-glass role's trust policy** (`iam:GetRole`) equals the reviewed template: management account, `ArnLike aws:PrincipalArn` limited to `AWSReservedSSO_AdministratorAccess_*`, `sts:SetSourceIdentity` required, `MaxSessionDuration` of 3600. `scripts/role_trust_review.py` lists no unconditioned cross-account trust.
-- **The break-glass lock:** simulating `iam:UpdateAssumeRolePolicy` on the role by the member CI deploy role is denied (SCP plus boundary).
+- **The break-glass lock:** simulating `iam:UpdateAssumeRolePolicy` on the role by the member CI deploy role is denied by the protect SCP (`AllowedByOrganizations` false); the deploy role's own policy also grants IAM only on `ecp-*` names. *(Corrected 2026-10-07: this said "SCP plus boundary". The deploy role has no permissions boundary of its own; the boundary applies to the roles it creates.)*
 - **R2 re-acceptance:** `scripts/r2_accept.py` gives 16 cases and 0 differences in `ecp-workloads`. *(Corrected 2026-10-06: this said 13; the script has 16 since PR #25 added the cross-account cases.)* The simulator now also evaluates the project SCPs.
 - **The second R2 layer:** simulating `iam:DeleteRolePermissionsBoundary` by an admin-like test identity is denied by the SCP.
-- **The live break-glass test (required):** the management admin's Identity Center session can assume `OrganizationAccountAccessRole` with a source identity, and the same assumption without one is denied.
+- **The live break-glass test (required):** the management admin's Identity Center session can assume `OrganizationAccountAccessRole` with a source identity, and the same assumption without one is denied. *(Done 2026-10-07.)* CloudTrail records the denial only in the management account, and without request parameters, so it is matched by time, caller and error code.
 
 **Phase 4: CI**
 - CI's `terraform-plan` runs against the member bootstrap with the member plan role, with 0 failures through the gate.
