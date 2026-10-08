@@ -16,7 +16,7 @@ import policy_templates
 import pytest
 import r2_policies as r2
 from hcl2.utils import SerializationOptions
-from iam_eval import ALLOWED, EXPLICIT_DENY, as_list, decide
+from iam_eval import ALLOWED, EXPLICIT_DENY, as_list, decide, matches
 
 ACCOUNT, REGION = r2.ACCOUNT, "ca-central-1"
 STACK = Path(__file__).parents[1] / "infra" / "batch"
@@ -27,6 +27,7 @@ BUCKET = f"arn:aws:s3:::ecp-data-{ACCOUNT}-{REGION}"
 REPO = f"arn:aws:ecr:{REGION}:{ACCOUNT}:repository/ecp-batch"
 CLUSTER = f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/ecp-batch"
 FUNCTION = f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:ecp-batch-stage"
+FUNCTIONS = f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:*"
 STATE_MACHINE = f"arn:aws:states:{REGION}:{ACCOUNT}:stateMachine:ecp-batch"
 SYNC_RULE = f"arn:aws:events:{REGION}:{ACCOUNT}:rule/StepFunctionsGetEventsForECSTaskRule"
 STATE_BUCKET = r2.VALUES["state_bucket_arn"]
@@ -105,7 +106,34 @@ def test_only_the_stage_function_may_pull_through_the_repository_policy() -> Non
     (stmt,) = policy("ecr-repository")["Statement"]
     assert stmt["Principal"] == {"Service": "lambda.amazonaws.com"}
     assert sorted(stmt["Action"]) == ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-    assert stmt["Condition"] == {"ArnLike": {"aws:sourceArn": FUNCTION}}
+    # AWS documents this condition for Lambda's pull (images-create.html, cross-account example):
+    # `ArnLike aws:sourceARN` = a function wildcard. Nothing documents an exact function ARN or
+    # an `aws:SourceAccount` condition for Lambda, so the statement has neither.
+    assert stmt["Condition"] == {"ArnLike": {"aws:sourceARN": FUNCTIONS}}
+    assert "aws:SourceAccount" not in json.dumps(stmt)
+
+
+@pytest.mark.parametrize(
+    ("source_arn", "pulls"),
+    [
+        (FUNCTION, True),
+        (f"{FUNCTION}:$LATEST", True),  # a qualified ARN, if Lambda sends one
+        (f"{FUNCTION}:3", True),
+        (f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:another-function", True),
+        (f"arn:aws:lambda:{REGION}:999999999999:function:ecp-batch-stage", False),
+        (f"arn:aws:lambda:us-east-1:{ACCOUNT}:function:ecp-batch-stage", False),
+        (f"arn:aws:states:{REGION}:{ACCOUNT}:stateMachine:ecp-batch", False),
+    ],
+)
+def test_the_pull_condition_covers_this_accounts_functions_only(
+    source_arn: str, pulls: bool
+) -> None:
+    (stmt,) = policy("ecr-repository")["Statement"]
+    # IAM condition keys are case-insensitive; the spelling is pinned by the test above.
+    (pattern,) = (
+        v for k, v in stmt["Condition"]["ArnLike"].items() if k.lower() == "aws:sourcearn"
+    )
+    assert matches(pattern, source_arn) is pulls
 
 
 # --- each role's job is allowed inside the boundary -------------------------------------------

@@ -307,10 +307,31 @@ def test_an_unknown_policy_is_refused(stack: Path) -> None:
     assert any('aws_iam_role_policy.batch["stage"]' in x for x in run(p, 1, stack))
 
 
-def test_a_changed_ecr_repository_policy_is_refused(stack: Path) -> None:
+def drop_condition(doc: dict) -> None:
+    del doc["Statement"][0]["Condition"]
+
+
+def exact_function(doc: dict) -> None:  # the statement before it was corrected to AWS's form
+    condition = doc["Statement"][0]["Condition"]["ArnLike"]
+    condition["aws:sourceArn"] = f"arn:aws:lambda:{REGION}:{MEMBER}:function:ecp-batch-stage"
+    del condition["aws:sourceARN"]
+
+
+def add_source_account(doc: dict) -> None:
+    doc["Statement"][0]["Condition"]["StringEquals"] = {"aws:SourceAccount": MEMBER}
+
+
+def any_function(doc: dict) -> None:
+    doc["Statement"][0]["Condition"]["ArnLike"]["aws:sourceARN"] = "arn:aws:lambda:*:*:function:*"
+
+
+@pytest.mark.parametrize(
+    "mutate", [drop_condition, exact_function, add_source_account, any_function]
+)
+def test_a_changed_ecr_repository_policy_is_refused(stack: Path, mutate) -> None:
     p = plan(1)
     doc = json.loads(template("ecr-repository"))
-    del doc["Statement"][0]["Condition"]
+    mutate(doc)
     change(p, "aws_ecr_repository_policy.batch")["change"]["after"]["policy"] = json.dumps(doc)
     assert any("aws_ecr_repository_policy.batch" in x for x in run(p, 1, stack))
 

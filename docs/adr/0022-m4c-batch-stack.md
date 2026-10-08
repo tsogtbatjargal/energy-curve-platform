@@ -62,8 +62,13 @@ Lambda Developer Guide, "Amazon ECR permissions" (`images-create.html`):
 - "If the Amazon ECR repository does not include these permissions, Lambda attempts to add them automatically", which works only if the caller of `CreateFunction` has `ecr:SetRepositoryPolicy`.
 
 The stage role deliberately has no ECR access, so without a repository policy the admin's `CreateFunction` would make Lambda write one itself: an out-of-band change to a stack resource. So stage 1 declares it:
-- the `lambda.amazonaws.com` principal and the 2 pull actions;
-- `ArnLike aws:sourceArn` set to this function's ARN, the condition key AWS's own example uses.
+- the `lambda.amazonaws.com` principal and the 2 pull actions, under AWS's own Sid, `LambdaECRImageRetrievalPolicy`;
+- `ArnLike aws:sourceARN` = `arn:aws:lambda:<region>:<account>:function:*`.
+
+**The condition is AWS's documented form, and nothing narrower.** *(Corrected 2026-10-08: the merged ADR said the condition was this function's exact ARN, "the condition key AWS's own example uses". That overstated it. The guide's only conditioned example is the cross-account statement, and its value is `function:*`; the same-account minimum policy has no condition.)*
+- **No exact function ARN:** nothing documents one, and nothing says whether Lambda's pull sends the plain function ARN or a qualified one (`…:ecp-batch-stage:$LATEST` or a version). An exact value would not match a qualified ARN, and the function could then enter `Failed` when Lambda next fetches the image.
+- **No `aws:SourceAccount`:** nothing documents that Lambda sends it with this pull.
+- **What the wildcard costs:** any Lambda function in this account and region may pull from this repository. The account is single-purpose, and same-account IAM already lets any principal there with ECR permissions pull, so the loss is small. `tests/test_batch_iam.py` pins the statement and its matching.
 
 A diff on this policy in the re-plan after stage 2 would mean Lambda rewrote it: stop.
 
@@ -173,5 +178,6 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 - **The stack depends on one registry module,** pinned exactly and checked in both the plan and the source.
 - **Not yet verified:**
   - whether IAM accepts the provider's tags on the service-linked role: this shows at the stage-1 apply;
+  - whether `CreateFunction` leaves the repository policy untouched: this shows in the re-plan after the stage-2 apply (a diff means stop);
   - Scheduler's execution-name format: checked before plan 3;
   - whether `runTask.sync` alone fails on a non-zero exit: the Choice state makes this moot.

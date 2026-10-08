@@ -49,7 +49,7 @@ test_resource_policy_for_a_service_principal_allowed if {
 		"Effect": "Allow",
 		"Principal": {"Service": "lambda.amazonaws.com"},
 		"Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-		"Condition": {"ArnLike": {"aws:sourceArn": "arn:aws:lambda:ca-central-1:123456789012:function:ecp-batch-stage"}},
+		"Condition": {"ArnLike": {"aws:sourceARN": "arn:aws:lambda:ca-central-1:123456789012:function:*"}},
 	}
 	p := rc("aws_ecr_repository_policy.batch", "aws_ecr_repository_policy", {"policy": policy_doc([stmt])})
 	count(iam.deny) == 0 with input as {"resource_changes": [p]}
