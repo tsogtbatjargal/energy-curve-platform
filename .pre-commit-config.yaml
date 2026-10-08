@@ -19,6 +19,7 @@ repos:
         types: [python]
       # Check only the staged Terraform files and never write: `fmt -recursive` also rewrote the
       # git-ignored *.tfvars, which hold private values (tests/test_precommit_terraform_fmt.py).
+      # When it fails, format the listed files by hand: `terraform fmt <file>`, then stage them again.
       - id: terraform-fmt
         name: terraform fmt
         entry: mise exec -- terraform fmt -check

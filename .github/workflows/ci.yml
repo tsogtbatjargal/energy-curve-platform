@@ -12,9 +12,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Job timeouts: about twice the slowest healthy run over 15 recent runs, at least 5 minutes,
+# so a hang fails in minutes instead of running to GitHub's 6-hour default.
 jobs:
   python:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
@@ -58,6 +61,7 @@ jobs:
       - run: uv run ruff format --check .
       # Playwright's pinned Chromium for the browser tests (ADR-0016); the version follows uv.lock.
       - run: uv run playwright install --with-deps chromium
+        timeout-minutes: 5  # healthy installs take 18-149 s; one hung for over 30 min
       - run: uv run pytest --tracing retain-on-failure --output test-results
       # Traces only on failure. Browser tests use synthetic data only (ADR-0011).
       - if: failure()
@@ -70,6 +74,7 @@ jobs:
 
   secrets-scan:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -84,6 +89,7 @@ jobs:
 
   iac-static:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -118,6 +124,7 @@ jobs:
     # and run both entry points on a file store. The pipeline step runs with no network, as it
     # needs none. A required check.
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -149,6 +156,7 @@ jobs:
     # AWS Glue 5.1 runtime (ADR-0007): Python 3.11, Java 17, PySpark 3.5.6. Runs the whole suite
     # plus the glue_compat checks, which assert those exact versions.
     runs-on: ubuntu-24.04
+    timeout-minutes: 6
     permissions:
       contents: read
     env:
@@ -198,6 +206,7 @@ jobs:
     # Fork PRs get no OIDC token; skip rather than fail.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
       id-token: write # OIDC token for the read-only plan role
