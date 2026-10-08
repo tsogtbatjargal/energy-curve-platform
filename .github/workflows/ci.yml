@@ -107,6 +107,12 @@ jobs:
         run: |
           terraform -chdir=infra/bootstrap init -backend=false -input=false
           terraform -chdir=infra/bootstrap test
+      # M4c (ADR-0022): the batch stack's two stages (no image, then an image by digest),
+      # planned and applied against a mocked AWS provider. No credentials and no backend.
+      - name: terraform test (batch, mocked provider)
+        run: |
+          terraform -chdir=infra/batch init -backend=false -input=false
+          terraform -chdir=infra/batch test
       - name: rego fmt, compile, unit tests
         run: |
           opa fmt --list --fail policy
