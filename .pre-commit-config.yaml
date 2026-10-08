@@ -17,12 +17,13 @@ repos:
         entry: uv run ruff format
         language: system
         types: [python]
+      # Check only the staged Terraform files and never write: `fmt -recursive` also rewrote the
+      # git-ignored *.tfvars, which hold private values (tests/test_precommit_terraform_fmt.py).
       - id: terraform-fmt
         name: terraform fmt
-        entry: mise exec -- terraform fmt -recursive infra
+        entry: mise exec -- terraform fmt -check
         language: system
-        files: ^infra/.*\.tf$
-        pass_filenames: false
+        files: ^infra/.*\.(tf|tftest\.hcl)$
       - id: actionlint
         name: actionlint
         entry: mise exec -- actionlint
