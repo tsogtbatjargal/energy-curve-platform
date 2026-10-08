@@ -2,16 +2,16 @@
 
 It used to run `terraform fmt -recursive infra`, which also rewrote git-ignored `*.tfvars` (private
 values) on any commit that staged an `infra/**/*.tf` file, and silently reformatted staged files.
-Each test makes a throwaway git repository with this repo's `.pre-commit-config.yaml`, installs the
-hook, and commits with every other hook skipped. Needs terraform through mise, so it is skipped
-where that is unavailable (CI's python job); CI's iac-static job runs `terraform fmt -check`.
+Each test makes a throwaway git repository with this repo's `.pre-commit-config.yaml` and a
+`mise.toml` pinning this repo's terraform version, installs the hook, and commits with every other
+hook skipped. mise installs that terraform if it is missing (CI's python job does not set it up).
 """
 
 import os
 import shutil
 import subprocess
 import sys
-from functools import cache
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -19,20 +19,13 @@ import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / ".pre-commit-config.yaml"
+TERRAFORM = tomllib.loads((REPO / "mise.toml").read_text())["tools"]["terraform"]
 FORMATTED = 'variable "x" {\n  type = string\n}\n'
 UNFORMATTED = 'variable "x"   {\ntype=string\n}\n'
 TFVARS = 'region   =   "ca-central-1"\n'  # unformatted on purpose; terraform fmt would align it
+CHECK_FAILED = "- exit code: 3"  # how pre-commit reports `terraform fmt -check` finding a file
 
-
-@cache
-def terraform_available() -> bool:
-    if shutil.which("mise") is None:
-        return False
-    probe = subprocess.run(["mise", "exec", "--", "terraform", "version"], capture_output=True)  # noqa: S607
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not terraform_available(), reason="needs terraform through mise")
+pytestmark = pytest.mark.skipif(shutil.which("mise") is None, reason="needs mise")
 
 
 def git(repo: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -54,12 +47,19 @@ def repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@example.invalid",
         "PRE_COMMIT_HOME": str(tmp_path / "pre-commit-home"),
+        "MISE_TRUSTED_CONFIG_PATHS": str(root),
+        "MISE_YES": "1",
         "SKIP": ",".join(i for i in hook_ids if i != "terraform-fmt"),
     }
     assert "terraform-fmt" in hook_ids
     shutil.copy(CONFIG, root / ".pre-commit-config.yaml")
+    (root / "mise.toml").write_text(f'[tools]\nterraform = "{TERRAFORM}"\n')
     (root / ".gitignore").write_text("*.tfvars\n")
     (root / "infra/stack/main.tf").write_text(FORMATTED)
+    # The hook's own command must work here, so a tool failure can never pass as a fmt failure.
+    probe = subprocess.run(["mise", "exec", "--", "terraform", "version"],  # noqa: S607
+                           cwd=root, env=env, capture_output=True, text=True)  # fmt: skip
+    assert probe.returncode == 0 and f"Terraform v{TERRAFORM}" in probe.stdout, probe.stderr
     assert git(root, "init", "-q", "-b", "main", env=env).returncode == 0
     assert git(root, "add", ".", env=env).returncode == 0
     assert git(root, "commit", "-q", "-m", "init", env=env).returncode == 0
@@ -92,6 +92,7 @@ def test_an_unformatted_staged_tf_file_fails_the_commit_and_is_not_rewritten(rep
     result = commit(root, env)
     assert result.returncode != 0
     assert main.read_text() == UNFORMATTED
+    assert CHECK_FAILED in result.stdout + result.stderr, result.stdout + result.stderr
     assert git(root, "rev-list", "--count", "HEAD", env=env).stdout.strip() == "1"
 
 
@@ -104,6 +105,7 @@ def test_an_unformatted_staged_test_file_fails_the_commit(repo) -> None:
     result = commit(root, env)
     assert result.returncode != 0
     assert tftest.read_text() == 'run "a" {\ncommand=plan\n}\n'
+    assert CHECK_FAILED in result.stdout + result.stderr, result.stdout + result.stderr
 
 
 def test_only_the_staged_files_are_checked(repo) -> None:
