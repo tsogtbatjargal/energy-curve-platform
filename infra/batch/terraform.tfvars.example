@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars (git-ignored). Never commit the real values.
+expected_account_id = "<member-account-id>"
+alert_email         = "<your address>"

@@ -53,3 +53,15 @@ deny contains msg if {
 	stack != "demo"
 	msg := sprintf("%s: NAT gateway outside the demo stack (stack=%q)", [rc.address, stack])
 }
+
+# ADR-0004 batch profile: no interface endpoints (each costs per hour and per AZ); the batch task
+# reaches AWS APIs over the internet gateway and S3 through a free gateway endpoint. Only the demo
+# stack may have other endpoint types. A type unknown at plan time is not provably a gateway.
+deny contains msg if {
+	some rc in lib.resources_of("aws_vpc_endpoint")
+	type := object.get(lib.after(rc), "vpc_endpoint_type", "unknown")
+	type != "Gateway"
+	stack := object.get(object.get(lib.after(rc), "tags_all", {}), "stack", "")
+	stack != "demo"
+	msg := sprintf("%s: %s endpoint outside the demo stack (stack=%q)", [rc.address, type, stack])
+}

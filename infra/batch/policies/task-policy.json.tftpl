@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAndPublishTheStore",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::ecp-data-${account_id}-${region}/store/*"
+    },
+    {
+      "Sid": "ListSoMissingKeysAre404",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::ecp-data-${account_id}-${region}"
+    }
+  ]
+}
