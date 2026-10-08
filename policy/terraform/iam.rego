@@ -27,6 +27,25 @@ deny contains msg if {
 	msg := sprintf("%s: AdministratorAccess attachment is not allowed", [rc.address])
 }
 
+# ADR-0006: a resource policy never allows every principal. Deny statements may (the bucket's
+# deny-non-TLS statement does). A policy unknown at plan time is not judged here.
+resource_policy_types := {"aws_ecr_repository_policy", "aws_s3_bucket_policy", "aws_sns_topic_policy"}
+
+any_principal(p) if p == "*"
+
+any_principal(p) if "*" in as_list(p.AWS)
+
+deny contains msg if {
+	some rc in lib.resources
+	rc.type in resource_policy_types
+	is_string(lib.after(rc).policy)
+	doc := json.unmarshal(lib.after(rc).policy)
+	some stmt in as_list(doc.Statement)
+	stmt.Effect == "Allow"
+	any_principal(stmt.Principal)
+	msg := sprintf("%s: resource policy allows any principal", [rc.address])
+}
+
 # Policies whose JSON depends on not-yet-created resources are unknown at plan time. For workload
 # stacks scripts/iam_approval.py (PLAN.md R1, ADR-0017) fails them unless a reviewed approval
 # matches their fingerprint; this warning keeps them visible in every stack's report.
