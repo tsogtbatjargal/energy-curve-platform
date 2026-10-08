@@ -323,6 +323,7 @@ Each phase is accepted only when its checks pass. They are recorded, sanitized, 
 - No GitHub variable or secret names a management-account role.
 
 **Phase 5: decommission**
+- **Status (2026-10-08): applied and verified** (plan `04440ae1…`, [evidence](../evidence/phase5-2026-10-08.md)). `8 destroyed`; both CI roles and the boundary return `NoSuchEntity`; the management bootstrap state is empty; CI's member plan is still `No changes.`. Precheck 8 passed as a documented deviation: the `infra/org` plan had 4 refresh-drift entries, all no-op (the member's new root email, changed through Account Management beforehand, and the phase 1c tags drift). The checks of the other project's trust lines, the budgets and the tag after the apply are still open. The old `bootstrap/terraform.tfstate` key stays as an empty state.
 - **The management bootstrap plan** destroys exactly `ecp-gha-plan`, `ecp-gha-deploy`, their policies and attachments, and `ecp-workload-boundary`, with **0** changes to the bucket, budget or cost allocation tag. That is checked by `bootstrap_plan_check.py --change decommission`, this plan's gate (the policy gate does not apply to a plan that only deletes).
 - **Afterwards:**
   - no `ecp-*` role or policy remains in the management account;
