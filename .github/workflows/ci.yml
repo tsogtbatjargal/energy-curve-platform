@@ -219,7 +219,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stack: [bootstrap]
+        stack: [bootstrap, batch]
     defaults:
       run:
         shell: bash
@@ -233,6 +233,10 @@ jobs:
       # the management instance.
       TF_VAR_member_instance: ${{ vars.TF_MEMBER_INSTANCE || 'false' }}
       TF_IN_AUTOMATION: "1"
+      # The batch stack's alert address is private and never in CI: this placeholder is harmless
+      # because the subscription ignores endpoint changes (ADR-0022). Its image digest and
+      # schedule flag come from the tracked infra/batch/image.auto.tfvars.
+      TF_VAR_alert_email: ci@example.invalid
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -264,14 +268,35 @@ jobs:
       # The budget and its alert emails moved to infra/org (ADR-0021 phase 1a), which CI never
       # plans: it lives in the management account and is applied by the Identity Center admin.
       - name: terraform plan
+        if: matrix.stack == 'bootstrap'
         run: |
           terraform plan -input=false -lock-timeout=60s -out=tfplan
           terraform show -json tfplan > plan.json
+      # The log of this public repository gets the summary line only: the plan goes to a file, an
+      # error shows its first line with 12-digit numbers masked, and the files are removed below.
+      # Informational: an infra/batch change merged but not yet applied shows as a change.
+      - name: terraform plan (batch, summary only)
+        if: matrix.stack == 'batch'
+        run: |
+          status=0
+          terraform plan -input=false -lock-timeout=60s -no-color -out=tfplan > plan.txt 2>&1 || status=$?
+          grep -E '^(Plan:|No changes)' plan.txt || true
+          if [ "$status" -ne 0 ]; then
+            echo "terraform plan failed (exit $status)"
+            grep -E '^Error' plan.txt | sed -E 's/[0-9]{12}/<account>/g' | head -5 || true
+            exit "$status"
+          fi
+          terraform show -json tfplan > plan.json
       - name: policy gate
+        if: matrix.stack == 'bootstrap'
         # --stack selects the R1 rules: unknown IAM policies fail in workload stacks unless
         # policy/approvals/iam_unknown.json approves their fingerprint (ADR-0017). Only the gate's
         # dependency group (python-hcl2, to read locals from the source) is installed.
         run: uv run --locked --only-group gate python ../../scripts/policy_gate.py plan.json ../../policy --stack "$STACK"
+      - name: policy gate (batch)
+        if: matrix.stack == 'batch'
+        # The batch stack's rules read its source for locals, hence --stack-dir (ADR-0022).
+        run: uv run --locked --only-group gate python ../../scripts/policy_gate.py plan.json ../../policy --stack "$STACK" --stack-dir .
       - name: remove plan artifacts
         if: always()
-        run: rm -f tfplan plan.json
+        run: rm -f tfplan plan.json plan.txt

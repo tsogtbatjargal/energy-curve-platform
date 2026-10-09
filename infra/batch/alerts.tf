@@ -13,6 +13,13 @@ resource "aws_sns_topic_subscription" "email" {
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
+
+  # CI plans this stack with a placeholder address (the real one is private), and the endpoint
+  # of an email subscription cannot change in place. Changing the address later is a deliberate
+  # replace step: `terraform apply -replace=aws_sns_topic_subscription.email` (ADR-0022).
+  lifecycle {
+    ignore_changes = [endpoint]
+  }
 }
 
 # Stage 2: one alarm over the three ways an execution can end badly.

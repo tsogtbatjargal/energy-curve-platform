@@ -192,3 +192,30 @@ def test_findings_name_the_file_and_the_kind_never_the_value(tmp_path: Path) -> 
         "infra/batch/mail.tf: email address other than @example.invalid",
     ]
     assert not any(text in " ".join(got) for text, kind in leaks.values() if kind)
+
+
+# --- what CI plans with (ADR-0022) ----------------------------------------------------------------
+
+
+def test_the_subscription_ignores_endpoint_changes() -> None:
+    sub = declared("resource")["aws_sns_topic_subscription.email"]
+    assert "endpoint" in str(sub.get("lifecycle")), "CI plans with a placeholder address"
+
+
+def test_the_ecr_lifecycle_keeps_five_images() -> None:
+    text = (STACK / "ecr.tf").read_text()
+    assert 'countType = "imageCountMoreThan", countNumber = 5' in text
+
+
+def test_the_tracked_tfvars_hold_only_the_image_digest_and_the_schedule_flag() -> None:
+    text = (STACK / "image.auto.tfvars").read_text()
+    lines = [x for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")]
+    assert len(lines) == 2
+    digest = re.fullmatch(r'image_digest\s+= "(sha256:[0-9a-f]{64})"', lines[0])
+    assert digest, "the first assignment is the image digest"
+    assert re.fullmatch(r"schedule_enabled\s+= true", lines[1])
+
+
+def test_the_tracked_tfvars_are_not_git_ignored() -> None:
+    argv = ["git", "check-ignore", "-q", "infra/batch/image.auto.tfvars"]  # noqa: S607
+    assert subprocess.run(argv, cwd=ROOT, check=False).returncode == 1  # noqa: S603
