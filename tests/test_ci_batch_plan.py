@@ -3,7 +3,9 @@
 The workflow runs on a public repository, so what it may print is part of its contract: the
 batch plan goes to a file, only the `Plan:` / `No changes` line (and the first line of an
 error, with 12-digit numbers masked) reaches the log, and the files are removed afterwards. No
-secret is used: the alert address is a placeholder, the digest and the schedule flag are tracked.
+secret is needed for the stack's inputs: the alert address is a placeholder, the digest and the
+schedule flag are tracked. The plan role ARN and the state bucket name hold the account ID, which
+the public log must not show, so they are secrets (repository and Dependabot), not variables.
 """
 
 import re
@@ -32,9 +34,53 @@ def test_both_stacks_are_planned_by_the_same_job() -> None:
     assert JOB["permissions"] == {"contents": "read", "id-token": "write"}
 
 
-def test_the_alert_address_is_a_placeholder_and_no_secret_is_used() -> None:
+SECRETS_USED = {"AWS_PLAN_ROLE_ARN", "TF_STATE_BUCKET"}
+VARIABLES_USED = {"AWS_REGION", "TF_MEMBER_INSTANCE"}
+JOB_TEXT = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+JOB_TEXT = JOB_TEXT[JOB_TEXT.index("  terraform-plan:") :]
+
+
+def index_of(name: str) -> int:
+    """A step by its name, or by the action it uses (the credentials step has no name)."""
+    return next(
+        i for i, s in enumerate(JOB["steps"]) if s.get("name") == name or name in s.get("uses", "")
+    )
+
+
+def test_the_alert_address_is_a_placeholder() -> None:
     assert JOB["env"]["TF_VAR_alert_email"] == "ci@example.invalid"
-    assert "secrets." not in yaml.safe_dump(JOB)
+
+
+def test_the_job_uses_exactly_these_secrets_and_variables() -> None:
+    dumped = yaml.safe_dump(JOB)
+    assert set(re.findall(r"secrets\.(\w+)", dumped)) == SECRETS_USED
+    assert set(re.findall(r"vars\.(\w+)", dumped)) == VARIABLES_USED
+
+
+def test_the_account_id_values_are_secrets_not_variables() -> None:
+    assert JOB["env"]["TF_STATE_BUCKET"] == "${{ secrets.TF_STATE_BUCKET }}"
+    creds = JOB["steps"][index_of("configure-aws-credentials")]["with"]
+    assert creds["role-to-assume"] == "${{ secrets.AWS_PLAN_ROLE_ARN }}"
+    assert creds["mask-aws-account-id"] is True
+    expected = STEPS["expected account"]["env"]
+    assert expected == {"AWS_PLAN_ROLE_ARN": "${{ secrets.AWS_PLAN_ROLE_ARN }}"}
+
+
+def test_the_account_id_is_derived_only_after_the_credentials_step_masks_it() -> None:
+    # Derived values are not masked by GitHub; mask-aws-account-id registers the account ID.
+    assert index_of("configure-aws-credentials") < index_of("expected account")
+    assert index_of("expected account") < index_of("terraform init")
+
+
+def test_no_step_prints_the_secrets() -> None:
+    names = "|".join(SECRETS_USED)
+    for step in JOB["steps"]:
+        run = step.get("run", "")
+        for line in run.splitlines():
+            if re.search(r"(echo|printf)\b", line) and re.search(rf"\$\{{?({names})\b", line):
+                # the one allowed use is the derivation that writes to GITHUB_ENV, never to the log
+                assert step["name"] == "expected account", step.get("name")
+                assert line.rstrip().endswith('>> "$GITHUB_ENV"'), line
 
 
 def test_the_batch_plan_goes_to_a_file_and_only_a_summary_is_printed() -> None:
