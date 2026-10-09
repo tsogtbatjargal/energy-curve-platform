@@ -3,6 +3,7 @@
     terraform show -json <saved.tfplan> > <plan.json>
     python scripts/batch_plan_check.py --stage 1 <plan.json>
     python scripts/batch_plan_check.py --stage 2 --digest sha256:<64 hex> <plan.json>
+    python scripts/batch_plan_check.py --stage 3 --digest sha256:<64 hex> <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it also reads infra/batch's source.
 It runs after policy_gate.py --stack batch (ADR-0006 rules, PLAN.md R1 and R2), not instead of it.
@@ -24,6 +25,12 @@ time, and every role carries the workload boundary.
 changes at all; exactly the STAGE2 creates; the digest is in the repository (the image lookup
 was read at plan time); both steps run that digest, synthetic data only, with no key; no reserved
 concurrency; the schedule is disabled; the alarm notifies the alerts topic.
+
+`--stage 3` (image_digest = the approved digest, schedule_enabled = true): every stage-1 and stage-2
+resource unchanged except one in-place update of the schedule, which may change only its state
+(to ENABLED) and its target (the universal Step Functions StartExecution target, whose input is
+the exact reviewed bytes: the state machine, `Name` = Scheduler's execution ID, an empty input).
+The schedule's other settings stay as reviewed.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values (the alert address in particular).
@@ -86,6 +93,19 @@ STAGE2 = frozenset(
 )  # fmt: skip
 # (address, attribute path, required value): each stage-1 create's reviewed settings. The bucket
 # name and the policies depend on the account and are checked in check_stage1_create.
+UNIVERSAL_TARGET = "arn:aws:scheduler:::aws-sdk:sfn:startExecution"
+SCHEDULE = "aws_scheduler_schedule.daily[0]"
+
+
+def schedule_input(account: str) -> str:
+    """The target input, byte for byte: written by `format` in workflow.tf, not `jsonencode`,
+    which would escape `<` and `>` and leave Scheduler no keyword to replace."""
+    machine = f"arn:aws:states:{REGION}:{account}:stateMachine:ecp-batch"
+    return (
+        '{"StateMachineArn":"' + machine + '","Name":"<aws.scheduler.execution-id>","Input":"{}"}'
+    )
+
+
 STAGE1_SETTINGS = [
     (f"{_B}.this[0]", ("force_destroy",), False),
     *[(f"{_B}_public_access_block.this[0]", (flag,), True)
@@ -232,6 +252,44 @@ def check_stage2_create(
     return problems
 
 
+def check_schedule_update(change: dict[str, Any], account: str, role: str) -> list[str]:
+    """Stage 3: the one in-place update. State to ENABLED and the universal target; nothing else."""
+    after, before = change.get("after") or {}, change.get("before") or {}
+    want: dict[tuple[Any, ...], Any] = {
+        ("name",): "ecp-batch-daily", ("state",): "ENABLED",
+        ("schedule_expression",): "cron(0 12 * * ? *)",
+        ("schedule_expression_timezone",): "America/Toronto",
+        ("flexible_time_window", 0, "mode"): "OFF",
+        ("target", 0, "arn"): UNIVERSAL_TARGET, ("target", 0, "role_arn"): role,
+        ("target", 0, "input"): schedule_input(account),
+        ("target", 0, "retry_policy", 0, "maximum_retry_attempts"): 2,
+    }  # fmt: skip
+    problems = [
+        f"{SCHEDULE}: {'.'.join(map(str, path))} is not the reviewed value"
+        for path, value in want.items()
+        if dig(after, path) != value
+    ]
+    if (change.get("after_unknown") or {}).get("target"):
+        problems.append(f"{SCHEDULE}: the target is not known at plan time")
+    changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    target_before, target_after = (
+        (before.get("target") or [{}])[0],
+        (after.get("target") or [{}])[0],
+    )
+    target_changed = sorted(
+        k
+        for k in set(target_before) | set(target_after)
+        if target_before.get(k) != target_after.get(k)
+    )
+    extra = [k for k in changed if k not in ("state", "target")]
+    extra += [f"target.{k}" for k in target_changed if k not in ("arn", "input")]
+    if extra:
+        problems.append(
+            f"{SCHEDULE}: changes more than the state and the target ({', '.join(extra)})"
+        )
+    return problems
+
+
 def check_container(address: str, definitions: Any, uri: str, env: dict[str, str]) -> list[str]:
     try:
         containers = json.loads(definitions)
@@ -370,6 +428,21 @@ def check(
                 " at plan time"
             )
         expected, unchanged = STAGE2, STAGE1
+    elif stage == 3:
+        if not (isinstance(digest, str) and DIGEST.match(digest)):
+            problems.append("stage 3 needs --digest sha256:<64 lowercase hex>")
+            digest = ""
+        if variable(plan, "image_digest") != digest:
+            problems.append("image_digest is not the approved digest")
+        if variable(plan, "schedule_enabled") is not True:
+            problems.append("stage 3 needs schedule_enabled = true")
+        image = prior(plan, "data.aws_ecr_image.batch[0]") or {}
+        if not digest or image.get("image_digest") != digest:
+            problems.append(
+                "data.aws_ecr_image.batch[0]: the approved digest was not found in the repository"
+                " at plan time"
+            )
+        expected, unchanged = frozenset({SCHEDULE}), (STAGE1 | STAGE2) - {SCHEDULE}
     else:
         return [f"unknown stage {stage}"], report
 
@@ -377,11 +450,21 @@ def check(
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]
         actions = change["actions"]
+        if stage == 3 and address == SCHEDULE and actions != ["update"]:
+            if actions not in UNCHANGED:  # a no-op is reported below as the missing update
+                report.append(f"{'+'.join(actions):8} {address}")
+                problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+            continue
         if actions in UNCHANGED and change.get("importing") is None:
             seen.add(address)
             continue
         report.append(f"{'+'.join(actions):8} {address}")
-        if address in expected and actions == ["create"] and change.get("importing") is None:
+        if stage == 3 and address == SCHEDULE and actions == ["update"]:
+            seen.add(address)
+            if account:
+                role = f"arn:aws:iam::{account}:role/ecp-batch-scheduler"
+                problems += check_schedule_update(change, account, role)
+        elif address in expected and actions == ["create"] and change.get("importing") is None:
             seen.add(address)
             if account and stage == 1:
                 problems += check_stage1_create(address, change, account)
@@ -390,11 +473,12 @@ def check(
         else:
             problems.append(f"unexpected change: {'+'.join(actions)} {address}")
     for address in sorted(expected - seen):
-        problems.append(f"missing change: create {address}")
+        problems.append(f"missing change: {'update' if stage == 3 else 'create'} {address}")
     for address in sorted(unchanged - seen):
         problems.append(f"missing stage-1 resource: {address} must be in the plan, unchanged")
     report.append(
-        f"summary: stage {stage}, {len(expected)} to add, 0 to change, 0 to destroy"
+        f"summary: stage {stage}, {len(expected) if stage < 3 else 0} to add,"
+        f" {1 if stage == 3 else 0} to change, 0 to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )
@@ -403,8 +487,8 @@ def check(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="batch_plan_check.py")
-    parser.add_argument("--stage", type=int, choices=(1, 2), required=True)
-    parser.add_argument("--digest", help="stage 2: the approved image digest")
+    parser.add_argument("--stage", type=int, choices=(1, 2, 3), required=True)
+    parser.add_argument("--digest", help="stages 2 and 3: the approved image digest")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)
