@@ -78,3 +78,9 @@ Step Functions passes its execution name as `run_id` to both steps. It is checke
   - Cutting these versions would change idempotency rules that ADR-0012 and ADR-0019 settled; at this scale the cost is trivial. Revisit if the dataset ever runs on real data.
 - **Orphaned staging prefixes.** A run that fails between the steps leaves `staging/<run_id>/`. M4c adds an S3 lifecycle rule for `staging/`.
 - **Moving to real data later** means changing the source construction, adding the secret, and amending R3/ADR-0011. The synthetic-only tests would then fail, which is intended: the change has to be deliberate.
+
+## Addendum (2026-10-09): two time-limited scan exceptions
+New HIGH findings (`CVE-2026-78667`, `CVE-2026-97031`: Go standard library v1.26.7, fixed in 1.26.9) appeared in `usr/local/bin/aws-lambda-rie` in the Lambda base image, a day after the image was pushed clean. That binary is the emulator for local testing; the base image's own entry point script starts it only when `AWS_LAMBDA_RUNTIME_API` is unset, which Lambda sets, and the Fargate task overrides the entry point. The `image` check, which is required, would otherwise block every PR.
+- **The exception** is `.trivyignore.yaml`: exactly those two IDs, each limited to that path, with a reason, expiring **2026-11-08** (30 days). The CI scan passes `--ignorefile .trivyignore.yaml` and prints the suppressed findings (`--show-suppressed`), so the log shows what is ignored. Nothing else is ignored, and a different path or CVE still fails.
+- **After expiry** the finding fails the check again, unless AWS has shipped a fixed base image by then.
+- **The pushed ECR image** (digest in the M4c evidence) contains the same binary. It is rebuilt and pushed once AWS ships a fixed base, with a new digest and a new plan; until then it stays, since the binary does not run in Lambda or on Fargate.
