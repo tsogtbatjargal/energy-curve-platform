@@ -1,6 +1,6 @@
 # 22. M4c: the batch stack, applied in two stages
 
-Date: 2026-10-08 · Status: **proposed** (code and offline tests only; no plan or apply of `infra/batch` is authorized)
+Date: 2026-10-08 · Status: **applied through stage 2; schedule disabled** (2026-10-09). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md). Plan 3 (enable the schedule) is not yet done.
 
 ## Context
 M4a (the S3 store, ADR-0019) and M4b (the entry points and image, ADR-0020) are done. M4c is what remains: the `infra/batch` stack in the `ecp-workloads` member account (ADR-0021), the first image, and the first cloud run. Preconditions met: PLAN.md R1 (ADR-0017) and R2 (ADR-0018, re-accepted in the member account). The cloud runs synthetic data only, so R3 matters only for M6.
@@ -176,8 +176,12 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 ## Consequences
 - **Two applies instead of one,** in exchange for never naming an image that does not exist, and a stage-2 plan that cannot change IAM.
 - **The stack depends on one registry module,** pinned exactly and checked in both the plan and the source.
+- **Verified in the first applies** (an independent reviewer repeated the key checks read-only):
+  - **The service-linked role took the provider's tags** at the stage-1 apply: `39 added, 0 changed, 0 destroyed`, no tagging error.
+  - **`CreateFunction` left the ECR repository policy untouched:** the re-plans after the stage-2 apply show no diff on it.
+  - **The log groups received streams with events:** the function's group has 1 stream with 3 events; the task's group has 2 streams (the run and its replay) with 2 events each. This is the real proof for the two R2 scenarios the IAM simulator cannot evaluate (a slash-prefixed log group; see the evidence).
+  - **The first run** `published`, and its replay returned `already_published` with the pointer unchanged.
+- **Learned in the applies:** the provider's read-back after a create leaves 18 (stage 1) and 4 (stage 2) refresh-drift entries, all null → empty values, which two reviewed refresh-only applies recorded. A stage-2 gate that refuses drift needs them recorded first; drift is judged from the plan JSON, because the text output showed only 1 of the 18.
 - **Not yet verified:**
-  - whether IAM accepts the provider's tags on the service-linked role: this shows at the stage-1 apply;
-  - whether `CreateFunction` leaves the repository policy untouched: this shows in the re-plan after the stage-2 apply (a diff means stop);
-  - Scheduler's execution-name format: checked before plan 3;
+  - Scheduler's execution-name format: the documentation pages read (Scheduler's templated targets, Step Functions' "Using Amazon EventBridge Scheduler") do not state the name it passes to `StartExecution`. The state machine uses that name as `run_id`, which the stage and the task check against `^[A-Za-z0-9_-]{1,80}$` before any write; a name that fails the check fails the execution and fires the alarm, with no write. The first scheduled run will show the real name;
   - whether `runTask.sync` alone fails on a non-zero exit: the Choice state makes this moot.
