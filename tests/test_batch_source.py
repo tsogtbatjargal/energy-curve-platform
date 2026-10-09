@@ -22,8 +22,44 @@ SECRET_NAMES = re.compile(r"key|secret|token|password|credential|eia", re.IGNORE
 ENV_NAMES = {"ECP_SOURCE", "ECP_STORE_URL"}
 
 
-def stack_files() -> list[Path]:
-    return sorted(p for p in STACK.rglob("*") if p.is_file() and ".terraform" not in p.parts)
+def stack_files(root: Path = ROOT) -> list[Path]:
+    """The stack's files as git sees them: tracked, or new and not ignored. Git-ignored files
+    (terraform.tfvars, backend.hcl, a per-instance TF_DATA_DIR) hold real values or binaries."""
+    argv = [
+        "git",
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        "infra/batch",
+    ]
+    out = subprocess.run(argv, cwd=root, check=True, capture_output=True, text=True).stdout  # noqa: S603, S607
+    return sorted(p for p in (root / name for name in out.split("\0") if name) if p.is_file())
+
+
+def text_of(p: Path) -> str:
+    return p.read_bytes().decode("utf-8", errors="replace")
+
+
+def findings(files: list[Path], root: Path = ROOT) -> list[str]:
+    """What the source scan objects to, as "<path>: <kind>". A matched value is never part of it."""
+    out = []
+    for p in files:
+        text, where = text_of(p), p.relative_to(root)
+        # A whole token: hex hashes (the provider lock file) contain 12-digit runs.
+        ids = set(re.findall(r"(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])", text))
+        if not ids <= PLACEHOLDER_ACCOUNTS:
+            out.append(f"{where}: account id other than a placeholder")
+        if any(
+            not a.endswith("@example.invalid")
+            for a in re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
+        ):
+            out.append(f"{where}: email address other than @example.invalid")
+        if "EIA_API_KEY" in text or "api_key" in text.lower():
+            out.append(f"{where}: EIA key name")
+    return out
 
 
 def parsed() -> dict[str, list]:
@@ -61,9 +97,7 @@ def test_no_key_or_secret_variable_and_none_sensitive() -> None:
 
 
 def test_the_eia_key_is_named_nowhere_in_the_stack() -> None:
-    for p in stack_files():
-        text = p.read_text()
-        assert "EIA_API_KEY" not in text and "api_key" not in text.lower(), p
+    assert [f for f in findings(stack_files()) if f.endswith("EIA key name")] == []
 
 
 def test_both_steps_run_synthetic_data_with_only_the_store_url() -> None:
@@ -79,16 +113,11 @@ def test_both_steps_run_synthetic_data_with_only_the_store_url() -> None:
 
 
 def test_no_account_id_but_placeholders() -> None:
-    for p in stack_files():
-        # A whole token: hex hashes (the provider lock file) contain 12-digit runs.
-        found = set(re.findall(r"(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])", p.read_text()))
-        assert found <= PLACEHOLDER_ACCOUNTS, p
+    assert [f for f in findings(stack_files()) if "account id" in f] == []
 
 
 def test_no_email_address_but_placeholders() -> None:
-    for p in stack_files():
-        for address in re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", p.read_text()):
-            assert address.endswith("@example.invalid"), p
+    assert [f for f in findings(stack_files()) if "email address" in f] == []
 
 
 def test_the_alert_address_has_no_default() -> None:
@@ -121,3 +150,45 @@ def test_exactly_the_stage2_blocks_depend_on_the_digest() -> None:
 def test_the_cluster_waits_for_the_explicit_service_linked_role() -> None:
     cluster = declared("resource")["aws_ecs_cluster.batch"]
     assert "aws_iam_service_linked_role.ecs" in str(cluster.get("depends_on"))
+
+
+# --- the file listing and the failure messages ---------------------------------------------------
+
+
+def _git(root: Path, *argv: str) -> None:
+    subprocess.run(["git", *argv], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
+
+
+def test_the_scan_lists_only_files_git_does_not_ignore(tmp_path: Path) -> None:
+    """A per-instance TF_DATA_DIR (`.terraform-foo/`) and git-ignored private files stay out."""
+    stack = tmp_path / "infra" / "batch"
+    (stack / ".terraform-foo").mkdir(parents=True)
+    (stack / ".terraform-foo" / "provider").write_bytes(b"\x81\x00\xff binary")
+    (stack / "main.tf").write_text("# tracked\n")
+    (stack / "new.tf").write_text("# not yet added, not ignored\n")
+    (stack / "private.tfvars").write_text('alert_email = "t@example.invalid"\n')
+    (tmp_path / ".gitignore").write_text("*.tfvars\n.terraform-*/\n")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "infra/batch/main.tf")
+    assert [p.name for p in stack_files(tmp_path)] == ["main.tf", "new.tf"]
+
+
+def test_findings_name_the_file_and_the_kind_never_the_value(tmp_path: Path) -> None:
+    stack = tmp_path / "infra" / "batch"
+    stack.mkdir(parents=True)
+    leaks = {
+        "acct.tf": ("999988887777", "account id"),
+        "mail.tf": ("someone@example.org", "email address"),
+        "key.tf": ("EIA_API_KEY", "EIA key name"),
+        "ok.tf": ("111111111111 t@example.invalid", None),
+    }
+    for name, (text, _) in leaks.items():
+        (stack / name).write_text(f"# {text}\n")
+    _git(tmp_path, "init", "-q")
+    got = findings(stack_files(tmp_path), tmp_path)
+    assert sorted(got) == [
+        "infra/batch/acct.tf: account id other than a placeholder",
+        "infra/batch/key.tf: EIA key name",
+        "infra/batch/mail.tf: email address other than @example.invalid",
+    ]
+    assert not any(text in " ".join(got) for text, kind in leaks.values() if kind)
