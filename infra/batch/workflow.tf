@@ -84,10 +84,14 @@ resource "aws_scheduler_schedule" "daily" {
     mode = "OFF"
   }
 
+  # The universal target, not the templated one, so the execution gets a name: Scheduler's
+  # execution ID, which becomes the run_id of both steps (ADR-0022). The input is written with
+  # format(), byte for byte: jsonencode would escape `<` and `>` and leave Scheduler no keyword
+  # to replace. The role needs only states:StartExecution on this state machine.
   target {
-    arn      = aws_sfn_state_machine.batch[0].arn
+    arn      = "arn:aws:scheduler:::aws-sdk:sfn:startExecution"
     role_arn = aws_iam_role.batch["scheduler"].arn
-    input    = jsonencode({})
+    input    = format("{\"StateMachineArn\":\"%s\",\"Name\":\"<aws.scheduler.execution-id>\",\"Input\":\"{}\"}", aws_sfn_state_machine.batch[0].arn)
 
     retry_policy {
       maximum_retry_attempts = 2

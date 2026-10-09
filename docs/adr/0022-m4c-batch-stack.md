@@ -1,6 +1,6 @@
 # 22. M4c: the batch stack, applied in two stages
 
-Date: 2026-10-08 · Status: **applied through stage 2; schedule disabled** (2026-10-09). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md). Plan 3 (enable the schedule) is not yet done.
+Date: 2026-10-08 · Status: **applied through stage 2; schedule disabled** (2026-10-09). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md). Plan 3 (enable the schedule, on the universal target) is coded but not yet planned or applied.
 
 ## Context
 M4a (the S3 store, ADR-0019) and M4b (the entry points and image, ADR-0020) are done. M4c is what remains: the `infra/batch` stack in the `ecp-workloads` member account (ADR-0021), the first image, and the first cloud run. Preconditions met: PLAN.md R1 (ADR-0017) and R2 (ADR-0018, re-accepted in the member account). The cloud runs synthetic data only, so R3 matters only for M6.
@@ -20,7 +20,7 @@ Verified read-only in the member account (2026-10-08): 0 ECR repositories; no `A
 | 2 | the pushed image's digest | The Lambda function and the ECS task definition, both on `<repository URL>@<digest>`; the state machine; the schedule, **disabled**; the failure alarm. 5 resources, plus a `data "aws_ecr_image"` lookup that fails the plan unless the digest is in the repository |
 
 - **All IAM is in stage 1.** Policies name their targets by ARNs built from fixed names, the account and the region, so they are known at plan time in both stages (R1) and stage 2 changes no IAM.
-- **A third plan** later sets `schedule_enabled = true` (one in-place update), after the first manual run and its replay pass.
+- **A third plan** later sets `schedule_enabled = true` (one in-place update, which also moves the schedule to the universal target, see below), after the first manual run and its replay pass.
 
 ### The pieces
 | Piece | Design |
@@ -78,7 +78,12 @@ A diff on this policy in the re-plan after stage 2 would mean Lambda rewrote it:
 - **A Standard execution name** is unique per state machine. The same name and input while it runs is idempotent. After it closes, or with other input, `StartExecution` returns `ExecutionAlreadyExists`, and the name can be reused 90 days after it closes (StartExecution API reference).
 - **So a new execution is never a replay.** It re-stages with a new retrieval time, giving a new `logical_input_id` and a watermark-only version (ADR-0020).
 - **The replay check** re-runs only the Fargate step on the same `run_id`: one `ecs run-task` with `task <run_id>`. The staged pages are the same, so the result must be `already_published` with the pointer unchanged. This is what a retry of the ECS step would do.
-- **Before the schedule is enabled,** confirm that Scheduler's generated execution names fit `^[A-Za-z0-9_-]{1,80}$`; otherwise set an explicit name.
+- **The schedule names its executions.** The AWS pages read for this decision (2026-10-09) do not state what name the templated Step Functions target passes to `StartExecution`, so the schedule moves to the **universal target** `arn:aws:scheduler:::aws-sdk:sfn:startExecution`:
+  - Its input is `{"StateMachineArn":"<this state machine>","Name":"<aws.scheduler.execution-id>","Input":"{}"}`. `Name` is a `StartExecution` request parameter (1 to 80 characters, unique per state machine); the context attribute `<aws.scheduler.execution-id>` is "the unique ID that EventBridge Scheduler assigns for each attempted invocation of a target", shown as `d32c5kddcf5bb8c3`.
+  - The docs give that ID only by example, not a format or a length. If it ever fails `^[A-Za-z0-9_-]{1,80}$`, the stage and the task refuse the `run_id` before any write, the execution fails and the alarm fires.
+  - A retried invocation has a new ID, so a duplicate execution is possible if a delivery was accepted but reported as failed. It is harmless: idempotency is keyed on the logical input, not the run_id (see above).
+  - The input is written with `format()`, not `jsonencode`, which would escape `<` and `>` and leave Scheduler no keyword to replace. A Terraform test and the plan check pin the exact bytes.
+  - The role keeps `states:StartExecution` on this state machine only: the universal-target page requires "the permissions to call the API operation you want your schedule to target", and that operation is `StartExecution`. Plan 3's first run confirms it.
 
 ### Exit codes
 `quarantined` exits 3 (ADR-0020). The Step Functions ECS integration page does not say whether `runTask.sync` fails on a non-zero container exit. So `ResultSelector` takes `Containers[0].ExitCode`, and the Choice state fails the execution on anything but 0. A missing exit code fails the state with a runtime error.
@@ -102,7 +107,7 @@ Locally, with rootless podman:
 | Gate | Stage 1 | Stage 2 |
 |---|---|---|
 | `policy_gate.py --stack batch` (ADR-0006 rules, R1, R2) | yes | yes |
-| `batch_plan_check.py` | `--stage 1`: from an empty state, exactly the 39 creates with their reviewed settings; every role and policy equals its template for this account, known at plan time; every role has the boundary | `--stage 2 --digest <approved>`: every stage-1 resource unchanged (so no IAM change); exactly the 5 creates; the digest found in the repository at plan time; both steps on that digest, synthetic only, with no key; no reserved concurrency; the schedule disabled; the alarm on the topic |
+| `batch_plan_check.py` | `--stage 1`: from an empty state, exactly the 39 creates with their reviewed settings; every role and policy equals its template for this account, known at plan time; every role has the boundary | `--stage 2 --digest <approved>`: every stage-1 resource unchanged (so no IAM change); exactly the 5 creates; the digest found in the repository at plan time; both steps on that digest, synthetic only, with no key; no reserved concurrency; the schedule disabled; the alarm on the topic. `--stage 3 --digest <approved>`: every other resource unchanged; exactly one in-place update of the schedule, only its state (to ENABLED) and its target (the universal target and the exact input above) |
 
 `batch_plan_check.py` also checks, for both stages:
 - a sound plan, with no output change;
@@ -131,14 +136,14 @@ Locally, with rootless podman:
 `tests/test_batch_source.py` enforces this, and the stage-2 check rejects any other environment.
 
 ### Cost (`ca-central-1`, AWS public price list, 2026-10-08)
-About **$0.27 a month**, or $0.45 with no free tier:
+About **$0.15 a month**, or $0.33 with no free tier (the ECR line below was corrected on 2026-10-09 from images assumed at 0.9 GB; the original estimate was $0.27 and $0.45):
 
 | Item | Monthly |
 |---|---|
 | Fargate (0.5 vCPU, 1 GB, a few minutes a day) | about $0.06 |
 | The task's public IPv4 address while it runs | about $0.01 |
 | S3 | about $0.01 |
-| ECR, at most 2 images of about 0.9 GB | at most $0.18 |
+| ECR, at most 2 images of about 0.32 GB (measured: `imageSizeInBytes` of the pushed image, stored compressed; about $0.03 a month each) | at most $0.06 |
 | The alarm (3 metrics) | $0.00 to $0.30 |
 | Lambda, Step Functions, Scheduler and logs | within the free tiers |
 
@@ -168,7 +173,7 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 5. **Build from `main`,** scan with trivy, and push by digest.
 6. **Plan 2 with that digest:** the gates, then the hash. Stop. Then apply and verify, including a no-change re-plan.
 7. **One manual execution** (expect `published`), then one replay `ecs run-task` (expect `already_published`, pointer unchanged).
-8. **Plan 3** enables the schedule.
+8. **Plan 3** enables the schedule and moves it to the universal target, then the first scheduled run is watched (name, success, alarm).
 9. **The evidence,** then the CI plan job and the publish workflow.
 
 **Stop rules:** any gate not OK; a stage-2 plan that changes a stage-1 resource or any IAM; a digest other than the approved one; any excluded resource; more than about $1 without a fresh go; a failed first run or replay. Stop and report, with no retry, import or workaround.
@@ -183,5 +188,5 @@ The trivy findings these exclusions raise are each ignored with the reason in th
   - **The first run** `published`, and its replay returned `already_published` with the pointer unchanged.
 - **Learned in the applies:** the provider's read-back after a create leaves 18 (stage 1) and 4 (stage 2) refresh-drift entries, all null → empty values, which two reviewed refresh-only applies recorded. A stage-2 gate that refuses drift needs them recorded first; drift is judged from the plan JSON, because the text output showed only 1 of the 18.
 - **Not yet verified:**
-  - Scheduler's execution-name format: the documentation pages read (Scheduler's templated targets, Step Functions' "Using Amazon EventBridge Scheduler") do not state the name it passes to `StartExecution`. The state machine uses that name as `run_id`, which the stage and the task check against `^[A-Za-z0-9_-]{1,80}$` before any write; a name that fails the check fails the execution and fires the alarm, with no write. The first scheduled run will show the real name;
+  - The universal target (see above), at plan 3's first scheduled run: that the `Name` in the input is accepted, that the execution ID fits `^[A-Za-z0-9_-]{1,80}$` and differs per run, and that the scheduler role needs nothing beyond `states:StartExecution`. A failure fails the execution before any write and fires the alarm;
   - whether `runTask.sync` alone fails on a non-zero exit: the Choice state makes this moot.

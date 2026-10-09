@@ -176,3 +176,31 @@ run "plan3_enables_the_schedule" {
     error_message = "schedule_enabled = true enables the schedule."
   }
 }
+
+# Plan 3 (ADR-0022): the universal target, so the execution gets a name Scheduler chooses. The input
+# is written byte for byte: `jsonencode` would turn `<` and `>` into \u003c and \u003e and leave
+# Scheduler no keyword to replace.
+run "plan3_starts_the_state_machine_named_by_the_schedulers_execution_id" {
+  command = apply
+  variables {
+    image_digest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    schedule_enabled = true
+  }
+
+  assert {
+    condition     = aws_scheduler_schedule.daily[0].target[0].arn == "arn:aws:scheduler:::aws-sdk:sfn:startExecution"
+    error_message = "The schedule uses the universal Step Functions StartExecution target."
+  }
+  assert {
+    condition     = aws_scheduler_schedule.daily[0].target[0].input == "{\"StateMachineArn\":\"${aws_sfn_state_machine.batch[0].arn}\",\"Name\":\"<aws.scheduler.execution-id>\",\"Input\":\"{}\"}"
+    error_message = "The target input is the exact reviewed bytes: the state machine, Name = Scheduler's execution ID, an empty input."
+  }
+  assert {
+    condition     = !strcontains(aws_scheduler_schedule.daily[0].target[0].input, "u003")
+    error_message = "The input must not be JSON-escaped."
+  }
+  assert {
+    condition     = aws_scheduler_schedule.daily[0].target[0].role_arn == aws_iam_role.batch["scheduler"].arn
+    error_message = "The schedule keeps its own role."
+  }
+}

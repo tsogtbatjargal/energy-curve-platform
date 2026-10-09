@@ -2,7 +2,7 @@
 
 The plans are synthetic but shaped like `terraform show -json` (Terraform 1.15.8) for the batch
 stack in ecp-workloads: stage 1 from an empty state, stage 2 with stage 1 applied. Account IDs and
-the digest are placeholders.
+the digest are placeholders. Stage 3 enables the schedule and moves it to the universal target.
 """
 
 import copy
@@ -25,6 +25,13 @@ POLICIES = Path(__file__).parents[1] / "infra" / "batch" / "policies"
 VALUES = {"account_id": MEMBER, "region": REGION}
 ROLES = ("stage", "task", "exec", "sfn", "scheduler")
 MOD = "module.data_bucket"
+SM_ARN = f"arn:aws:states:{REGION}:{MEMBER}:stateMachine:ecp-batch"
+SCHEDULE = "aws_scheduler_schedule.daily[0]"
+UNIVERSAL_TARGET = "arn:aws:scheduler:::aws-sdk:sfn:startExecution"
+# The exact bytes Scheduler receives: the keyword stays literal (no \u003c / \u003e escaping).
+SCHEDULE_INPUT = (
+    '{"StateMachineArn":"' + SM_ARN + '","Name":"<aws.scheduler.execution-id>","Input":"{}"}'
+)
 
 
 def template(name: str) -> str:
@@ -118,8 +125,13 @@ def stage2_creates(digest: str = DIGEST) -> dict[str, dict[str, Any]]:
             "container_definitions": json.dumps([container])},
         "aws_sfn_state_machine.batch[0]": {"name": "ecp-batch", "type": "STANDARD",
                                            "role_arn": role_arn("sfn")},
-        "aws_scheduler_schedule.daily[0]": {"name": "ecp-batch-daily", "state": "DISABLED",
-                                            "target": [{"role_arn": role_arn("scheduler")}]},
+        SCHEDULE: {
+            "name": "ecp-batch-daily", "state": "DISABLED",
+            "schedule_expression": "cron(0 12 * * ? *)",
+            "schedule_expression_timezone": "America/Toronto",
+            "flexible_time_window": [{"mode": "OFF"}],
+            "target": [{"arn": SM_ARN, "role_arn": role_arn("scheduler"), "input": "{}",
+                        "retry_policy": [{"maximum_retry_attempts": 2}]}]},
         "aws_cloudwatch_metric_alarm.failures[0]": {"alarm_name": "ecp-batch-failures",
                                                     "alarm_actions": [TOPIC]},
     }  # fmt: skip
@@ -162,6 +174,24 @@ def configuration() -> dict[str, Any]:
 
 
 def plan(stage: int = 1, digest: str = DIGEST) -> dict[str, Any]:
+    """Stage 3 is stage 2 applied, then the schedule updated in place."""
+    if stage == 3:
+        p = plan(2, digest)
+        before = stage2_creates(digest)[SCHEDULE]
+        after = copy.deepcopy(before)
+        after["state"] = "ENABLED"
+        after["target"][0].update(arn=UNIVERSAL_TARGET, input=SCHEDULE_INPUT)
+        for r in p["resource_changes"]:
+            if r["address"] == SCHEDULE:
+                r["change"].update(actions=["update"], before=before, after=after)
+            elif r["change"]["actions"] == ["create"]:  # stage 2 is applied
+                r["change"].update(actions=["no-op"], before=r["change"]["after"])
+        p["variables"]["schedule_enabled"] = {"value": True}
+        return p
+    return _plan(stage, digest)
+
+
+def _plan(stage: int, digest: str) -> dict[str, Any]:
     prior = [
         data("data.aws_caller_identity.current", {"account_id": MEMBER}),
         data("data.aws_organizations_organization.this", {"master_account_id": MANAGEMENT}),
@@ -209,7 +239,7 @@ def stack(tmp_path: Path) -> Path:
 
 
 def run(p: dict[str, Any], stage: int, stack: Path, digest: str | None = DIGEST) -> list[str]:
-    problems, _ = bpc.check(p, stage, digest if stage == 2 else None, stack)
+    problems, _ = bpc.check(p, stage, digest if stage >= 2 else None, stack)
     return problems
 
 
@@ -580,3 +610,117 @@ def test_main_exits_nonzero_and_prints_problems(tmp_path: Path, stack: Path, cap
     path.write_text(json.dumps(plan(2)))
     assert bpc.main(["--stage", "2", "--digest", DIGEST, "--stack-dir", str(stack),
                      str(path)]) == 0  # fmt: skip
+
+
+# --- stage 3: enable the schedule, on the universal target ------------------------------------
+
+
+def schedule_after(p: dict[str, Any]) -> dict[str, Any]:
+    return change(p, SCHEDULE)["change"]["after"]
+
+
+def test_the_reviewed_stage3_plan_passes(stack: Path) -> None:
+    problems, report = bpc.check(plan(3), 3, DIGEST, stack)
+    assert problems == []
+    assert "summary: stage 3, 0 to add, 1 to change, 0 to destroy" in report
+
+
+def test_stage3_needs_the_approved_digest(stack: Path) -> None:
+    assert any("approved digest" in x for x in run(plan(3), 3, stack, digest=OTHER_DIGEST))
+
+
+def test_stage3_needs_the_schedule_enabled_variable(stack: Path) -> None:
+    p = plan(3)
+    p["variables"]["schedule_enabled"] = {"value": False}
+    assert any("schedule_enabled" in x for x in run(p, 3, stack))
+
+
+def test_stage3_refuses_a_plan_without_the_schedule_update(stack: Path) -> None:
+    p = plan(3)
+    change(p, SCHEDULE)["change"]["actions"] = ["no-op"]
+    assert f"missing change: update {SCHEDULE}" in run(p, 3, stack)
+
+
+@pytest.mark.parametrize("actions", [["create"], ["delete"], ["delete", "create"]])
+def test_stage3_refuses_to_create_or_replace_the_schedule(stack: Path, actions: list[str]) -> None:
+    p = plan(3)
+    change(p, SCHEDULE)["change"]["actions"] = actions
+    assert f"unexpected change: {'+'.join(actions)} {SCHEDULE}" in run(p, 3, stack)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "aws_lambda_function.stage[0]", "aws_ecs_task_definition.pipeline[0]",
+        "aws_sfn_state_machine.batch[0]", "aws_cloudwatch_metric_alarm.failures[0]",
+        'aws_iam_role_policy.batch["scheduler"]', "aws_ecr_repository_policy.batch",
+    ],
+)  # fmt: skip
+def test_stage3_refuses_any_other_change(stack: Path, address: str) -> None:
+    p = plan(3)
+    change(p, address)["change"]["actions"] = ["update"]
+    assert f"unexpected change: update {address}" in run(p, 3, stack)
+
+
+def test_stage3_refuses_a_missing_stage2_resource(stack: Path) -> None:
+    p = plan(3)
+    p["resource_changes"] = [
+        r for r in p["resource_changes"] if r["address"] != "aws_sfn_state_machine.batch[0]"
+    ]
+    assert any("aws_sfn_state_machine.batch[0]" in x for x in run(p, 3, stack))
+
+
+def escaped(text: str) -> str:
+    return text.replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("state",), "DISABLED"),
+        (("name",), "other"),
+        (("schedule_expression",), "rate(5 minutes)"),
+        (("schedule_expression_timezone",), "UTC"),
+        (("flexible_time_window", 0, "mode"), "FLEXIBLE"),
+        (("target", 0, "arn"), SM_ARN),  # the templated target: no say over the name
+        (("target", 0, "arn"), "arn:aws:scheduler:::aws-sdk:sfn:startSyncExecution"),
+        (("target", 0, "role_arn"), role_arn("sfn")),
+        (("target", 0, "retry_policy", 0, "maximum_retry_attempts"), 3),
+        (("target", 0, "input"), SCHEDULE_INPUT.replace("<aws.scheduler.execution-id>", "fixed")),
+        (("target", 0, "input"), SCHEDULE_INPUT.replace('"Input":"{}"', '"Input":"{\\"a\\":1}"')),
+        (("target", 0, "input"), SCHEDULE_INPUT.replace("ecp-batch", "other-machine")),
+        (("target", 0, "input"), escaped(SCHEDULE_INPUT)),  # what jsonencode would write
+        (("target", 0, "input"), SCHEDULE_INPUT.replace(" ", "") + " "),
+        (("target", 0, "input"), json.dumps(json.loads(SCHEDULE_INPUT), indent=1)),
+    ],
+)  # fmt: skip
+def test_stage3_refuses_a_schedule_that_is_not_the_reviewed_one(
+    stack: Path, path: tuple[Any, ...], value: Any
+) -> None:
+    p = plan(3)
+    node = schedule_after(p)
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    dotted = ".".join(map(str, path))
+    assert f"{SCHEDULE}: {dotted} is not the reviewed value" in run(p, 3, stack)
+
+
+def test_stage3_refuses_a_change_beyond_the_state_and_the_target(stack: Path) -> None:
+    p = plan(3)
+    schedule_after(p)["description"] = "something else"
+    assert f"{SCHEDULE}: changes more than the state and the target (description)" in run(
+        p, 3, stack
+    )
+
+
+def test_stage3_refuses_a_target_change_beyond_the_arn_and_the_input(stack: Path) -> None:
+    p = plan(3)
+    schedule_after(p)["target"][0]["dead_letter_config"] = [{"arn": "x"}]
+    assert any("changes more than the state and the target" in x for x in run(p, 3, stack))
+
+
+def test_stage3_refuses_an_unknown_input(stack: Path) -> None:
+    p = plan(3)
+    change(p, SCHEDULE)["change"]["after_unknown"] = {"target": [{"input": True}]}
+    assert f"{SCHEDULE}: the target is not known at plan time" in run(p, 3, stack)
