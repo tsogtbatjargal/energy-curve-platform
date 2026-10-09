@@ -7,6 +7,9 @@
 *credentials*.json
 *.tfvars
 !*.tfvars.example
+# The batch stack's deployed image digest and schedule flag are tracked: a rollout is a PR that
+# changes this file, a rollback is a revert (ADR-0022).
+!infra/batch/image.auto.tfvars
 
 # Python
 __pycache__/

@@ -35,9 +35,13 @@ mock_provider "aws" {
   }
 }
 
+# The tracked image.auto.tfvars (what is deployed) is loaded by `terraform test` too, so the
+# stages start from their own inputs: no image, schedule off.
 variables {
   expected_account_id = "333333333333"
   alert_email         = "alerts@example.invalid"
+  image_digest        = ""
+  schedule_enabled    = false
 }
 
 # --- stage 1: no image yet ------------------------------------------------------------------------
@@ -202,5 +206,22 @@ run "plan3_starts_the_state_machine_named_by_the_schedulers_execution_id" {
   assert {
     condition     = aws_scheduler_schedule.daily[0].target[0].role_arn == aws_iam_role.batch["scheduler"].arn
     error_message = "The schedule keeps its own role."
+  }
+}
+
+# CI plans this stack with a placeholder alert address (ADR-0022): the subscription ignores endpoint
+# changes, so a different address plans no replacement. Changing the address later is a deliberate
+# replace step (taint, or remove the ignore).
+run "a_different_alert_address_does_not_replace_the_subscription" {
+  command = plan
+  variables {
+    image_digest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    schedule_enabled = true
+    alert_email      = "ci@example.invalid"
+  }
+
+  assert {
+    condition     = aws_sns_topic_subscription.email.endpoint == "alerts@example.invalid"
+    error_message = "The subscription keeps its endpoint when alert_email changes (lifecycle ignore_changes)."
   }
 }
