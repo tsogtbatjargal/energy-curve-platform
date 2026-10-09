@@ -28,7 +28,7 @@ Verified read-only in the member account (2026-10-08): 0 ECR repositories; no `A
 | State | The member state bucket, key `batch/terraform.tfstate`, `use_lockfile`; a git-ignored `backend.hcl` |
 | Account guard | `expected_account_id`; postconditions that the caller is that account and is not the organization's management account |
 | Data bucket | `terraform-aws-modules/s3-bucket/aws` at exactly 5.16.2. SSE-S3, versioning on, owner-enforced, public access blocked, deny non-TLS. Lifecycle: `store/staging/` expires after 7 days; old versions after 30 days; incomplete uploads aborted after 1 day. The store is `s3://<bucket>/store` |
-| ECR | `ecp-batch`: immutable tags, scan on push, AES256, keep the 5 newest images (2 until 2026-10-09) |
+| ECR | `ecp-batch`: immutable tags, scan on push, AES256, keep the 2 newest images (the count rises to 5 with the publish workflow) |
 | Lambda (`cloud.lambda_handler`) | Image by digest, no VPC, 512 MB, 60 s. **No reserved concurrency** (below). Role `ecp-batch-stage`: `s3:PutObject` on `store/staging/*`, and its own log stream |
 | Fargate (`cloud.task_main`) | 0.5 vCPU, **1 GB** (below). Entry point `python -m energy_curves.cloud`; the state machine passes `task <run_id>`. Role `ecp-batch-task`: get and put under `store/`, and `s3:ListBucket`, so a missing key is a 404 rather than a 403. Role `ecp-batch-exec`: the ECR pull for this repository and its own log stream |
 | Network (ADR-0004 batch profile) | Public subnets, a public IP for the task, egress 443 only, no ingress. No NAT gateway, no interface endpoints (a Rego rule now enforces this outside the demo stack) |
@@ -136,14 +136,14 @@ Locally, with rootless podman:
 `tests/test_batch_source.py` enforces this, and the stage-2 check rejects any other environment.
 
 ### Cost (`ca-central-1`, AWS public price list, 2026-10-08)
-About **$0.25 a month**, or $0.43 with no free tier (the ECR line below was corrected on 2026-10-09 from images assumed at 0.9 GB, which gave $0.27 and $0.45, and again for keeping 5 images instead of 2):
+About **$0.15 a month**, or $0.33 with no free tier (the ECR line below was corrected on 2026-10-09 from images assumed at 0.9 GB; the original estimate was $0.27 and $0.45; keeping 5 images instead of 2, planned with the publish workflow, adds at most $0.10):
 
 | Item | Monthly |
 |---|---|
 | Fargate (0.5 vCPU, 1 GB, a few minutes a day) | about $0.06 |
 | The task's public IPv4 address while it runs | about $0.01 |
 | S3 | about $0.01 |
-| ECR, at most 5 images of about 0.32 GB (measured: `imageSizeInBytes` of the pushed image, stored compressed; about $0.03 a month each) | at most $0.16 |
+| ECR, at most 2 images of about 0.32 GB (measured: `imageSizeInBytes` of the pushed image, stored compressed; about $0.03 a month each) | at most $0.06 |
 | The alarm (3 metrics) | $0.00 to $0.30 |
 | Lambda, Step Functions, Scheduler and logs | within the free tiers |
 
@@ -179,9 +179,9 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 ### The deployment inputs are committed, and CI plans the stack (M4c-2, part A, 2026-10-09)
 - **`infra/batch/image.auto.tfvars` is tracked** (the one exception to the `*.tfvars` ignore rule) and holds exactly `image_digest = "<the deployed digest>"` and `schedule_enabled = true`. A plain plan now describes the deployed state. **A rollout is a PR that changes the digest line, and a rollback is a revert.** A `-var` on the command line still wins, so a stage-1-style plan needs `-var image_digest=`. The tests pin that the file holds only those two assignments and is not ignored; the Terraform tests set their own inputs, because `terraform test` loads this file too.
 - **The alert address stays out of CI.** The subscription has `lifecycle { ignore_changes = [endpoint] }`, and CI plans with `alert_email = "ci@example.invalid"`. An email subscription's endpoint cannot change in place, so **changing the address later is a deliberate replace step** (`terraform apply -replace=aws_sns_topic_subscription.email`, which leaves the new subscription pending confirmation), not something a plan does by accident. Nothing reads the live subscription from CI.
-- **The ECR lifecycle keeps 5 images** (was 2): a publish or two cannot expire the deployed image before a rollout. The digest guard (`data.aws_ecr_image`) still fails a plan whose digest is not in the repository; a rollout check will also confirm that.
+- **The ECR lifecycle keeps 2 images for now.** The count goes up to **5 together with the publish workflow**, as part of that work, so that a publish or two cannot expire the deployed image before a rollout: changing it replaces the lifecycle policy (delete, then put; the provider reports `cannot_update`), which needs its own reviewed plan and a check mode that accepts exactly that replace. The digest guard (`data.aws_ecr_image`) already fails a plan whose digest is not in the repository; a rollout check will also confirm it.
 - **The CI job** (`terraform-plan`, `batch` added to the matrix) assumes the member plan role, plans with `-lock-timeout=60s`, and prints only the `Plan:` / `No changes` line (a failed plan prints the first line of each error with 12-digit numbers masked). The plan and its JSON go to files that are removed afterwards. It then runs the policy gate with `--stack batch --stack-dir .`. It is **informational**: not a required check, so an `infra/batch` change merged but not yet applied shows as a change without blocking.
-- **This change's own live effect:** the lifecycle policy count moves from 2 to 5. A plan of the real state shows `aws_ecr_lifecycle_policy.batch` as a **replace** (delete, then put: the provider reports `cannot_update`), nothing else, and no change to the subscription. That needs one reviewed apply. The stage checks today accept stage 1, 2 and 3 shapes only, so applying it needs a new check mode (one replace of that resource with the policy as reviewed, everything else no-op), and CI's steady state a "current" mode (all no-op); neither is built yet.
+- **Steady state:** with these inputs a plan of the real state shows `No changes` (read-only, streamed JSON, 2026-10-09). CI's steady state could later get a "current" check mode (all resources no-op); it is not built.
 
 **Stop rules:** any gate not OK; a stage-2 plan that changes a stage-1 resource or any IAM; a digest other than the approved one; any excluded resource; more than about $1 without a fresh go; a failed first run or replay. Stop and report, with no retry, import or workaround.
 

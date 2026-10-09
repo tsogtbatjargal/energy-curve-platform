@@ -202,11 +202,6 @@ def test_the_subscription_ignores_endpoint_changes() -> None:
     assert "endpoint" in str(sub.get("lifecycle")), "CI plans with a placeholder address"
 
 
-def test_the_ecr_lifecycle_keeps_five_images() -> None:
-    text = (STACK / "ecr.tf").read_text()
-    assert 'countType = "imageCountMoreThan", countNumber = 5' in text
-
-
 def test_the_tracked_tfvars_hold_only_the_image_digest_and_the_schedule_flag() -> None:
     text = (STACK / "image.auto.tfvars").read_text()
     lines = [x for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")]
