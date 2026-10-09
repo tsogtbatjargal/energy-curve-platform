@@ -434,7 +434,10 @@ def check(
             digest = ""
         if variable(plan, "image_digest") != digest:
             problems.append("image_digest is not the approved digest")
-        if variable(plan, "schedule_enabled") is not True:
+        # `terraform show -json` records a -var value as a string; a bool never appears, but
+        # `1 == True` in Python, so test for True by identity.
+        enabled = variable(plan, "schedule_enabled")
+        if not (enabled is True or enabled == "true"):
             problems.append("stage 3 needs schedule_enabled = true")
         image = prior(plan, "data.aws_ecr_image.batch[0]") or {}
         if not digest or image.get("image_digest") != digest:

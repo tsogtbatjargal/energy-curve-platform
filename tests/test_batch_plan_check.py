@@ -724,3 +724,51 @@ def test_stage3_refuses_an_unknown_input(stack: Path) -> None:
     p = plan(3)
     change(p, SCHEDULE)["change"]["after_unknown"] = {"target": [{"input": True}]}
     assert f"{SCHEDULE}: the target is not known at plan time" in run(p, 3, stack)
+
+
+# --- the plan JSON records every -var value as a string -----------------------------------------
+
+
+def as_recorded(p: dict[str, Any]) -> dict[str, Any]:
+    """Variables as `terraform show -json` records them (1.15.8, `-var` on the command line):
+    every value is a string, a bool as "true" or "false"."""
+    for entry in p["variables"].values():
+        entry["value"] = (
+            str(entry["value"]).lower() if isinstance(entry["value"], bool) else entry["value"]
+        )
+    return p
+
+
+@pytest.mark.parametrize("stage", [1, 2, 3])
+def test_a_plan_with_every_variable_recorded_as_a_string_passes(stack: Path, stage: int) -> None:
+    p = as_recorded(plan(stage))
+    assert all(isinstance(v["value"], str) for v in p["variables"].values())
+    assert run(p, stage, stack) == []
+
+
+@pytest.mark.parametrize("value", [True, "true"])
+def test_stage3_accepts_schedule_enabled_true_as_a_bool_or_a_string(
+    stack: Path, value: Any
+) -> None:
+    p = plan(3)
+    p["variables"]["schedule_enabled"] = {"value": value}
+    assert run(p, 3, stack) == []
+
+
+@pytest.mark.parametrize("value", ["false", "True", "TRUE", 1, "1", False, None, "", "yes"])
+def test_stage3_refuses_any_other_schedule_enabled_value(stack: Path, value: Any) -> None:
+    p = plan(3)
+    p["variables"]["schedule_enabled"] = {"value": value}
+    assert "stage 3 needs schedule_enabled = true" in run(p, 3, stack)
+
+
+def test_stage3_refuses_a_missing_schedule_enabled_variable(stack: Path) -> None:
+    p = plan(3)
+    del p["variables"]["schedule_enabled"]
+    assert "stage 3 needs schedule_enabled = true" in run(p, 3, stack)
+
+
+def test_stage3_still_needs_the_schedule_planned_enabled(stack: Path) -> None:
+    p = as_recorded(plan(3))
+    schedule_after(p)["state"] = "DISABLED"
+    assert f"{SCHEDULE}: state is not the reviewed value" in run(p, 3, stack)
