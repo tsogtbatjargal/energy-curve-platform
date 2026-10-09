@@ -143,7 +143,7 @@ jobs:
       - name: build
         run: docker build --platform linux/amd64 -t ecp-batch:ci .
       - name: scan the image for fixed HIGH/CRITICAL vulnerabilities
-        run: trivy image --exit-code 1 --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed ecp-batch:ci
+        run: trivy image --exit-code 1 --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed ecp-batch:ci
       - name: smoke test both entry points
         run: |
           store="$(mktemp -d)" && chmod 777 "$store"
