@@ -135,11 +135,13 @@ So a hash of the plan JSON alone would not change when the actions changed.
 *Status: implemented and applied ([ADR-0018](adr/0018-workload-permissions-boundary.md)): `infra/bootstrap/boundary.tf` and `policies/*.json.tftpl`, plus the boundary rule in `policy/terraform/iam.rego`. The deny list also covers `DetachRolePolicy`, `DeleteRolePolicy` and `DeleteRolePermissionsBoundary`, and the rule covers every stack except `bootstrap`. Applied on 2026-10-04 from the approved saved plan; the `simulate-principal-policy` acceptance passed with 13 cases and 0 differences ([evidence](evidence/r2-postapply-2026-10-04.md)).*
 
 **R3. Third-party price data stays out of public outputs until redistribution rights are confirmed (ADR-0011).**
+
+*Status: decided 2026-10-10 ([ADR-0011](adr/0011-third-party-data-rights.md) addendum): public outputs are synthetic only.*
 - **Sources:** EIA serves WTI and Brent spot from Refinitiv (an LSEG business) and futures from NYMEX (CME Group). EIA's reuse policy excludes material licensed from third parties, and no redistribution grant was found.
 - **Rules until rights are confirmed:**
   - No real price values in the public repo. Test fixtures copy EIA's response *structure* but use synthetic values.
   - Real data lives only in a git-ignored local cache.
-  - Before M6 publishes the GitHub Pages snapshot, decide what may be shown publicly: synthetic data, derived parameters only, or confirmed-licensed data.
+  - ~~Before M6 publishes the GitHub Pages snapshot, decide what may be shown publicly~~ **Decided: synthetic data only.** No public output (the GitHub Pages snapshot, screenshots, the video, the README) shows or derives from real EIA prices. Real data stays in the git-ignored `data/`, for local use.
 
 ## Milestones
 
