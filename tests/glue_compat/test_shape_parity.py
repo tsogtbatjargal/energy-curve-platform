@@ -6,6 +6,9 @@ rounding-boundary flip is the only allowed difference, and it is reported rather
 """
 
 import hashlib
+import os
+import subprocess
+import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -267,3 +270,67 @@ def test_main_writes_the_parameters_and_their_hash(spark, tmp_path: Path) -> Non
     assert (out / "shape_params.sha256" / "part-00000").read_text().strip() == digest
     reference = shape.estimate_shape(polars_frame(list(history(SHAPE_SERIES, *SLICE))), SLICE)
     assert digest == reference.params_sha256
+
+
+# --- the built bundle, shipped the way Glue ships it ---------------------------------------------
+
+REFERENCE_SHA256 = "4a111aa831712d152a387c8c8dcd9687132241ea0488a05dbdc925eacf253af4"
+
+
+def submit(tmp_path: Path, master: str, py_files: list[Path]) -> subprocess.CompletedProcess[str]:
+    """Run jobs/glue/shape_job.py under spark-submit with an interpreter that has no site-packages,
+    so the package can only come from --py-files (as on a Glue executor)."""
+    import pyspark
+
+    spark_home = Path(pyspark.__file__).parent
+    isolated = tmp_path / "python-isolated"
+    isolated.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n')
+    isolated.chmod(0o755)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "SPARK_HOME": str(spark_home),
+        "PYSPARK_PYTHON": str(isolated),
+        "PYSPARK_DRIVER_PYTHON": str(isolated),
+    }
+    if "JAVA_HOME" in os.environ:
+        env["JAVA_HOME"] = os.environ["JAVA_HOME"]
+    command = [
+        str(spark_home / "bin" / "spark-submit"),
+        "--master", master,
+        "--conf", "spark.ui.enabled=false",
+        *(["--py-files", ",".join(map(str, py_files))] if py_files else []),
+        str(Path(__file__).parents[2] / "jobs" / "glue" / "shape_job.py"),
+        "--partitions", "8",
+        "--output", str(tmp_path / "out"),
+    ]  # fmt: skip
+    return subprocess.run(  # noqa: S603
+        command, env=env, capture_output=True, text=True, timeout=600, check=False
+    )
+
+
+def test_the_built_bundle_gives_the_reference_hash_on_separate_executors(tmp_path: Path) -> None:
+    """The cloud-shaped run: the job script and only the built zip, two executor processes (each
+    with its own Python worker), no package on the path. It must print the reference hash."""
+    import build_glue_bundle
+
+    bundle = tmp_path / "energy_curves_m5.zip"
+    build_glue_bundle.write(bundle)
+    done = submit(tmp_path, "local-cluster[2,1,1024]", [bundle])
+    assert done.returncode == 0, done.stderr[-3000:]
+    out = tmp_path / "out"
+    assert (out / "shape_params.sha256" / "part-00000").read_text().strip() == REFERENCE_SHA256
+    text = (out / "shape_params.csv" / "part-00000").read_text()
+    assert hashlib.sha256(text.split("\n", 1)[1].encode()).hexdigest() == REFERENCE_SHA256
+
+
+def test_without_the_bundle_the_same_run_cannot_import_the_package(tmp_path: Path) -> None:
+    """The control: the isolation is real, so the test above proves the zip carries the package."""
+    done = submit(tmp_path, "local[2]", [])
+    assert done.returncode != 0
+    assert "No module named 'energy_curves'" in done.stdout + done.stderr
+
+
+def test_the_reference_hash_is_what_the_polars_reference_gives_on_the_full_history() -> None:
+    reference = shape.estimate_shape(polars_frame(list(history(SHAPE_SERIES, *FULL))))
+    assert reference.params_sha256 == REFERENCE_SHA256

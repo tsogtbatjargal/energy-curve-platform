@@ -49,3 +49,6 @@ backend*.hcl
 
 # Local db-backup output (may contain real alert history)
 backups/
+
+# The Glue stack builds its bundle here (scripts/build_glue_bundle.py).
+infra/glue/build/
