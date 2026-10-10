@@ -15,7 +15,8 @@ The plan must be exactly the 13 creates of the reviewed stack, from an empty sta
 - the job role: the workload boundary, and trust and inline policy equal to the reviewed templates
   for this account, known at plan time;
 - the log group, and the Glue job with every setting and argument exactly as reviewed (Glue 5.1,
-  two G.1X workers, a 10-minute cap, no retries, no connection, no Data Catalog, no PyPI modules).
+  two G.1X workers, a 10-minute cap, no retries, no connection, no Data Catalog, no PyPI modules;
+  the job's six own arguments are all passed, since the script defaults none).
 Nothing else: no crawler, catalog, trigger, endpoint, security configuration, KMS key, alarm,
 network or any other service. Also: a sound plan (not errored, complete, no deferred changes, no
 drift, no output changes), ca-central-1, the caller is expected_account_id and not the management
@@ -114,8 +115,12 @@ def arguments(bucket: str) -> dict[str, str]:
         "--enable-continuous-cloudwatch-log": "true",
         "--continuous-log-logGroup": "/aws-glue/ecp-shape",
         "--enable-continuous-log-filter": "true",
-        "--output": f"s3://{bucket}/m5/shape",
+        "--start": "1983-01-03",
+        "--end": "2024-04-05",
+        "--window-start": "2014-01-01",
+        "--window-end": "2024-04-05",
         "--partitions": "8",
+        "--output": f"s3://{bucket}/m5/shape",
     }
 
 

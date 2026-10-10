@@ -32,7 +32,11 @@ resource "aws_glue_job" "shape" {
     "--enable-continuous-cloudwatch-log" = "true"
     "--continuous-log-logGroup"          = aws_cloudwatch_log_group.glue.name
     "--enable-continuous-log-filter"     = "true"
-    "--output"                           = local.output_url
+    "--start"                            = "1983-01-03"
+    "--end"                              = "2024-04-05"
+    "--window-start"                     = "2014-01-01"
+    "--window-end"                       = "2024-04-05"
     "--partitions"                       = "8"
+    "--output"                           = local.output_url
   }
 }

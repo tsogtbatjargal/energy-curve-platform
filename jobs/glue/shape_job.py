@@ -13,6 +13,8 @@ nothing is read from outside the job). Remote output paths are exercised in M5b.
 from __future__ import annotations
 
 import argparse
+import logging
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -30,6 +32,7 @@ from energy_curves.curves.shape_core import (
 )
 from energy_curves.synthetic_prices import SHAPE_SERIES, history
 
+LOG = logging.getLogger("shape_job")
 FUTURES = tuple(s for s in SHAPE_SERIES if s != "RWTC")
 
 
@@ -131,17 +134,38 @@ def _write(spark: Any, text: str, path: str) -> None:
     spark.sparkContext.parallelize([text.rstrip("\n")], 1).saveAsTextFile(path)
 
 
+def iso_date(text: str) -> date:
+    """YYYY-MM-DD only: Python 3.11's fromisoformat also takes 20140101, easy to mistype."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {text!r}")
+    try:
+        return date.fromisoformat(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
+    """The job's own arguments, all required, none defaulted, no abbreviations. Glue appends its
+    own arguments to the command line (`--JOB_NAME`, the continuous-log flags, internal ones), so
+    anything unrecognized is ignored and logged by name only: the values can be URLs and ids."""
+    parser = argparse.ArgumentParser(prog="shape_job", allow_abbrev=False)
+    parser.add_argument("--start", type=iso_date, required=True)
+    parser.add_argument("--end", type=iso_date, required=True)
+    parser.add_argument("--window-start", type=iso_date, required=True)
+    parser.add_argument("--window-end", type=iso_date, required=True)
+    parser.add_argument("--partitions", type=int, required=True)
+    parser.add_argument("--output", required=True)
+    args, unknown = parser.parse_known_args(argv)
+    names = sorted({a.split("=", 1)[0] for a in unknown if a.startswith("--")})
+    if names:
+        LOG.info("ignoring %d arguments added by the runtime: %s", len(names), ", ".join(names))
+    return args
+
+
 def main(argv: list[str] | None = None, spark: Any = None) -> str:
     """Generate the history, estimate the shape, write the parameters and their SHA-256 under
     --output. Returns the SHA-256."""
-    parser = argparse.ArgumentParser(prog="shape_job")
-    parser.add_argument("--start", type=date.fromisoformat, default=date(1983, 1, 3))
-    parser.add_argument("--end", type=date.fromisoformat, default=date(2024, 4, 5))
-    parser.add_argument("--window-start", type=date.fromisoformat, default=WINDOW[0])
-    parser.add_argument("--window-end", type=date.fromisoformat, default=WINDOW[1])
-    parser.add_argument("--partitions", type=int, default=8)
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args(argv)
+    args = parse_arguments(argv)
     if spark is None:
         from pyspark.sql import SparkSession
 
@@ -157,4 +181,5 @@ def main(argv: list[str] | None = None, spark: Any = None) -> str:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     main()
