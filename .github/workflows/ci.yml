@@ -26,9 +26,13 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       ECP_REQUIRE_VALKEY: "1" # cache and event tests fail rather than skip when Valkey is missing
       ECP_REQUIRE_CONFTEST: "1" # the policy-gate integration tests fail rather than skip
+    # Service images come from ECR Public: Docker Hub's unauthenticated pull limit failed runs. The
+    # digest alone decides what runs (docker ignores the tag when both are given; the tag is a
+    # label, and the Postgres 17.11 tag has since moved). Any registry must serve exactly the pinned
+    # bytes, so a namespace change could only make the pull fail, never change the content.
     services:
       postgres:
-        image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+        image: public.ecr.aws/docker/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
         env:
           POSTGRES_USER: ecp
           POSTGRES_PASSWORD: ecp
@@ -41,7 +45,7 @@ jobs:
           --health-timeout 3s
           --health-retries 30
       valkey:
-        image: docker.io/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+        image: public.ecr.aws/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
         ports:
           - 6379:6379
         options: >-
@@ -171,9 +175,13 @@ jobs:
       ECP_REQUIRE_POSTGRES: "1"
       REDIS_URL: redis://localhost:6379/0
       ECP_REQUIRE_VALKEY: "1"
+    # Service images come from ECR Public: Docker Hub's unauthenticated pull limit failed runs. The
+    # digest alone decides what runs (docker ignores the tag when both are given; the tag is a
+    # label, and the Postgres 17.11 tag has since moved). Any registry must serve exactly the pinned
+    # bytes, so a namespace change could only make the pull fail, never change the content.
     services:
       postgres:
-        image: docker.io/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+        image: public.ecr.aws/docker/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
         env:
           POSTGRES_USER: ecp
           POSTGRES_PASSWORD: ecp
@@ -186,7 +194,7 @@ jobs:
           --health-timeout 3s
           --health-retries 30
       valkey:
-        image: docker.io/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+        image: public.ecr.aws/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
         ports:
           - 6379:6379
         options: >-
