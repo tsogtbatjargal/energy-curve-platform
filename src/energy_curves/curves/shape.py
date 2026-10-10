@@ -16,21 +16,24 @@ Precision contract (shared with the M5 PySpark implementation):
 from __future__ import annotations
 
 import hashlib
-import math
 from dataclasses import dataclass
 from datetime import date
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import Decimal
 
 import polars as pl
 
 from energy_curves.catalog import WTI_FUTURES
-
-METHOD_VERSION = "shape-v1"
-WINDOW = (date(2014, 1, 1), date(2024, 4, 5))
-MIN_OBS = 15
-S_QUANTUM = Decimal("1e-10")
-PARITY_TOLERANCE = Decimal("1e-9")
-POSITIONS = tuple(f"C{k}" for k in range(1, 5))
+from energy_curves.curves.shape_core import (
+    CSV_HEADER,
+    METHOD_VERSION,
+    MIN_OBS,
+    PARITY_TOLERANCE,
+    POSITIONS,
+    WINDOW,
+    ShapeEstimationError,
+    canonical_text,
+    quantize_s,
+)
 
 PARAMS_SCHEMA = {
     "position": pl.Utf8,
@@ -38,10 +41,6 @@ PARAMS_SCHEMA = {
     "s": pl.Decimal(20, 10),
     "n_obs": pl.Int64,
 }
-
-
-class ShapeEstimationError(ValueError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -54,15 +53,10 @@ class ShapeResult:
     method_version: str = METHOD_VERSION
 
 
-def quantize_s(value: float) -> Decimal:
-    if not math.isfinite(value):
-        raise ShapeEstimationError(f"non-finite shape value {value}")
-    return Decimal(repr(value)).quantize(S_QUANTUM, rounding=ROUND_HALF_EVEN)
-
-
 def canonical_params_text(params: pl.DataFrame) -> str:
-    rows = params.sort(["position", "month"]).iter_rows(named=True)
-    return "".join(f"{r['position']},{r['month']},{r['s']},{r['n_obs']}\n" for r in rows)
+    return canonical_text(
+        (r["position"], r["month"], r["s"], r["n_obs"]) for r in params.iter_rows(named=True)
+    )
 
 
 def _input_sha256(obs: pl.DataFrame) -> str:
@@ -146,9 +140,6 @@ def estimate_shape(
         params_sha256=hashlib.sha256(canonical_params_text(params).encode()).hexdigest(),
         window=window,
     )
-
-
-CSV_HEADER = "position,month,s,n_obs\n"
 
 
 def params_to_csv(params: pl.DataFrame) -> str:

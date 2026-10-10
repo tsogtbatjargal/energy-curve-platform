@@ -7,54 +7,29 @@ same prices and pagination behaves like the real API. Pages carry "x-synthetic":
 
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
-from energy_curves.catalog import SERIES, Kind
+from energy_curves.catalog import SERIES
 from energy_curves.ingestion.eia import PAGE_SIZE, Page
+from energy_curves.synthetic_prices import (
+    EPOCH,
+    FUTURES_END,
+    NEGATIVE_DAY,
+    synthetic_price,
+    true_shape,
+)
 
-FUTURES_END = date(2024, 4, 5)  # mirrors EIA: no futures after this date
-NEGATIVE_DAY = date(2020, 4, 20)  # mirrors the real negative WTI settlement
-EPOCH = date(2000, 1, 1)
-
-
-def _noise(series_id: str, d: date) -> float:
-    """Deterministic uniform value in [-1, 1) for (series, date)."""
-    h = hashlib.sha256(f"{series_id}|{d.isoformat()}".encode()).digest()
-    return int.from_bytes(h[:8], "big") / 2**63 - 1.0
-
-
-def true_shape(position: int, month: int) -> float:
-    """The log-spread of contract `position` over spot that the generator bakes in."""
-    return 0.004 * position + 0.003 * position * math.cos(2 * math.pi * month / 12)
-
-
-def _wti(d: date) -> float:
-    t = (d - EPOCH).days
-    return 70 + 15 * math.sin(t / 200) + 1.5 * _noise("RWTC", d)
-
-
-def synthetic_price(series_id: str, d: date) -> Decimal | None:
-    """Price for a business day, or None where the real source would have no row."""
-    if d.weekday() >= 5:
-        return None
-    series = SERIES[series_id]
-    if series_id == "RWTC":
-        value = -37.63 if d == NEGATIVE_DAY else _wti(d)
-    elif series_id == "RBRTE":
-        value = 19.33 if d == NEGATIVE_DAY else _wti(d) + 4 + 0.8 * _noise("RBRTE", d)
-    else:
-        if series.kind is not Kind.FUTURE or d > FUTURES_END:
-            return None
-        k = int(series_id[-1])
-        spot = abs(_wti(d))
-        value = spot * math.exp(true_shape(k, d.month)) * (1 + 0.002 * _noise(series_id, d))
-    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+__all__ = [
+    "EPOCH",
+    "FUTURES_END",
+    "NEGATIVE_DAY",
+    "SyntheticSource",
+    "synthetic_price",
+    "true_shape",
+]
 
 
 class SyntheticSource:

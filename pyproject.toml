@@ -58,7 +58,7 @@ select = ["E", "F", "I", "B", "UP", "S", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["scripts", "tests"]
+pythonpath = ["scripts", "tests", "jobs/glue"]
 addopts = "-ra --strict-markers -m 'not glue_compat'"
 markers = [
     "integration: needs local Postgres and Redis",
