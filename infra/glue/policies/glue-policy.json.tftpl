@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheJobCode",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}/glue/*"
+    },
+    {
+      "Sid": "WriteTheOutputs",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+      "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}/m5/*"
+    },
+    {
+      "Sid": "ListSoMissingKeysAre404AndTheCommitterCanRename",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+      "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}"
+    },
+    {
+      "Sid": "OwnLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": [
+        "arn:aws:logs:${region}:${account_id}:log-group:/aws-glue/*",
+        "arn:aws:logs:${region}:${account_id}:log-group:/aws-glue/*:*"
+      ]
+    }
+  ]
+}

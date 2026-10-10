@@ -21,6 +21,7 @@ JOB = WORKFLOW["jobs"]["terraform-plan"]
 STEPS = {s["name"]: s for s in JOB["steps"] if "name" in s}
 BATCH_ONLY = "matrix.stack == 'batch'"
 BOOTSTRAP_ONLY = "matrix.stack == 'bootstrap'"
+GLUE_ONLY = "matrix.stack == 'glue'"
 
 
 def batch_plan_step() -> dict[str, Any]:
@@ -30,7 +31,7 @@ def batch_plan_step() -> dict[str, Any]:
 
 
 def test_both_stacks_are_planned_by_the_same_job() -> None:
-    assert JOB["strategy"]["matrix"]["stack"] == ["bootstrap", "batch"]
+    assert JOB["strategy"]["matrix"]["stack"] == ["bootstrap", "batch", "glue"]
     assert JOB["permissions"] == {"contents": "read", "id-token": "write"}
 
 
@@ -104,9 +105,10 @@ def test_the_bootstrap_plan_is_unchanged() -> None:
 def test_each_stack_has_its_own_policy_gate() -> None:
     gates = [s for s in JOB["steps"] if "policy_gate.py" in s.get("run", "")]
     by_guard = {s.get("if"): s["run"] for s in gates}
-    assert set(by_guard) == {BOOTSTRAP_ONLY, BATCH_ONLY}
+    assert set(by_guard) == {BOOTSTRAP_ONLY, BATCH_ONLY, GLUE_ONLY}
     assert '--stack "$STACK"' in by_guard[BOOTSTRAP_ONLY]
     assert '--stack "$STACK" --stack-dir .' in by_guard[BATCH_ONLY]
+    assert '--stack "$STACK" --stack-dir .' in by_guard[GLUE_ONLY]
 
 
 def test_plan_files_are_removed_even_when_a_step_fails() -> None:
@@ -126,3 +128,27 @@ def test_every_action_is_pinned_to_a_commit(job: str) -> None:
     for step in WORKFLOW["jobs"][job]["steps"]:
         if "uses" in step:
             assert re.search(r"@[0-9a-f]{40}( |$)", step["uses"]), step["uses"]
+
+
+def test_the_glue_plan_builds_the_bundle_first_and_prints_only_a_summary() -> None:
+    names = [s.get("name") for s in JOB["steps"]]
+    build = names.index("build the Glue bundle")
+    plan = names.index("terraform plan (glue, summary only)")
+    init = names.index("terraform init")
+    assert init < build < plan
+    assert STEPS["build the Glue bundle"]["if"] == GLUE_ONLY
+    assert STEPS["build the Glue bundle"]["run"] == "python ../../scripts/build_glue_bundle.py"
+    step = STEPS["terraform plan (glue, summary only)"]
+    assert step["if"] == GLUE_ONLY
+    run = step["run"]
+    assert "-out=tfplan > plan.txt" in run and "grep -E '^(Plan:|No changes)' plan.txt" in run
+    assert "grep -E '^Error' plan.txt" in run and "sed -E 's/[0-9]{12}/<account>/g'" in run
+    assert "cat plan" not in run
+
+
+def test_the_glue_stack_is_tested_offline_in_the_static_job() -> None:
+    steps = WORKFLOW["jobs"]["iac-static"]["steps"]
+    step = next(s for s in steps if s.get("name") == "terraform test (glue, mocked provider)")
+    run = step["run"]
+    assert run.index("build_glue_bundle.py") < run.index("init -backend=false") < run.index("test")
+    assert "terraform -chdir=infra/glue test" in run

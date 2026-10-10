@@ -117,6 +117,13 @@ jobs:
         run: |
           terraform -chdir=infra/batch init -backend=false -input=false
           terraform -chdir=infra/batch test
+      # M5b (ADR-0023): the Glue stack, planned and applied against a mocked AWS provider. The
+      # bundle it uploads is built first (stdlib only). No credentials and no backend.
+      - name: terraform test (glue, mocked provider)
+        run: |
+          python3 scripts/build_glue_bundle.py
+          terraform -chdir=infra/glue init -backend=false -input=false
+          terraform -chdir=infra/glue test
       - name: rego fmt, compile, unit tests
         run: |
           opa fmt --list --fail policy
@@ -235,7 +242,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stack: [bootstrap, batch]
+        stack: [bootstrap, batch, glue]
     defaults:
       run:
         shell: bash
@@ -305,6 +312,23 @@ jobs:
             exit "$status"
           fi
           terraform show -json tfplan > plan.json
+      # The Glue stack uploads a bundle built from the repository; the build comes first, then the
+      # same summary-only plan as batch. Informational until it is applied: it shows 13 creates.
+      - name: build the Glue bundle
+        if: matrix.stack == 'glue'
+        run: python ../../scripts/build_glue_bundle.py
+      - name: terraform plan (glue, summary only)
+        if: matrix.stack == 'glue'
+        run: |
+          status=0
+          terraform plan -input=false -lock-timeout=60s -no-color -out=tfplan > plan.txt 2>&1 || status=$?
+          grep -E '^(Plan:|No changes)' plan.txt || true
+          if [ "$status" -ne 0 ]; then
+            echo "terraform plan failed (exit $status)"
+            grep -E '^Error' plan.txt | sed -E 's/[0-9]{12}/<account>/g' | head -5 || true
+            exit "$status"
+          fi
+          terraform show -json tfplan > plan.json
       - name: policy gate
         if: matrix.stack == 'bootstrap'
         # --stack selects the R1 rules: unknown IAM policies fail in workload stacks unless
@@ -314,6 +338,10 @@ jobs:
       - name: policy gate (batch)
         if: matrix.stack == 'batch'
         # The batch stack's rules read its source for locals, hence --stack-dir (ADR-0022).
+        run: uv run --locked --only-group gate python ../../scripts/policy_gate.py plan.json ../../policy --stack "$STACK" --stack-dir .
+      - name: policy gate (glue)
+        if: matrix.stack == 'glue'
+        # The Glue stack's rules read its source for locals, hence --stack-dir (ADR-0023).
         run: uv run --locked --only-group gate python ../../scripts/policy_gate.py plan.json ../../policy --stack "$STACK" --stack-dir .
       - name: remove plan artifacts
         if: always()
