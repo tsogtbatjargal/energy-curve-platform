@@ -1,6 +1,6 @@
 # 22. M4c: the batch stack, applied in two stages
 
-Date: 2026-10-08 · Status: **accepted** (2026-10-10, after the first scheduled run). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md), [m4c-scheduled-2026-10-10](../evidence/m4c-scheduled-2026-10-10.md). The CI plan job and the deployment inputs below are coded (M4c-2, part A); the publish workflow is not.
+Date: 2026-10-08 · Status: **accepted** (2026-10-10, after the first scheduled run). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md), [m4c-scheduled-2026-10-10](../evidence/m4c-scheduled-2026-10-10.md), [m4c-rollout-2026-10-10](../evidence/m4c-rollout-2026-10-10.md). The CI plan job and the deployment inputs below are coded (M4c-2, part A); the publish workflow is not.
 
 ## Context
 M4a (the S3 store, ADR-0019) and M4b (the entry points and image, ADR-0020) are done. M4c is what remains: the `infra/batch` stack in the `ecp-workloads` member account (ADR-0021), the first image, and the first cloud run. Preconditions met: PLAN.md R1 (ADR-0017) and R2 (ADR-0018, re-accepted in the member account). The cloud runs synthetic data only, so R3 matters only for M6.
@@ -193,6 +193,7 @@ The trivy findings these exclusions raise are each ignored with the reason in th
   - The `before` side of the task definition carries the provider's read-back values (empty maps and strings where the configuration has none); the check reads only the `after` side.
 - **`batch_plan_check.py --stage 4`** accepts exactly that shape and was run against the real plan: no problems. Its tests are written to the same shape, including all-string variables.
 - **`image.auto.tfvars` now names the new digest.** The file says what is deployed, so between the merge of the digest PR and the apply, the informational CI plan job shows these three changes; that is the PR the apply follows. A rollback is a revert of that PR followed by the same check with the old digest, which the stage-4 check accepts the same way (the old image stays in ECR while the lifecycle keeps two).
+- **Applied on 2026-10-10** from `stage4.tfplan` (`Resources: 1 added, 2 changed, 1 destroyed`; state serial 8 to 10), and checked afterwards: the state machine definition equals the pre-apply one except the task-definition revision (1 to 2), the function is `Active` and `Successful` on the new digest with an unchanged environment, and a re-plan shows no changes. One manual execution then `SUCCEEDED`, published a watermark-only version 3 with the gold files unchanged, and the alarm stayed `OK`. The first scheduled run on this image is 2026-10-11. Evidence: [m4c-rollout-2026-10-10](../evidence/m4c-rollout-2026-10-10.md).
 
 ## Consequences
 - **Two applies instead of one,** in exchange for never naming an image that does not exist, and a stage-2 plan that cannot change IAM.
