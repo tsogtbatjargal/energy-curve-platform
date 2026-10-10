@@ -1,6 +1,6 @@
 # 22. M4c: the batch stack, applied in two stages
 
-Date: 2026-10-08 · Status: **applied through plan 3; schedule enabled** (2026-10-09; the first scheduled run is 2026-10-10 12:00 Toronto). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md). The CI plan job and the deployment inputs below are coded (M4c-2, part A); the publish workflow is not.
+Date: 2026-10-08 · Status: **accepted** (2026-10-10, after the first scheduled run). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md), [m4c-scheduled-2026-10-10](../evidence/m4c-scheduled-2026-10-10.md). The CI plan job and the deployment inputs below are coded (M4c-2, part A); the publish workflow is not.
 
 ## Context
 M4a (the S3 store, ADR-0019) and M4b (the entry points and image, ADR-0020) are done. M4c is what remains: the `infra/batch` stack in the `ecp-workloads` member account (ADR-0021), the first image, and the first cloud run. Preconditions met: PLAN.md R1 (ADR-0017) and R2 (ADR-0018, re-accepted in the member account). The cloud runs synthetic data only, so R3 matters only for M6.
@@ -193,7 +193,7 @@ The trivy findings these exclusions raise are each ignored with the reason in th
   - **`CreateFunction` left the ECR repository policy untouched:** the re-plans after the stage-2 apply show no diff on it.
   - **The log groups received streams with events:** the function's group has 1 stream with 3 events; the task's group has 2 streams (the run and its replay) with 2 events each. This is the real proof for the two R2 scenarios the IAM simulator cannot evaluate (a slash-prefixed log group; see the evidence).
   - **The first run** `published`, and its replay returned `already_published` with the pointer unchanged.
+  - **The universal target, at the first scheduled run (2026-10-10), now verified:** `StartExecution` accepted the `Name` in the input; the execution ID is a UUID (36 characters), which fits `^[A-Za-z0-9_-]{1,80}$` and differs from the manual run's name; the scheduler role needed nothing beyond `states:StartExecution`. The run succeeded and published version 2 as a watermark-only version (see the evidence). That the ID differs from day to day is confirmed on the second scheduled run.
 - **Learned in the applies:** the provider's read-back after a create leaves 18 (stage 1) and 4 (stage 2) refresh-drift entries, all null → empty values, which two reviewed refresh-only applies recorded. A stage-2 gate that refuses drift needs them recorded first; drift is judged from the plan JSON, because the text output showed only 1 of the 18.
-- **Not yet verified:**
-  - The universal target (see above), at plan 3's first scheduled run: that the `Name` in the input is accepted, that the execution ID fits `^[A-Za-z0-9_-]{1,80}$` and differs per run, and that the scheduler role needs nothing beyond `states:StartExecution`. A failure fails the execution before any write and fires the alarm;
+- **Not verified by a run:**
   - whether `runTask.sync` alone fails on a non-zero exit: the Choice state makes this moot.
