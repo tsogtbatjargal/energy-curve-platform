@@ -107,7 +107,7 @@ Locally, with rootless podman:
 | Gate | Stage 1 | Stage 2 |
 |---|---|---|
 | `policy_gate.py --stack batch` (ADR-0006 rules, R1, R2) | yes | yes |
-| `batch_plan_check.py` | `--stage 1`: from an empty state, exactly the 39 creates with their reviewed settings; every role and policy equals its template for this account, known at plan time; every role has the boundary | `--stage 2 --digest <approved>`: every stage-1 resource unchanged (so no IAM change); exactly the 5 creates; the digest found in the repository at plan time; both steps on that digest, synthetic only, with no key; no reserved concurrency; the schedule disabled; the alarm on the topic. `--stage 3 --digest <approved>`: every other resource unchanged; exactly one in-place update of the schedule, only its state (to ENABLED) and its target (the universal target and the exact input above) |
+| `batch_plan_check.py` | `--stage 1`: from an empty state, exactly the 39 creates with their reviewed settings; every role and policy equals its template for this account, known at plan time; every role has the boundary | `--stage 2 --digest <approved>`: every stage-1 resource unchanged (so no IAM change); exactly the 5 creates; the digest found in the repository at plan time; both steps on that digest, synthetic only, with no key; no reserved concurrency; the schedule disabled; the alarm on the topic. `--stage 3 --digest <approved>`: every other resource unchanged; exactly one in-place update of the schedule, only its state (to ENABLED) and its target (the universal target and the exact input above); `--stage 4 --digest <approved>` (a rollout): exactly the function updated in place (the image only), the task definition replaced for one reason (`container_definitions`, a new revision) and the state machine updated in place (its definition, unknown at plan time, names the new task-definition ARN); every other resource unchanged, so no IAM, schedule or alarm change; the new settings equal the reviewed ones on the approved digest |
 
 `batch_plan_check.py` also checks, for both stages:
 - a sound plan, with no output change;
@@ -184,6 +184,15 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 - **Steady state:** with these inputs a plan of the real state shows `No changes` (read-only, streamed JSON, 2026-10-09). CI's steady state could later get a "current" check mode (all resources no-op); it is not built.
 
 **Stop rules:** any gate not OK; a stage-2 plan that changes a stage-1 resource or any IAM; a digest other than the approved one; any excluded resource; more than about $1 without a fresh go; a failed first run or replay. Stop and report, with no retry, import or workaround.
+
+## Rolling out a new image (M4c-3, 2026-10-10)
+- **The shape was read first** with a read-only plan of the rebuilt image's digest (`-lock=false`, the plan held in an anonymous in-memory file, nothing on disk): `Plan: 1 to add, 2 to change, 1 to destroy`, 41 resources unchanged, no drift.
+  - The function: update in place (`image_uri`; `last_modified` is computed).
+  - The task definition: replace, `replace_paths = [[container_definitions]]`, `delete` then `create` (a new revision, the old one deregistered; no execution is in flight when it is applied).
+  - The state machine: update in place; its definition is unknown because it names the new task-definition ARN.
+  - The `before` side of the task definition carries the provider's read-back values (empty maps and strings where the configuration has none); the check reads only the `after` side.
+- **`batch_plan_check.py --stage 4`** accepts exactly that shape and was run against the real plan: no problems. Its tests are written to the same shape, including all-string variables.
+- **`image.auto.tfvars` now names the new digest.** The file says what is deployed, so between the merge of the digest PR and the apply, the informational CI plan job shows these three changes; that is the PR the apply follows. A rollback is a revert of that PR followed by the same check with the old digest, which the stage-4 check accepts the same way (the old image stays in ECR while the lifecycle keeps two).
 
 ## Consequences
 - **Two applies instead of one,** in exchange for never naming an image that does not exist, and a stage-2 plan that cannot change IAM.

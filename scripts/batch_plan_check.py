@@ -4,6 +4,7 @@
     python scripts/batch_plan_check.py --stage 1 <plan.json>
     python scripts/batch_plan_check.py --stage 2 --digest sha256:<64 hex> <plan.json>
     python scripts/batch_plan_check.py --stage 3 --digest sha256:<64 hex> <plan.json>
+    python scripts/batch_plan_check.py --stage 4 --digest sha256:<64 hex> <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it also reads infra/batch's source.
 It runs after policy_gate.py --stack batch (ADR-0006 rules, PLAN.md R1 and R2), not instead of it.
@@ -31,6 +32,13 @@ resource unchanged except one in-place update of the schedule, which may change 
 (to ENABLED) and its target (the universal Step Functions StartExecution target, whose input is
 the exact reviewed bytes: the state machine, `Name` = Scheduler's execution ID, an empty input).
 The schedule's other settings stay as reviewed.
+
+`--stage 4` (image_digest = the approved new digest, schedule_enabled = true): a rollout. Exactly
+three changes and everything else unchanged, so no IAM change, no schedule change and no alarm
+change: the function updated in place (the image only), the task definition replaced for one
+reason (`container_definitions`; a new revision) and the state machine updated in place (only its
+definition, which names the new task-definition ARN, so it is unknown at plan time). The new
+function, container and state machine settings must equal the reviewed ones on the approved digest.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values (the alert address in particular).
@@ -95,6 +103,10 @@ STAGE2 = frozenset(
 # name and the policies depend on the account and are checked in check_stage1_create.
 UNIVERSAL_TARGET = "arn:aws:scheduler:::aws-sdk:sfn:startExecution"
 SCHEDULE = "aws_scheduler_schedule.daily[0]"
+LAMBDA = "aws_lambda_function.stage[0]"
+TASK = "aws_ecs_task_definition.pipeline[0]"
+SFN = "aws_sfn_state_machine.batch[0]"
+ROLLOUT = frozenset({LAMBDA, TASK, SFN})
 
 
 def schedule_input(account: str) -> str:
@@ -290,6 +302,49 @@ def check_schedule_update(change: dict[str, Any], account: str, role: str) -> li
     return problems
 
 
+def unknown_keys(change: dict[str, Any]) -> set[str]:
+    """Top-level attributes whose value is not known at plan time (a nested `[{}]` is known)."""
+
+    def has_unknown(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(has_unknown(v) for v in value.values())
+        if isinstance(value, list):
+            return any(has_unknown(v) for v in value)
+        return value is True
+
+    return {k for k, v in (change.get("after_unknown") or {}).items() if has_unknown(v)}
+
+
+def check_rollout_change(
+    address: str, change: dict[str, Any], account: str, digest: str, topic: str | None
+) -> list[str]:
+    """Stage 4: one of the three changes. What may change, and what must then equal the review."""
+    actions, before, after = (
+        change["actions"],
+        change.get("before") or {},
+        change.get("after") or {},
+    )
+    unknown = unknown_keys(change)
+    differing = {
+        k for k in set(before) | set(after) if k not in unknown and before.get(k) != after.get(k)
+    }
+    problems = []
+    if address == TASK:
+        if change.get("replace_paths") != [["container_definitions"]]:
+            problems.append(
+                f"{address}: must be replaced only because container_definitions changes"
+            )
+    elif differing - ({"image_uri"} if address == LAMBDA else set()):
+        problems.append(f"{address}: changes {', '.join(sorted(differing - {'image_uri'}))}")
+    if address == LAMBDA and "image_uri" not in differing:
+        problems.append(f"{address}: image_uri does not change")
+    if address == SFN and "definition" not in unknown:
+        problems.append(f"{address}: definition must be unknown at plan time (it names the task)")
+    if not (address == SFN and actions != ["update"]):
+        problems += check_stage2_create(address, change, account, digest, topic)
+    return problems
+
+
 def check_container(address: str, definitions: Any, uri: str, env: dict[str, str]) -> list[str]:
     try:
         containers = json.loads(definitions)
@@ -428,9 +483,9 @@ def check(
                 " at plan time"
             )
         expected, unchanged = STAGE2, STAGE1
-    elif stage == 3:
+    elif stage in (3, 4):
         if not (isinstance(digest, str) and DIGEST.match(digest)):
-            problems.append("stage 3 needs --digest sha256:<64 lowercase hex>")
+            problems.append(f"stage {stage} needs --digest sha256:<64 lowercase hex>")
             digest = ""
         if variable(plan, "image_digest") != digest:
             problems.append("image_digest is not the approved digest")
@@ -438,14 +493,17 @@ def check(
         # `1 == True` in Python, so test for True by identity.
         enabled = variable(plan, "schedule_enabled")
         if not (enabled is True or enabled == "true"):
-            problems.append("stage 3 needs schedule_enabled = true")
+            problems.append(f"stage {stage} needs schedule_enabled = true")
         image = prior(plan, "data.aws_ecr_image.batch[0]") or {}
         if not digest or image.get("image_digest") != digest:
             problems.append(
                 "data.aws_ecr_image.batch[0]: the approved digest was not found in the repository"
                 " at plan time"
             )
-        expected, unchanged = frozenset({SCHEDULE}), (STAGE1 | STAGE2) - {SCHEDULE}
+        if stage == 3:
+            expected, unchanged = frozenset({SCHEDULE}), (STAGE1 | STAGE2) - {SCHEDULE}
+        else:
+            expected, unchanged = ROLLOUT, (STAGE1 | STAGE2) - ROLLOUT
     else:
         return [f"unknown stage {stage}"], report
 
@@ -458,10 +516,21 @@ def check(
                 report.append(f"{'+'.join(actions):8} {address}")
                 problems.append(f"unexpected change: {'+'.join(actions)} {address}")
             continue
+        if stage == 4 and address in ROLLOUT and actions in UNCHANGED:
+            continue  # reported below as the missing change
         if actions in UNCHANGED and change.get("importing") is None:
             seen.add(address)
             continue
         report.append(f"{'+'.join(actions):8} {address}")
+        if stage == 4 and address in ROLLOUT:
+            want = [["delete", "create"], ["create", "delete"]] if address == TASK else [["update"]]
+            if actions not in want:
+                problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+            else:
+                seen.add(address)
+                if account:
+                    problems += check_rollout_change(address, change, account, digest or "", topic)
+            continue
         if stage == 3 and address == SCHEDULE and actions == ["update"]:
             seen.add(address)
             if account:
@@ -476,12 +545,12 @@ def check(
         else:
             problems.append(f"unexpected change: {'+'.join(actions)} {address}")
     for address in sorted(expected - seen):
-        problems.append(f"missing change: {'update' if stage == 3 else 'create'} {address}")
+        problems.append(f"missing change: {'create' if stage < 3 else 'update'} {address}")
     for address in sorted(unchanged - seen):
         problems.append(f"missing stage-1 resource: {address} must be in the plan, unchanged")
     report.append(
-        f"summary: stage {stage}, {len(expected) if stage < 3 else 0} to add,"
-        f" {1 if stage == 3 else 0} to change, 0 to destroy"
+        f"summary: stage {stage}, {len(expected) if stage < 3 else int(stage == 4)} to add,"
+        f" {(0, 0, 0, 1, 2)[stage]} to change, {int(stage == 4)} to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )
@@ -490,8 +559,8 @@ def check(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="batch_plan_check.py")
-    parser.add_argument("--stage", type=int, choices=(1, 2, 3), required=True)
-    parser.add_argument("--digest", help="stages 2 and 3: the approved image digest")
+    parser.add_argument("--stage", type=int, choices=(1, 2, 3, 4), required=True)
+    parser.add_argument("--digest", help="stages 2 to 4: the approved image digest")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)

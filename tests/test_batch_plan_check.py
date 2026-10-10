@@ -174,7 +174,11 @@ def configuration() -> dict[str, Any]:
 
 
 def plan(stage: int = 1, digest: str = DIGEST) -> dict[str, Any]:
-    """Stage 3 is stage 2 applied, then the schedule updated in place."""
+    """Stage 3 is stage 2 applied, then the schedule updated in place. Stage 4 is everything
+    applied and the schedule enabled, then a new image: the function updated in place, the task
+    definition replaced and the state machine updated in place (OTHER_DIGEST is the old image)."""
+    if stage == 4:
+        return rollout_plan(digest)
     if stage == 3:
         p = plan(2, digest)
         before = stage2_creates(digest)[SCHEDULE]
@@ -772,3 +776,302 @@ def test_stage3_still_needs_the_schedule_planned_enabled(stack: Path) -> None:
     p = as_recorded(plan(3))
     schedule_after(p)["state"] = "DISABLED"
     assert f"{SCHEDULE}: state is not the reviewed value" in run(p, 3, stack)
+
+
+# --- stage 4: roll out a new image ------------------------------------------------------------
+# The shape is the one a real read-only plan showed (2026-10-10): 1 to add, 2 to change, 1 to
+# destroy; the task definition's computed attributes and the state machine's definition unknown.
+
+
+def rollout_plan(digest: str, old: str = OTHER_DIGEST) -> dict[str, Any]:
+    p = plan(3, digest)
+    deployed = stage2_creates(old)
+    enabled = copy.deepcopy(change(p, SCHEDULE)["change"]["after"])
+    change(p, SCHEDULE)["change"].update(actions=["no-op"], before=enabled, after=enabled)
+    lam, task, sfn = (
+        change(p, a)["change"]
+        for a in (
+            "aws_lambda_function.stage[0]",
+            "aws_ecs_task_definition.pipeline[0]",
+            "aws_sfn_state_machine.batch[0]",
+        )
+    )
+    lam.update(
+        actions=["update"],
+        before=deployed["aws_lambda_function.stage[0]"],
+        after_unknown={"last_modified": True, "environment": [{}]},
+    )
+    task.update(
+        actions=["delete", "create"],
+        before=deployed["aws_ecs_task_definition.pipeline[0]"],
+        replace_paths=[["container_definitions"]],
+        after_unknown={
+            "arn": True,
+            "id": True,
+            "revision": True,
+            "requires_compatibilities": [False],
+        },
+    )
+    task_after = copy.deepcopy(task["after"])
+    task["after"] = task_after
+    state_machine = deployed["aws_sfn_state_machine.batch[0]"] | {"definition": "{}"}
+    sfn.update(
+        actions=["update"],
+        before=state_machine,
+        after={k: v for k, v in state_machine.items() if k != "definition"},
+        after_unknown={"definition": True},
+    )
+    p["variables"]["schedule_enabled"] = {"value": True}
+    return p
+
+
+LAMBDA, TASK, SFN = (
+    "aws_lambda_function.stage[0]",
+    "aws_ecs_task_definition.pipeline[0]",
+    "aws_sfn_state_machine.batch[0]",
+)
+ALARM = "aws_cloudwatch_metric_alarm.failures[0]"
+
+
+def test_the_reviewed_rollout_plan_passes(stack: Path) -> None:
+    problems, report = bpc.check(plan(4), 4, DIGEST, stack)
+    assert problems == []
+    assert "summary: stage 4, 1 to add, 2 to change, 1 to destroy" in report
+    assert [x for x in report if x.startswith(("update", "delete+create"))] == [
+        f"update   {LAMBDA}",
+        f"delete+create {TASK}",
+        f"update   {SFN}",
+    ]
+
+
+def test_the_task_definition_may_be_created_before_it_is_destroyed(stack: Path) -> None:
+    p = plan(4)
+    change(p, TASK)["change"]["actions"] = ["create", "delete"]
+    assert run(p, 4, stack) == []
+
+
+def test_a_rollout_plan_with_every_variable_recorded_as_a_string_passes(stack: Path) -> None:
+    p = as_recorded(plan(4))
+    assert all(isinstance(v["value"], str) for v in p["variables"].values())
+    assert run(p, 4, stack) == []
+
+
+@pytest.mark.parametrize("digest", [None, "", "sha256:abc", "latest", "sha256:" + "AB" * 32])
+def test_stage4_needs_a_well_formed_digest(stack: Path, digest: str | None) -> None:
+    assert any("--digest" in x for x in run(plan(4), 4, stack, digest=digest))
+
+
+def test_stage4_refuses_a_digest_other_than_the_approved_one(stack: Path) -> None:
+    assert any("approved digest" in x for x in run(plan(4), 4, stack, digest=OTHER_DIGEST))
+    p = plan(4)
+    p["variables"]["image_digest"]["value"] = OTHER_DIGEST
+    assert any("approved digest" in x for x in run(p, 4, stack))
+
+
+def test_stage4_needs_the_image_in_the_repository(stack: Path) -> None:
+    p = plan(4)
+    for r in p["prior_state"]["values"]["root_module"]["resources"]:
+        if r["address"] == "data.aws_ecr_image.batch[0]":
+            r["values"]["image_digest"] = OTHER_DIGEST
+    assert any("not found in the repository" in x for x in run(p, 4, stack))
+
+
+def test_stage4_needs_the_schedule_to_stay_enabled(stack: Path) -> None:
+    p = plan(4)
+    p["variables"]["schedule_enabled"] = {"value": False}
+    assert any("schedule_enabled" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_new_image_that_is_the_deployed_one(stack: Path) -> None:
+    p = plan(4)
+    change(p, LAMBDA)["change"]["before"] = copy.deepcopy(change(p, LAMBDA)["change"]["after"])
+    assert any(LAMBDA in x and "image_uri" in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        SCHEDULE,
+        ALARM,
+        "aws_sns_topic.alerts",
+        'aws_iam_role.batch["task"]',
+        "aws_ecs_cluster.batch",
+        "aws_ecr_repository.batch",
+        f"{MOD}.aws_s3_bucket.this[0]",
+    ],
+)
+def test_stage4_refuses_a_change_to_anything_else(stack: Path, address: str) -> None:
+    p = plan(4)
+    for r in p["resource_changes"]:
+        if r["address"] == address:
+            r["change"]["actions"] = ["update"]
+            break
+    else:  # the fixture may name the role differently
+        address = next(r["address"] for r in p["resource_changes"] if r["type"] == "aws_iam_role")
+        change(p, address)["change"]["actions"] = ["update"]
+    assert any(f"unexpected change: update {address}" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_role_policy_change(stack: Path) -> None:
+    p = plan(4)
+    address = next(
+        r["address"] for r in p["resource_changes"] if r["type"] == "aws_iam_role_policy"
+    )
+    change(p, address)["change"]["after"] = {"policy": "{}"}
+    change(p, address)["change"]["actions"] = ["update"]
+    assert any(address in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_schedule_that_changes_with_the_image(stack: Path) -> None:
+    p = plan(4)
+    after = change(p, SCHEDULE)["change"]["after"]
+    after["state"] = "DISABLED"
+    change(p, SCHEDULE)["change"]["actions"] = ["update"]
+    assert any(SCHEDULE in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize("address", [LAMBDA, TASK, SFN])
+def test_stage4_refuses_a_missing_change(stack: Path, address: str) -> None:
+    p = plan(4)
+    change(p, address)["change"]["actions"] = ["no-op"]
+    assert any("missing change" in x and address in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_new_resource(stack: Path) -> None:
+    p = plan(4)
+    p["resource_changes"].append(rc("aws_sqs_queue.x", ["create"], {}))
+    assert any("unexpected change: create aws_sqs_queue.x" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_any_destroy_beyond_the_task_definition(stack: Path) -> None:
+    p = plan(4)
+    p["resource_changes"].append(rc("aws_sqs_queue.x", ["delete"], None, {}))
+    assert any("unexpected change: delete aws_sqs_queue.x" in x for x in run(p, 4, stack))
+
+
+# the function: in place, the image only
+
+
+def test_stage4_refuses_a_function_replaced_instead_of_updated(stack: Path) -> None:
+    p = plan(4)
+    change(p, LAMBDA)["change"]["actions"] = ["delete", "create"]
+    assert any(f"unexpected change: delete+create {LAMBDA}" in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize(
+    "attribute,value",
+    [
+        ("memory_size", 1024),
+        ("timeout", 900),
+        ("role", "arn:aws:iam::333333333333:role/other"),
+        ("function_name", "other"),
+    ],
+)
+def test_stage4_refuses_a_function_change_beyond_the_image(
+    stack: Path, attribute: str, value: Any
+) -> None:
+    p = plan(4)
+    change(p, LAMBDA)["change"]["after"][attribute] = value
+    assert any(LAMBDA in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_function_environment_change(stack: Path) -> None:
+    p = plan(4)
+    change(p, LAMBDA)["change"]["after"]["environment"][0]["variables"]["EIA_API_KEY"] = "x"
+    assert any(LAMBDA in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_function_image_by_tag_or_another_digest(stack: Path) -> None:
+    for uri in (f"{REPO_URL}:latest", f"{REPO_URL}@{OTHER_DIGEST}"):
+        p = plan(4)
+        change(p, LAMBDA)["change"]["after"]["image_uri"] = uri
+        assert any(LAMBDA in x for x in run(p, 4, stack))
+
+
+# the task definition: replaced (a new revision), the container image only
+
+
+def test_stage4_refuses_a_task_definition_updated_in_place(stack: Path) -> None:
+    p = plan(4)
+    change(p, TASK)["change"]["actions"] = ["update"]
+    assert any(f"unexpected change: update {TASK}" in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize("paths", [None, [], [["cpu"]], [["container_definitions"], ["memory"]]])
+def test_stage4_refuses_a_replace_for_another_reason(stack: Path, paths: Any) -> None:
+    p = plan(4)
+    change(p, TASK)["change"]["replace_paths"] = paths
+    assert any(TASK in x and "container_definitions" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_task_definition_with_another_image(stack: Path) -> None:
+    p = plan(4)
+    after = change(p, TASK)["change"]["after"]
+    container = json.loads(after["container_definitions"])
+    container[0]["image"] = f"{REPO_URL}@{OTHER_DIGEST}"
+    after["container_definitions"] = json.dumps(container)
+    assert any(TASK in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize(
+    "attribute,value",
+    [
+        ("cpu", "1024"),
+        ("memory", "2048"),
+        ("task_role_arn", "arn:aws:iam::333333333333:role/x"),
+        ("network_mode", "host"),
+    ],
+)
+def test_stage4_refuses_a_task_definition_change_beyond_the_image(
+    stack: Path, attribute: str, value: str
+) -> None:
+    p = plan(4)
+    change(p, TASK)["change"]["after"][attribute] = value
+    assert any(TASK in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_key_in_the_task_environment(stack: Path) -> None:
+    p = plan(4)
+    after = change(p, TASK)["change"]["after"]
+    container = json.loads(after["container_definitions"])
+    container[0]["environment"].append({"name": "EIA_API_KEY", "value": "x"})
+    after["container_definitions"] = json.dumps(container)
+    assert any(TASK in x for x in run(p, 4, stack))
+
+
+# the state machine: in place, its definition (the new task-definition ARN) unknown
+
+
+def test_stage4_refuses_a_state_machine_replaced(stack: Path) -> None:
+    p = plan(4)
+    change(p, SFN)["change"]["actions"] = ["delete", "create"]
+    assert any(f"unexpected change: delete+create {SFN}" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_known_state_machine_definition(stack: Path) -> None:
+    p = plan(4)
+    change(p, SFN)["change"]["after"]["definition"] = "{}"
+    change(p, SFN)["change"]["after_unknown"] = {}
+    assert any(SFN in x and "definition" in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize(
+    "attribute,value",
+    [("role_arn", "arn:aws:iam::333333333333:role/x"), ("name", "other"), ("type", "EXPRESS")],
+)
+def test_stage4_refuses_a_state_machine_change_beyond_the_definition(
+    stack: Path, attribute: str, value: str
+) -> None:
+    p = plan(4)
+    change(p, SFN)["change"]["after"][attribute] = value
+    assert any(SFN in x for x in run(p, 4, stack))
+
+
+def test_stage4_still_refuses_drift_an_errored_plan_and_the_wrong_account(stack: Path) -> None:
+    p = plan(4)
+    p["resource_drift"] = [{"address": "aws_ecs_cluster.batch"}]
+    p["errored"] = True
+    assert len(run(p, 4, stack)) >= 2
+    p = plan(4)
+    p["variables"]["expected_account_id"]["value"] = "444444444444"
+    assert any("expected_account_id" in x for x in run(p, 4, stack))
