@@ -255,67 +255,203 @@ def test_inputs_from_other_series_are_ignored(spark) -> None:  # type: ignore[no
 # --- the job's entry point ----------------------------------------------------------------------
 
 
-def test_main_writes_the_parameters_and_their_hash(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+RUN_A = "jr_" + "a" * 64
+RUN_B = "jr_" + "b" * 64
+ARGS = [
+    "--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
+    "--window-end", "2014-12-31", "--partitions", "2",
+]  # fmt: skip
+
+
+def run_main(spark, out: Path, run_id: str = RUN_A) -> str:  # type: ignore[no-untyped-def]
     import shape_job
 
+    return shape_job.main([*ARGS, "--output", str(out), "--JOB_RUN_ID", run_id], spark=spark)
+
+
+def files(root: Path) -> dict[str, bytes]:
+    """Every real file under `root` by relative path (Hadoop's local `.crc` sidecars left out)."""
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and not p.name.endswith(".crc")
+    }
+
+
+def record(out: Path, run_id: str = RUN_A) -> dict[str, Any]:
+    import json
+
+    return json.loads((out / run_id / "_complete.json").read_text())
+
+
+def test_main_writes_the_parameters_and_their_hash_under_the_run(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     out = tmp_path / "out"
-    digest = shape_job.main(
-        ["--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
-         "--window-end", "2014-12-31", "--partitions", "2", "--output", str(out)],
-        spark=spark,
-    )  # fmt: skip
-    text = (out / "shape_params.csv" / "part-00000").read_text()
+    digest = run_main(spark, out)
+    run = out / RUN_A
+    text = (run / "shape_params.csv" / "part-00000").read_text()
     assert text.startswith("position,month,s,n_obs\n") and text.count("\n") == 49
     assert hashlib.sha256(text.split("\n", 1)[1].encode()).hexdigest() == digest
-    assert (out / "shape_params.sha256" / "part-00000").read_text().strip() == digest
+    assert (run / "shape_params.sha256" / "part-00000").read_text().strip() == digest
     reference = shape.estimate_shape(polars_frame(list(history(SHAPE_SERIES, *SLICE))), SLICE)
     assert digest == reference.params_sha256
+    assert {p.name for p in out.iterdir()} == {RUN_A}  # nothing beside the run's own prefix
 
 
-def run_main(spark, out: Path) -> str:  # type: ignore[no-untyped-def]
-    import shape_job
-
-    return shape_job.main(
-        ["--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
-         "--window-end", "2014-12-31", "--partitions", "2", "--output", str(out)],
-        spark=spark,
-    )  # fmt: skip
-
-
-def test_the_job_can_be_rerun_into_the_same_output(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-    """The third cloud run could not have worked: saveAsTextFile refuses an existing directory
-    (FileAlreadyExistsException), and the second run's files were in m5/shape/."""
+def test_the_completion_record_describes_the_run_and_its_two_outputs(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     out = tmp_path / "out"
-    first = run_main(spark, out)
-    second = run_main(spark, out)
+    digest = run_main(spark, out)
+    done = record(out)
+    run = out / RUN_A
+    assert set(done) == {"schema", "run_id", "params_sha256", "rows", "outputs", "arguments",
+                         "completed_at"}  # fmt: skip
+    assert done["schema"] == 1 and done["run_id"] == RUN_A
+    assert done["params_sha256"] == digest and done["rows"] == 48
+    assert done["outputs"] == {
+        name: (run / name / "part-00000").stat().st_size
+        for name in ("shape_params.csv", "shape_params.sha256")
+    }  # keys are relative to the run prefix: no bucket, URL or account in the record
+    assert done["arguments"] == {
+        "start": "2014-01-01", "end": "2014-12-31", "window_start": "2014-01-01",
+        "window_end": "2014-12-31", "partitions": 2,
+    }  # fmt: skip
+    assert str(tmp_path) not in (run / "_complete.json").read_text()
+
+
+def test_two_runs_to_one_output_each_complete_in_their_own_prefix(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """The third cloud run could not have worked when both runs wrote one path: saveAsTextFile
+    refuses an existing directory. Now each run has its own prefix and nothing is replaced."""
+    out = tmp_path / "out"
+    first = run_main(spark, out, RUN_A)
+    before = files(out / RUN_A)
+    second = run_main(spark, out, RUN_B)
     assert first == second
-    for name in ("shape_params.csv", "shape_params.sha256"):
-        assert sorted(p.name for p in (out / name).glob("part-*")) == ["part-00000"]
-    assert (out / "shape_params.sha256" / "part-00000").read_text().strip() == second
+    assert files(out / RUN_A) == before  # the earlier run is byte-for-byte untouched
+    for run in (RUN_A, RUN_B):
+        for name in ("shape_params.csv", "shape_params.sha256"):
+            assert sorted(p.name for p in (out / run / name).glob("part-*")) == ["part-00000"]
+        assert record(out, run)["params_sha256"] == second
+        assert (out / run / "shape_params.sha256" / "part-00000").read_text().strip() == second
 
 
-def test_a_rerun_replaces_stale_files_under_its_two_outputs_and_touches_nothing_else(
+def test_the_same_run_id_twice_is_refused_and_changes_nothing(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    out = tmp_path / "out"
+    run_main(spark, out)
+    before = files(out)
+    with pytest.raises(FileExistsError):
+        run_main(spark, out)
+    assert files(out) == before
+
+
+def test_a_prefix_without_a_record_is_also_refused(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """An interrupted run leaves its prefix without a record; the same id must not be written over
+    it (nothing is deleted, so whatever is there stays for the operator to see)."""
+    out = tmp_path / "out"
+    (out / RUN_A).mkdir(parents=True)
+    (out / RUN_A / "leftover.txt").write_text("keep\n")
+    with pytest.raises(FileExistsError):
+        run_main(spark, out)
+    assert files(out) == {f"{RUN_A}/leftover.txt": b"keep\n"}
+
+
+def test_the_job_deletes_nothing(spark, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    """No file under the output is ever removed by a run, including a stale file in another run."""
+    out = tmp_path / "out"
+    run_main(spark, out, RUN_A)
+    (out / RUN_A / "shape_params.csv" / "part-00001").write_text("kept\n")
+    (out / "unrelated.csv").write_text("keep\n")
+    before = files(out)
+    run_main(spark, out, RUN_B)
+    after = files(out)
+    assert all(after[name] == data for name, data in before.items())
+    source = (Path(__file__).parents[2] / "jobs" / "glue" / "shape_job.py").read_text()
+    assert ".delete(" not in source and "_delete" not in source
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ["", "jr_", "jr_abc", "JR_" + "a" * 64, "jr_" + "A" * 64, "jr_" + "a" * 63, "jr_" + "a" * 65,
+     "x" + "a" * 66, "jr_" + "a" * 63 + "/", "jr_../" + "a" * 60, " jr_" + "a" * 64,
+     "jr_" + "a" * 64 + "\n", "jr_" + "g" * 64],
+)  # fmt: skip
+def test_a_malformed_run_id_is_refused_before_anything_is_written(
     spark,
-    tmp_path: Path,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+    run_id: str,  # type: ignore[no-untyped-def]
 ) -> None:
     out = tmp_path / "out"
+    with pytest.raises(SystemExit) as stop:
+        run_main(spark, out, run_id)
+    assert stop.value.code == 2
+    assert not out.exists()
+
+
+def test_a_fault_after_the_first_output_leaves_no_record_and_the_last_run_intact(
+    spark,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    out = tmp_path / "out"
+    run_main(spark, out, RUN_A)
+    good = files(out / RUN_A)
+    real, calls = shape_job._write, []
+
+    def fail_on_the_second(spark_: Any, text: str, path: str) -> None:
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("interrupted between the two outputs")
+        real(spark_, text, path)
+
+    monkeypatch.setattr(shape_job, "_write", fail_on_the_second)
+    with pytest.raises(OSError, match="interrupted"):
+        run_main(spark, out, RUN_B)
+    assert (out / RUN_B / "shape_params.csv" / "part-00000").exists()  # the partial output stays
+    assert not (out / RUN_B / "_complete.json").exists()  # but it is not a completed run
+    assert files(out / RUN_A) == good  # the last completed run is untouched
+
+
+def test_a_fault_while_writing_the_record_leaves_no_record(
+    spark,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    def fail(*_: Any) -> None:
+        raise OSError("interrupted before the record")
+
+    monkeypatch.setattr(shape_job, "_write_record", fail)
+    out = tmp_path / "out"
+    with pytest.raises(OSError, match="before the record"):
+        run_main(spark, out)
+    assert not (out / RUN_A / "_complete.json").exists()
+    assert (out / RUN_A / "shape_params.sha256" / "part-00000").exists()
+
+
+def test_the_record_is_written_last_when_both_outputs_are_complete(
+    spark,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    out = tmp_path / "out"
+    seen: dict[str, Any] = {}
+    real = shape_job._write_record
+
+    def spy(spark_: Any, path: str, document: dict[str, Any]) -> None:
+        run = Path(path).parent
+        seen["at_record_time"] = sorted(files(run))
+        seen["record_exists"] = Path(path).exists()
+        real(spark_, path, document)
+
+    monkeypatch.setattr(shape_job, "_write_record", spy)
     run_main(spark, out)
-    (out / "shape_params.csv" / "part-00001").write_text("stale\n")  # e.g. a wider earlier run
-    (out / "shape_params.csv" / "_SUCCESS").write_text("stale marker\n")
-    (out / "shape_params.csv" / "part-00000").write_text("stale\n")
-    (out / "other").mkdir()
-    (out / "other" / "keep.txt").write_text("keep\n")
-    (out / "unrelated.csv").write_text("keep\n")
-    run_main(spark, out)
-    names = {p.name for p in (out / "shape_params.csv").iterdir() if p.is_file()}
-    assert "part-00000" in names and "part-00001" not in names  # the stale file is gone
-    marker = out / "shape_params.csv" / "_SUCCESS"  # a non-empty planted marker tells old from new
-    assert not marker.exists() or marker.read_text() == ""
-    assert (
-        (out / "shape_params.csv" / "part-00000").read_text().startswith("position,month,s,n_obs")
+    assert seen["record_exists"] is False
+    assert {"shape_params.csv/part-00000", "shape_params.sha256/part-00000"} <= set(
+        seen["at_record_time"]
     )
-    assert (out / "other" / "keep.txt").read_text() == "keep\n"
-    assert (out / "unrelated.csv").read_text() == "keep\n"
 
 
 # --- the built bundle, shipped the way Glue ships it ---------------------------------------------
@@ -350,7 +486,7 @@ def submit(tmp_path: Path, master: str, py_files: list[Path]) -> subprocess.Comp
         "--start", "1983-01-03", "--end", "2024-04-05",
         "--window-start", "2014-01-01", "--window-end", "2024-04-05",
         "--partitions", "8",
-        "--output", str(tmp_path / "out"),
+        "--output", str(tmp_path / "out"), "--JOB_RUN_ID", RUN_A,
     ]  # fmt: skip
     return subprocess.run(  # noqa: S603
         command, env=env, capture_output=True, text=True, timeout=600, check=False
@@ -366,7 +502,7 @@ def test_the_built_bundle_gives_the_reference_hash_on_separate_executors(tmp_pat
     build_glue_bundle.write(bundle)
     done = submit(tmp_path, "local-cluster[2,1,1024]", [bundle])
     assert done.returncode == 0, done.stderr[-3000:]
-    out = tmp_path / "out"
+    out = tmp_path / "out" / RUN_A
     assert (out / "shape_params.sha256" / "part-00000").read_text().strip() == REFERENCE_SHA256
     text = (out / "shape_params.csv" / "part-00000").read_text()
     assert hashlib.sha256(text.split("\n", 1)[1].encode()).hexdigest() == REFERENCE_SHA256
@@ -388,17 +524,15 @@ def test_the_reference_hash_is_what_the_polars_reference_gives_on_the_full_histo
 # The first cloud run failed with `unrecognized arguments`: Glue appends its own arguments to the
 # script's command line. These are the names in that run's log (2026-10-10); the values are
 # placeholders, never the logged ones. `--extra-py-files`, `--enable-metrics` and `--job-language`
-# were consumed by Glue and did not reach the script.
+# were consumed by Glue and did not reach the script. `--JOB_RUN_ID` was logged there as ignored;
+# the job now requires it, because it names the run's output prefix.
 
 GLUE_ADDED = [
     "--continuous-log-logGroup", "--enable-continuous-log-filter",
-    "--glue-di-packages-correlation-ids", "--internal-lib-urls", "--JOB_ID", "--JOB_RUN_ID",
+    "--glue-di-packages-correlation-ids", "--internal-lib-urls", "--JOB_ID",
     "--enable-continuous-cloudwatch-log", "--tenant-internal", "--JOB_NAME",
 ]  # fmt: skip
-JOB_ARGUMENTS = [
-    "--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
-    "--window-end", "2014-12-31", "--partitions", "2",
-]  # fmt: skip
+JOB_ARGUMENTS = [*ARGS, "--JOB_RUN_ID", RUN_A]  # Glue passes the run id; the job needs it
 
 
 def glue_command_line(output: str, sentinel: str = "placeholder") -> list[str]:
@@ -415,7 +549,7 @@ def test_the_job_accepts_the_arguments_glue_adds_and_gives_the_reference_output(
     digest = shape_job.main(glue_command_line(str(tmp_path / "out")), spark=spark)
     reference = shape.estimate_shape(polars_frame(list(history(SHAPE_SERIES, *SLICE))), SLICE)
     assert digest == reference.params_sha256
-    text = (tmp_path / "out" / "shape_params.csv" / "part-00000").read_text()
+    text = (tmp_path / "out" / RUN_A / "shape_params.csv" / "part-00000").read_text()
     assert text.count("\n") == 49
 
 
@@ -439,7 +573,7 @@ def test_ignored_arguments_are_logged_by_name_only(
 
 
 @pytest.mark.parametrize("name", ["--start", "--end", "--window-start", "--window-end",
-                                  "--partitions", "--output"])  # fmt: skip
+                                  "--partitions", "--output", "--JOB_RUN_ID"])  # fmt: skip
 def test_a_missing_job_argument_fails_loudly(
     spark,
     tmp_path: Path,
@@ -517,6 +651,7 @@ def test_the_job_has_no_default_for_any_argument() -> None:
         "--window-end",
         "--partitions",
         "--output",
+        "--JOB_RUN_ID",
     }
     for call in adds:
         keywords = {k.arg: k.value for k in call.keywords}

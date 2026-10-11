@@ -657,6 +657,25 @@ def test_the_script_object_may_have_other_attributes_unknown_only_for_its_versio
     assert any(SCRIPT in x for x in run_update(p, stack))
 
 
+# the run-scoped output (M5c-0) needs no change to the job: the script puts each run under
+# `<--output>/<JOB_RUN_ID>/`, and Glue supplies the run id itself. The next plan is the script only.
+
+
+def test_a_change_of_the_output_argument_is_not_part_of_the_reviewed_update(stack: Path) -> None:
+    p = update_plan()
+    job = change(p, JOB)["change"]
+    job["actions"] = ["update"]
+    job["after"]["default_arguments"]["--output"] = f"s3://{BUCKET}/m5/runs"
+    assert any(f"unexpected change: update {JOB}" in x for x in run_update(p, stack))
+
+
+def test_the_run_id_is_never_a_default_argument_of_the_job(stack: Path) -> None:
+    p = update_plan()
+    for side in ("before", "after"):
+        change(p, JOB)["change"][side]["default_arguments"]["--JOB_RUN_ID"] = "jr_" + "a" * 64
+    assert any(JOB in x and "default_arguments" in x for x in run_update(p, stack))
+
+
 # everything else: unchanged, and still the reviewed one
 
 
