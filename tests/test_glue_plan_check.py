@@ -79,17 +79,21 @@ def after_values() -> dict[str, dict[str, Any]]:
             ]
         },  # fmt: skip
         f"{_B}_policy.this[0]": {},
-        SCRIPT: {"key": "glue/shape_job.py", "source": "./../../jobs/glue/shape_job.py",
+        SCRIPT: {"bucket": BUCKET, "key": "glue/shape_job.py",
+                 "source": "./../../jobs/glue/shape_job.py",
                  "etag": md5((ROOT / "jobs" / "glue" / "shape_job.py").read_bytes())},
-        BUNDLE: {"key": "glue/energy_curves_m5.zip", "source": "./build/energy_curves_m5.zip",
+        BUNDLE: {"bucket": BUCKET, "key": "glue/energy_curves_m5.zip",
+                 "source": "./build/energy_curves_m5.zip",
                  "etag": md5(build_glue_bundle.build_bytes())},
         ROLE: {"name": "ecp-glue-shape", "permissions_boundary": BOUNDARY,
                "assume_role_policy": template("glue-trust")},
-        ROLE_POLICY: {"name": "ecp-glue-shape", "policy": template("glue-policy")},
+        ROLE_POLICY: {"name": "ecp-glue-shape", "role": "ecp-glue-shape",
+                      "policy": template("glue-policy")},
         LOG_OUT: {"name": "/aws-glue/ecp-shape/output", "retention_in_days": 14},
         LOG_ERR: {"name": "/aws-glue/ecp-shape/error", "retention_in_days": 14},
         JOB: {
-            "name": "ecp-glue-shape", "glue_version": "5.1", "worker_type": "G.1X",
+            "name": "ecp-glue-shape", "role_arn": f"arn:aws:iam::{MEMBER}:role/ecp-glue-shape",
+            "glue_version": "5.1", "worker_type": "G.1X",
             "number_of_workers": 2, "timeout": 10, "max_retries": 0, "execution_class": "STANDARD",
             "command": [{"name": "glueetl", "python_version": "3",
                          "script_location": f"s3://{BUCKET}/glue/shape_job.py"}],
@@ -725,3 +729,156 @@ def test_a_non_empty_value_is_still_refused_in_update_mode(
     for side in ("before", "after"):
         change(p, JOB)["change"][side][attribute] = value
     assert any(JOB in x and attribute in x for x in run_update(p, stack))
+
+
+# --- the wiring: who runs the job, which role the policy is on, which bucket holds the objects ----
+# A plan that points the job at another role, the policy at another role or an object at another
+# bucket must be refused, whatever else is right. A known value must be exactly the reviewed one; a
+# value unknown at plan time (a role or bucket created in the same plan) is accepted only if the
+# configuration expression references exactly the stack's own role or bucket. Terraform lists an
+# attribute reference together with its resource or module (`aws_s3_bucket.data.arn`,
+# `aws_s3_bucket.data`), so that pair is the same reference.
+
+ROLE_ARN = f"arn:aws:iam::{MEMBER}:role/ecp-glue-shape"
+WIRING = [
+    (JOB, "role_arn", ROLE_ARN, "aws_iam_role.glue.arn", "aws_iam_role.glue"),
+    (ROLE_POLICY, "role", "ecp-glue-shape", "aws_iam_role.glue.id", "aws_iam_role.glue"),
+    (SCRIPT, "bucket", BUCKET, "module.bucket.s3_bucket_id", "module.bucket"),
+    (BUNDLE, "bucket", BUCKET, "module.bucket.s3_bucket_id", "module.bucket"),
+]
+MODES = [("create", plan), ("update", update_plan)]
+
+
+def check_in(mode: str, p: dict[str, Any], stack: Path) -> list[str]:
+    problems, _ = gpc.check(p, stack, mode)
+    return problems
+
+
+def make_unknown(p: dict[str, Any], address: str, attribute: str, refs: list[str]) -> None:
+    c = change(p, address)["change"]
+    c["after"].pop(attribute, None)
+    c["after_unknown"] = {**c["after_unknown"], attribute: True}
+    p["configuration"]["root_module"]["resources"].append(
+        {"address": address, "expressions": {attribute: {"references": refs}}}
+    )
+
+
+@pytest.mark.parametrize(("mode", "build"), MODES)
+@pytest.mark.parametrize(("address", "attribute", "want", "ref", "parent"), WIRING)
+def test_the_reviewed_wiring_passes(
+    stack: Path,
+    mode: str,
+    build,
+    address: str,
+    attribute: str,
+    want: str,
+    ref: str,
+    parent: str,  # type: ignore[no-untyped-def]
+) -> None:
+    assert change(build(), address)["change"]["after"][attribute] == want
+    assert check_in(mode, build(), stack) == []
+
+
+@pytest.mark.parametrize(("mode", "build"), MODES)
+@pytest.mark.parametrize(("address", "attribute", "want", "ref", "parent"), WIRING)
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        "arn:aws:iam::333333333333:role/other",
+        "ecp-glue-shape-other",
+        "ecp-data-333333333333-ca-central-1",
+        "arn:aws:iam::444444444444:role/ecp-glue-shape",
+        "",
+        None,
+    ],
+)
+def test_a_wrong_known_wiring_value_is_refused(
+    stack: Path,
+    mode: str,
+    build,
+    address: str,
+    attribute: str,
+    want: str,
+    ref: str,
+    parent: str,
+    wrong: Any,  # type: ignore[no-untyped-def]
+) -> None:
+    p = build()
+    for side in ("before", "after"):
+        if change(p, address)["change"].get(side) is not None:
+            change(p, address)["change"][side][attribute] = wrong
+    assert any(address in x and attribute in x for x in check_in(mode, p, stack))
+
+
+@pytest.mark.parametrize(("mode", "build"), MODES)
+@pytest.mark.parametrize(("address", "attribute", "want", "ref", "parent"), WIRING)
+def test_an_unknown_wiring_value_is_accepted_for_exactly_the_stacks_own_reference(
+    stack: Path,
+    mode: str,
+    build,
+    address: str,
+    attribute: str,
+    want: str,
+    ref: str,
+    parent: str,  # type: ignore[no-untyped-def]
+) -> None:
+    if mode == "update" and address == SCRIPT:
+        pytest.skip("the script's update may leave only version_id unknown")
+    for refs in ([ref], [ref, parent], [parent, ref]):
+        p = build()
+        make_unknown(p, address, attribute, refs)
+        assert check_in(mode, p, stack) == [], refs
+
+
+@pytest.mark.parametrize(("mode", "build"), MODES)
+@pytest.mark.parametrize(("address", "attribute", "want", "ref", "parent"), WIRING)
+@pytest.mark.parametrize(
+    "refs",
+    [
+        [],
+        ["aws_iam_role.other.arn", "aws_iam_role.other"],
+        ["module.other.s3_bucket_id", "module.other"],
+        ["aws_iam_role.glue.arn", "aws_iam_role.glue.id"],
+        ["local.bucket"],
+        ["var.expected_account_id"],
+        ["aws_s3_bucket.data.id", "aws_s3_bucket.data"],
+        ["aws_iam_role.glue", "module.bucket"],
+        ["aws_iam_role.glue.name"],
+        ["module.bucket.s3_bucket_arn"],
+    ],
+)
+def test_an_unknown_wiring_value_with_any_other_reference_is_refused(
+    stack: Path,
+    mode: str,
+    build,
+    address: str,
+    attribute: str,
+    want: str,
+    ref: str,
+    parent: str,
+    refs: list[str],  # type: ignore[no-untyped-def]
+) -> None:
+    if {*refs} <= {ref, parent} and refs:
+        pytest.skip("that is the reviewed reference")
+    p = build()
+    make_unknown(p, address, attribute, refs)
+    assert any(address in x and attribute in x for x in check_in(mode, p, stack))
+
+
+@pytest.mark.parametrize(("mode", "build"), MODES)
+@pytest.mark.parametrize(("address", "attribute", "want", "ref", "parent"), WIRING)
+def test_an_unknown_wiring_value_without_a_configuration_expression_is_refused(
+    stack: Path,
+    mode: str,
+    build,
+    address: str,
+    attribute: str,
+    want: str,
+    ref: str,
+    parent: str,  # type: ignore[no-untyped-def]
+) -> None:
+    p = build()
+    c = change(p, address)["change"]
+    c["after"].pop(attribute, None)
+    c["after_unknown"] = {**c["after_unknown"], attribute: True}
+    assert any(address in x and attribute in x for x in check_in(mode, p, stack))

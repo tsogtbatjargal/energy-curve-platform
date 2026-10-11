@@ -19,6 +19,11 @@ The plan must be exactly the 14 creates of the reviewed stack, from an empty sta
   cap, no retries, no connection, no Data Catalog, no PyPI modules;
   the job's six own arguments are all passed, since the script defaults none; no metrics and no
   Glue 4 continuous-logging arguments, which Glue 5 ignores, only --custom-logGroup-prefix).
+The wiring is checked too: the job's `role_arn`, the policy's `role` and each object's `bucket`.
+A known value must be exactly `arn:aws:iam::<account>:role/ecp-glue-shape`, `ecp-glue-shape` and
+`ecp-glue-<account>-<region>`; a value unknown at plan time is accepted only if the plan's
+configuration references exactly `aws_iam_role.glue.arn`, `aws_iam_role.glue.id` or
+`module.bucket.s3_bucket_id` (Terraform also lists the resource or module itself).
 Nothing else: no crawler, catalog, trigger, endpoint, security configuration, KMS key, alarm,
 network or any other service. Also: a sound plan (not errored, complete, no deferred changes, no
 drift, no output changes), ca-central-1, the caller is expected_account_id and not the management
@@ -166,7 +171,50 @@ def repository_hashes() -> dict[str, str]:
 UNSET_AFTER_READ_BACK = ("connections", "security_configuration", "non_overridable_arguments")
 
 
-def check_create(address: str, change: dict[str, Any], account: str) -> list[str]:
+def wiring(account: str) -> dict[str, tuple[str, str, str]]:
+    """Resource -> (attribute, the exact value, the reference that yields it): who runs the job,
+    which role carries the policy, which bucket holds each object."""
+    role, bucket = "ecp-glue-shape", f"ecp-glue-{account}-{REGION}"
+    return {
+        JOB: ("role_arn", f"arn:aws:iam::{account}:role/{role}", "aws_iam_role.glue.arn"),
+        ROLE_POLICY: ("role", role, "aws_iam_role.glue.id"),
+        SCRIPT: ("bucket", bucket, "module.bucket.s3_bucket_id"),
+        BUNDLE: ("bucket", bucket, "module.bucket.s3_bucket_id"),
+    }
+
+
+def config_references(plan: dict[str, Any], address: str, attribute: str) -> set[str] | None:
+    """The references of one attribute's expression in the plan's configuration, or None."""
+    root = (plan.get("configuration") or {}).get("root_module") or {}
+    resource = next((r for r in root.get("resources", []) if r.get("address") == address), {})
+    expression = (resource.get("expressions") or {}).get(attribute)
+    if not isinstance(expression, dict) or "references" not in expression:
+        return None
+    return set(expression["references"])
+
+
+def check_wiring(
+    plan: dict[str, Any], address: str, change: dict[str, Any], account: str
+) -> list[str]:
+    """A known value must be exactly the reviewed one. A value unknown at plan time (the role or
+    bucket is created in the same plan) must come from the stack's own role or bucket: Terraform
+    lists the attribute reference, with or without its resource or module."""
+    if address not in wiring(account):
+        return []
+    attribute, want, reference = wiring(account)[address]
+    after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
+    if unknown.get(attribute):
+        parent = reference.rsplit(".", 1)[0]
+        if config_references(plan, address, attribute) not in ({reference}, {reference, parent}):
+            return [f"{address}: {attribute} is unknown and not from {reference}"]
+    elif after.get(attribute) != want:
+        return [f"{address}: {attribute} is not the reviewed value"]
+    return []
+
+
+def check_create(
+    address: str, change: dict[str, Any], account: str, plan: dict[str, Any] | None = None
+) -> list[str]:
     after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
     bucket = f"ecp-glue-{account}-{REGION}"
     problems = [
@@ -174,6 +222,7 @@ def check_create(address: str, change: dict[str, Any], account: str) -> list[str
         for a, path, want in SETTINGS
         if a == address and dig(after, path) != want
     ]
+    problems += check_wiring(plan or {}, address, change, account)
     if address == f"{_B}.this[0]" and after.get("bucket") != bucket:
         problems.append(f"{address}: bucket is not ecp-glue-<account>-{REGION}")
     if address in OBJECTS:
@@ -334,7 +383,7 @@ def check(
         if mode == "update" and address in UPDATES:
             problems += check_update(address, change)
         if account:
-            problems += check_create(address, change, account)
+            problems += check_create(address, change, account, plan)
     for address in sorted(set(want) - seen):
         problems.append(f"missing change: {want[address]} {address}")
     counts = [sum(v == a for v in want.values()) for a in ("create", "update", "delete")]
