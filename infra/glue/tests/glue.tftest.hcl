@@ -54,8 +54,12 @@ run "the_arguments_are_exactly_the_reviewed_ones" {
       "--enable-continuous-cloudwatch-log" = "true"
       "--continuous-log-logGroup"          = "/aws-glue/ecp-shape"
       "--enable-continuous-log-filter"     = "true"
-      "--output"                           = "s3://ecp-glue-333333333333-ca-central-1/m5/shape"
+      "--start"                            = "1983-01-03"
+      "--end"                              = "2024-04-05"
+      "--window-start"                     = "2014-01-01"
+      "--window-end"                       = "2024-04-05"
       "--partitions"                       = "8"
+      "--output"                           = "s3://ecp-glue-333333333333-ca-central-1/m5/shape"
     })
     error_message = "No Data Catalog flag, no temp dir, no PyPI modules: the job needs only its bundle."
   }

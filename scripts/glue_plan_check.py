@@ -2,7 +2,7 @@
 
     terraform show -json <saved.tfplan> > <plan.json>
     python scripts/build_glue_bundle.py     # the plan was made with this bundle
-    python scripts/glue_plan_check.py <plan.json>
+    python scripts/glue_plan_check.py [--change create|update] <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it rebuilds the bundle and reads
 infra/glue's source. It runs after policy_gate.py --stack glue (ADR-0006 rules, PLAN.md R1 and R2),
@@ -15,12 +15,22 @@ The plan must be exactly the 13 creates of the reviewed stack, from an empty sta
 - the job role: the workload boundary, and trust and inline policy equal to the reviewed templates
   for this account, known at plan time;
 - the log group, and the Glue job with every setting and argument exactly as reviewed (Glue 5.1,
-  two G.1X workers, a 10-minute cap, no retries, no connection, no Data Catalog, no PyPI modules).
+  two G.1X workers, a 10-minute cap, no retries, no connection, no Data Catalog, no PyPI modules;
+  the job's six own arguments are all passed, since the script defaults none).
 Nothing else: no crawler, catalog, trigger, endpoint, security configuration, KMS key, alarm,
 network or any other service. Also: a sound plan (not errored, complete, no deferred changes, no
 drift, no output changes), ca-central-1, the caller is expected_account_id and not the management
 account, and the source has exactly one module call, the bucket, at 5.16.2, with no override file
 or JSON configuration.
+
+`--change update` (the fix to the job's arguments and script, PR #64) is for the applied stack with
+no drift (a refresh-only apply records the provider's read-back first): exactly two in-place
+updates and eleven no-ops. The script object's ETag moves to the repository script's hash (its
+version_id becomes known after apply), and the job's default_arguments become exactly the
+reviewed ones, the existing arguments untouched and the script's own dated arguments added. Every
+other attribute of both is unchanged. No other resource changes: not the bundle, not the role or
+its policy, not the bucket, not the log group. Every resource, changed or not, must still be the
+reviewed one.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values.
@@ -100,10 +110,20 @@ SETTINGS = [
     (JOB, ("command", 0, "name"), "glueetl"),
     (JOB, ("command", 0, "python_version"), "3"),
     (JOB, ("execution_property", 0, "max_concurrent_runs"), 1),
-    (JOB, ("connections",), None),
-    (JOB, ("security_configuration",), None),
-    (JOB, ("non_overridable_arguments",), None),
 ]  # fmt: skip
+
+
+JOB_OWN_ARGUMENTS = (
+    "--start",
+    "--end",
+    "--window-start",
+    "--window-end",
+    "--partitions",
+    "--output",
+)
+UPDATES = {JOB, SCRIPT}
+APPLIED = frozenset({JOB, ROLE, ROLE_POLICY, LOG, SCRIPT, BUNDLE})
+ADDED_BY_THE_FIX = ("--start", "--end", "--window-start", "--window-end")
 
 
 def arguments(bucket: str) -> dict[str, str]:
@@ -114,8 +134,12 @@ def arguments(bucket: str) -> dict[str, str]:
         "--enable-continuous-cloudwatch-log": "true",
         "--continuous-log-logGroup": "/aws-glue/ecp-shape",
         "--enable-continuous-log-filter": "true",
-        "--output": f"s3://{bucket}/m5/shape",
+        "--start": "1983-01-03",
+        "--end": "2024-04-05",
+        "--window-start": "2014-01-01",
+        "--window-end": "2024-04-05",
         "--partitions": "8",
+        "--output": f"s3://{bucket}/m5/shape",
     }
 
 
@@ -141,6 +165,9 @@ def md5(data: bytes) -> str:
 def repository_hashes() -> dict[str, str]:
     script = (ROOT / "jobs" / "glue" / "shape_job.py").read_bytes()
     return {SCRIPT: md5(script), BUNDLE: md5(build_glue_bundle.build_bytes())}
+
+
+UNSET_AFTER_READ_BACK = ("connections", "security_configuration", "non_overridable_arguments")
 
 
 def check_create(address: str, change: dict[str, Any], account: str) -> list[str]:
@@ -175,6 +202,9 @@ def check_create(address: str, change: dict[str, Any], account: str) -> list[str
     ):
         problems.append(f"{address}: policy is not the reviewed template, known at plan time")
     if address == JOB:
+        for attribute in UNSET_AFTER_READ_BACK:  # null, or the empty value the provider reads back
+            if after.get(attribute) not in (None, [], {}, ""):
+                problems.append(f"{address}: {attribute} is not the reviewed value")
         if after.get("default_arguments") != arguments(bucket):
             problems.append(f"{address}: default_arguments are not exactly the reviewed ones")
         script = f"s3://{bucket}/glue/shape_job.py"
@@ -183,7 +213,7 @@ def check_create(address: str, change: dict[str, Any], account: str) -> list[str
     return problems
 
 
-def check_common(plan: dict[str, Any]) -> tuple[list[str], str | None]:
+def check_common(plan: dict[str, Any], mode: str = "create") -> tuple[list[str], str | None]:
     problems: list[str] = []
     if plan.get("errored"):
         problems.append("the plan errored")
@@ -206,8 +236,12 @@ def check_common(plan: dict[str, Any]) -> tuple[list[str], str | None]:
         problems.append("this is the organization's management account, not a member")
     resources = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
     owned = {r["address"] for r in resources.get("resources", [])} - DATA
-    if owned:
+    if mode == "create" and owned:
         problems.append("the state is not empty: this stack starts from no managed resources")
+    if mode == "update" and owned != APPLIED:
+        problems.append(
+            "the state is not the applied stack: it must hold exactly the reviewed ones"
+        )
     for name, out in (plan.get("output_changes") or {}).items():
         if out["actions"] not in UNCHANGED:
             problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
@@ -254,9 +288,44 @@ def check_source(stack_dir: Path) -> list[str]:
     return problems
 
 
-def check(plan: dict[str, Any], stack_dir: Path | None = None) -> tuple[list[str], list[str]]:
-    """(problems, report) for a saved plan of infra/glue."""
-    problems, account = check_common(plan)
+def check_update(address: str, change: dict[str, Any]) -> list[str]:
+    """The two in-place updates: what may differ between before and after, and nothing more."""
+    before, after = change.get("before") or {}, change.get("after") or {}
+    unknown = {k for k, v in (change.get("after_unknown") or {}).items() if v}
+    differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+    problems = []
+    if address == SCRIPT:
+        if unknown - {"version_id"}:
+            problems.append(f"{address}: only version_id may be unknown after apply")
+        if differing - {"etag", "version_id"}:
+            problems.append(
+                f"{address}: changes {', '.join(sorted(differing - {'etag', 'version_id'}))}"
+            )
+        if before.get("etag") == after.get("etag"):
+            problems.append(f"{address}: etag does not change")
+    if address == JOB:
+        if unknown:
+            problems.append(f"{address}: nothing may be unknown after apply")
+        if differing - {"default_arguments"}:
+            problems.append(
+                f"{address}: changes {', '.join(sorted(differing - {'default_arguments'}))}"
+            )
+        old, new = before.get("default_arguments") or {}, after.get("default_arguments") or {}
+        if any(old.get(k) != new.get(k) for k in set(old) | set(new) if k not in ADDED_BY_THE_FIX):
+            problems.append(f"{address}: default_arguments change beyond the script's dated ones")
+        if any(k in old for k in ADDED_BY_THE_FIX) and old != new:
+            problems.append(f"{address}: default_arguments already hold the dated ones")
+    return problems
+
+
+def check(
+    plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
+) -> tuple[list[str], list[str]]:
+    """(problems, report) for a saved plan of infra/glue: `create` from an empty state, or
+    `update` (the two in-place changes of PR #64) on the applied stack."""
+    if mode not in ("create", "update"):
+        return [f"unknown change mode {mode}"], []
+    problems, account = check_common(plan, mode)
     problems += check_source(stack_dir or STACK)
     report: list[str] = []
     seen: set[str] = set()
@@ -264,16 +333,33 @@ def check(plan: dict[str, Any], stack_dir: Path | None = None) -> tuple[list[str
         address, change = rc["address"], rc["change"]
         actions = change["actions"]
         report.append(f"{'+'.join(actions):8} {address}")
-        if address in CREATES and actions == ["create"] and change.get("importing") is None:
-            seen.add(address)
-            if account:
-                problems += check_create(address, change, account)
+        unchanged = actions == ["no-op"]
+        if mode == "create":
+            ok = address in CREATES and actions == ["create"] and change.get("importing") is None
         else:
+            ok = (
+                (address in UPDATES and actions == ["update"])
+                or (address in CREATES - UPDATES and unchanged)
+            ) and change.get("importing") is None
+        if not ok:
+            if mode == "update" and address in UPDATES and unchanged:
+                continue  # reported below as the missing update
             problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+            continue
+        seen.add(address)
+        if mode == "update" and address in UPDATES:
+            problems += check_update(address, change)
+        if account:
+            problems += check_create(address, change, account)
     for address in sorted(CREATES - seen):
-        problems.append(f"missing change: create {address}")
+        verb = "update" if mode == "update" and address in UPDATES else "create"
+        if mode == "update" and address not in UPDATES:
+            problems.append(f"missing resource: {address} must be in the plan, unchanged")
+        else:
+            problems.append(f"missing change: {verb} {address}")
     report.append(
-        f"summary: {len(CREATES)} to add, 0 to change, 0 to destroy"
+        f"summary: {len(CREATES) if mode == 'create' else 0} to add,"
+        f" {2 if mode == 'update' else 0} to change, 0 to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )
@@ -283,9 +369,10 @@ def check(plan: dict[str, Any], stack_dir: Path | None = None) -> tuple[list[str
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="glue_plan_check.py")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
+    parser.add_argument("--change", choices=("create", "update"), default="create")
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)
-    problems, report = check(json.loads(args.plan.read_text()), args.stack_dir)
+    problems, report = check(json.loads(args.plan.read_text()), args.stack_dir, args.change)
     print("\n".join([*report, *(f"FAIL  {p}" for p in problems)] or ["(empty plan)"]))
     if not problems:
         print("OK    the reviewed shape")

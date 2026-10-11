@@ -261,7 +261,7 @@ def test_main_writes_the_parameters_and_their_hash(spark, tmp_path: Path) -> Non
     out = tmp_path / "out"
     digest = shape_job.main(
         ["--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
-         "--window-end", "2014-12-31", "--output", str(out)],
+         "--window-end", "2014-12-31", "--partitions", "2", "--output", str(out)],
         spark=spark,
     )  # fmt: skip
     text = (out / "shape_params.csv" / "part-00000").read_text()
@@ -301,6 +301,8 @@ def submit(tmp_path: Path, master: str, py_files: list[Path]) -> subprocess.Comp
         "--conf", "spark.ui.enabled=false",
         *(["--py-files", ",".join(map(str, py_files))] if py_files else []),
         str(Path(__file__).parents[2] / "jobs" / "glue" / "shape_job.py"),
+        "--start", "1983-01-03", "--end", "2024-04-05",
+        "--window-start", "2014-01-01", "--window-end", "2024-04-05",
         "--partitions", "8",
         "--output", str(tmp_path / "out"),
     ]  # fmt: skip
@@ -334,3 +336,143 @@ def test_without_the_bundle_the_same_run_cannot_import_the_package(tmp_path: Pat
 def test_the_reference_hash_is_what_the_polars_reference_gives_on_the_full_history() -> None:
     reference = shape.estimate_shape(polars_frame(list(history(SHAPE_SERIES, *FULL))))
     assert reference.params_sha256 == REFERENCE_SHA256
+
+
+# --- the arguments Glue really passes ------------------------------------------------------------
+# The first cloud run failed with `unrecognized arguments`: Glue appends its own arguments to the
+# script's command line. These are the names in that run's log (2026-10-10); the values are
+# placeholders, never the logged ones. `--extra-py-files`, `--enable-metrics` and `--job-language`
+# were consumed by Glue and did not reach the script.
+
+GLUE_ADDED = [
+    "--continuous-log-logGroup", "--enable-continuous-log-filter",
+    "--glue-di-packages-correlation-ids", "--internal-lib-urls", "--JOB_ID", "--JOB_RUN_ID",
+    "--enable-continuous-cloudwatch-log", "--tenant-internal", "--JOB_NAME",
+]  # fmt: skip
+JOB_ARGUMENTS = [
+    "--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
+    "--window-end", "2014-12-31", "--partitions", "2",
+]  # fmt: skip
+
+
+def glue_command_line(output: str, sentinel: str = "placeholder") -> list[str]:
+    extra = [item for name in GLUE_ADDED for item in (name, f"{sentinel}-{name.lstrip('-')}")]
+    return [*JOB_ARGUMENTS, "--output", output, *extra]
+
+
+def test_the_job_accepts_the_arguments_glue_adds_and_gives_the_reference_output(
+    spark,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    digest = shape_job.main(glue_command_line(str(tmp_path / "out")), spark=spark)
+    reference = shape.estimate_shape(polars_frame(list(history(SHAPE_SERIES, *SLICE))), SLICE)
+    assert digest == reference.params_sha256
+    text = (tmp_path / "out" / "shape_params.csv" / "part-00000").read_text()
+    assert text.count("\n") == 49
+
+
+def test_ignored_arguments_are_logged_by_name_only(
+    spark,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,  # type: ignore[no-untyped-def]
+) -> None:
+    import logging
+
+    import shape_job
+
+    sentinel = "VALUE-THAT-MUST-NOT-APPEAR"
+    with caplog.at_level(logging.INFO):
+        shape_job.main(glue_command_line(str(tmp_path / "out"), sentinel), spark=spark)
+    logged = caplog.text
+    for name in GLUE_ADDED:
+        assert name in logged, name
+    assert sentinel not in logged
+    assert str(tmp_path) not in logged  # nor the job's own values
+
+
+@pytest.mark.parametrize("name", ["--start", "--end", "--window-start", "--window-end",
+                                  "--partitions", "--output"])  # fmt: skip
+def test_a_missing_job_argument_fails_loudly(
+    spark,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    name: str,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    argv = glue_command_line(str(tmp_path / "out"))
+    i = argv.index(name)
+    del argv[i : i + 2]
+    with pytest.raises(SystemExit) as stop:
+        shape_job.main(argv, spark=spark)
+    assert stop.value.code == 2
+    error = capsys.readouterr().err
+    assert f"the following arguments are required: {name}" in error
+    assert not (tmp_path / "out").exists()  # nothing was written
+
+
+@pytest.mark.parametrize(
+    ("wrong", "right"),
+    [("--ouput", "--output"), ("--out", "--output"), ("--windowstart", "--window-start"),
+     ("--partition", "--partitions"), ("--sart", "--start"), ("--Output", "--output")],
+)  # fmt: skip
+def test_a_misspelled_or_abbreviated_job_argument_fails_loudly(
+    spark,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    wrong: str,
+    right: str,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    argv = [wrong if a == right else a for a in glue_command_line(str(tmp_path / "out"))]
+    with pytest.raises(SystemExit) as stop:
+        shape_job.main(argv, spark=spark)
+    assert stop.value.code == 2
+    # the real name is what the error asks for: the typo did not silently satisfy or replace it
+    assert f"the following arguments are required: {right}" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("--start", "2014-13-01"), ("--end", "yesterday"), ("--partitions", "many"),
+     ("--window-start", "20140101")],
+)  # fmt: skip
+def test_a_malformed_job_argument_value_fails_loudly(
+    spark,
+    tmp_path: Path,
+    name: str,
+    value: str,  # type: ignore[no-untyped-def]
+) -> None:
+    import shape_job
+
+    argv = glue_command_line(str(tmp_path / "out"))
+    argv[argv.index(name) + 1] = value
+    with pytest.raises(SystemExit) as stop:
+        shape_job.main(argv, spark=spark)
+    assert stop.value.code == 2
+
+
+def test_the_job_has_no_default_for_any_argument() -> None:
+    import ast
+
+    tree = ast.parse((Path(__file__).parents[2] / "jobs" / "glue" / "shape_job.py").read_text())
+    adds = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "add_argument"
+    ]  # fmt: skip
+    assert {n.args[0].value for n in adds} == {  # type: ignore[attr-defined]
+        "--start",
+        "--end",
+        "--window-start",
+        "--window-end",
+        "--partitions",
+        "--output",
+    }
+    for call in adds:
+        keywords = {k.arg: k.value for k in call.keywords}
+        assert "default" not in keywords, call.args[0].value  # type: ignore[attr-defined]
+        assert getattr(keywords.get("required"), "value", None) is True
