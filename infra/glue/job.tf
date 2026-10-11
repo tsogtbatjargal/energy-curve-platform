@@ -26,17 +26,14 @@ resource "aws_glue_job" "shape" {
   }
 
   default_arguments = {
-    "--job-language"                     = "python"
-    "--extra-py-files"                   = "s3://${local.bucket}/${local.bundle_key}"
-    "--enable-metrics"                   = ""
-    "--enable-continuous-cloudwatch-log" = "true"
-    "--continuous-log-logGroup"          = aws_cloudwatch_log_group.glue.name
-    "--enable-continuous-log-filter"     = "true"
-    "--start"                            = "1983-01-03"
-    "--end"                              = "2024-04-05"
-    "--window-start"                     = "2014-01-01"
-    "--window-end"                       = "2024-04-05"
-    "--partitions"                       = "8"
-    "--output"                           = local.output_url
+    "--job-language"           = "python"
+    "--extra-py-files"         = "s3://${local.bucket}/${local.bundle_key}"
+    "--custom-logGroup-prefix" = local.log_group_prefix
+    "--start"                  = "1983-01-03"
+    "--end"                    = "2024-04-05"
+    "--window-start"           = "2014-01-01"
+    "--window-end"             = "2024-04-05"
+    "--partitions"             = "8"
+    "--output"                 = local.output_url
   }
 }

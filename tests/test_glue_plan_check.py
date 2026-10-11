@@ -1,8 +1,9 @@
 """M5b (ADR-0023): the Glue stack's plan must be exactly the reviewed shape before its apply.
 
 The plan is synthetic but shaped like a real `terraform show -json` (Terraform 1.15.8) of
-infra/glue from an empty state, read read-only on 2026-10-11: 13 creates. Account IDs are
-placeholders. The object hashes are recomputed from the repository, as the check does.
+infra/glue from an empty state, read read-only on 2026-10-11 (14 creates since the Glue 5 logging
+fix: two log groups). Account IDs are placeholders. The object hashes are recomputed from the
+repository, as the check does.
 """
 
 import copy
@@ -23,20 +24,14 @@ BOUNDARY = f"arn:aws:iam::{MEMBER}:policy/ecp-workload-boundary"
 POLICIES = ROOT / "infra" / "glue" / "policies"
 VALUES = {"account_id": MEMBER, "region": REGION}
 _B = "module.bucket.aws_s3_bucket"
-JOB, ROLE, ROLE_POLICY, LOG = (
-    "aws_glue_job.shape",
-    "aws_iam_role.glue",
-    "aws_iam_role_policy.glue",
-    "aws_cloudwatch_log_group.glue",
-)
+JOB, ROLE, ROLE_POLICY = "aws_glue_job.shape", "aws_iam_role.glue", "aws_iam_role_policy.glue"
+LOG_OUT, LOG_ERR = "aws_cloudwatch_log_group.output", "aws_cloudwatch_log_group.error"
+LOG_OLD = "aws_cloudwatch_log_group.glue"  # the group of the first apply, deleted by the Glue 5 fix
 SCRIPT, BUNDLE = "aws_s3_object.script", "aws_s3_object.bundle"
 ARGUMENTS = {
     "--job-language": "python",
     "--extra-py-files": f"s3://{BUCKET}/glue/energy_curves_m5.zip",
-    "--enable-metrics": "",
-    "--enable-continuous-cloudwatch-log": "true",
-    "--continuous-log-logGroup": "/aws-glue/ecp-shape",
-    "--enable-continuous-log-filter": "true",
+    "--custom-logGroup-prefix": "/aws-glue/ecp-shape",
     "--start": "1983-01-03",
     "--end": "2024-04-05",
     "--window-start": "2014-01-01",
@@ -45,7 +40,7 @@ ARGUMENTS = {
     "--output": f"s3://{BUCKET}/m5/shape",
 }
 ADDRESSES = [
-    JOB, ROLE, ROLE_POLICY, LOG, SCRIPT, BUNDLE,
+    JOB, ROLE, ROLE_POLICY, LOG_OUT, LOG_ERR, SCRIPT, BUNDLE,
     f"{_B}.this[0]", f"{_B}_lifecycle_configuration.this[0]", f"{_B}_ownership_controls.this[0]",
     f"{_B}_policy.this[0]", f"{_B}_public_access_block.this[0]",
     f"{_B}_server_side_encryption_configuration.this[0]", f"{_B}_versioning.this[0]",
@@ -91,7 +86,8 @@ def after_values() -> dict[str, dict[str, Any]]:
         ROLE: {"name": "ecp-glue-shape", "permissions_boundary": BOUNDARY,
                "assume_role_policy": template("glue-trust")},
         ROLE_POLICY: {"name": "ecp-glue-shape", "policy": template("glue-policy")},
-        LOG: {"name": "/aws-glue/ecp-shape", "retention_in_days": 14},
+        LOG_OUT: {"name": "/aws-glue/ecp-shape/output", "retention_in_days": 14},
+        LOG_ERR: {"name": "/aws-glue/ecp-shape/error", "retention_in_days": 14},
         JOB: {
             "name": "ecp-glue-shape", "glue_version": "5.1", "worker_type": "G.1X",
             "number_of_workers": 2, "timeout": 10, "max_retries": 0, "execution_class": "STANDARD",
@@ -163,7 +159,7 @@ def run(p: dict[str, Any], stack: Path) -> list[str]:
 def test_the_reviewed_plan_passes(stack: Path) -> None:
     problems, report = gpc.check(plan(), stack)
     assert problems == []
-    assert "summary: 13 to add, 0 to change, 0 to destroy" in report
+    assert "summary: 14 to add, 0 to change, 0 to destroy" in report
 
 
 def test_a_plan_with_every_variable_recorded_as_a_string_passes(stack: Path) -> None:
@@ -268,6 +264,13 @@ def test_a_job_setting_that_differs_is_refused(stack: Path, path: tuple, value: 
         lambda a: a.pop("--window-start"),
         lambda a: a.update({"--conf": "spark.hadoop.fs.s3a.access.key=x"}),
         lambda a: a.pop("--output"),
+        lambda a: a.update({"--enable-metrics": ""}),
+        lambda a: a.update({"--enable-continuous-cloudwatch-log": "true"}),
+        lambda a: a.update({"--continuous-log-logGroup": "/aws-glue/ecp-shape"}),
+        lambda a: a.update({"--enable-continuous-log-filter": "true"}),
+        lambda a: a.pop("--custom-logGroup-prefix"),
+        lambda a: a.update({"--custom-logGroup-prefix": "/aws-glue/jobs"}),
+        lambda a: a.update({"--custom-logStream-prefix": "x"}),
     ],
 )
 def test_the_arguments_must_be_exactly_the_reviewed_ones(stack: Path, mutate) -> None:  # type: ignore[no-untyped-def]
@@ -368,7 +371,8 @@ def test_a_role_policy_for_another_account_is_refused(stack: Path) -> None:
         (f"{_B}_lifecycle_configuration.this[0]", ("rule", 1, "status"), "Disabled"),
         (f"{_B}_lifecycle_configuration.this[0]",
          ("rule", 1, "noncurrent_version_expiration", 0, "noncurrent_days"), 3650),
-        (LOG, ("name",), "/aws-glue/other"), (LOG, ("retention_in_days",), 0),
+        (LOG_OUT, ("name",), "/aws-glue/ecp-shape"), (LOG_OUT, ("retention_in_days",), 0),
+        (LOG_ERR, ("name",), "/aws-glue/other/error"), (LOG_ERR, ("retention_in_days",), 0),
     ],
 )  # fmt: skip
 def test_a_reviewed_setting_that_differs_is_refused(
@@ -480,14 +484,21 @@ def test_main_exits_zero_for_the_reviewed_plan_and_nonzero_otherwise(
     assert "FAIL  region must be ca-central-1" in capsys.readouterr().out
 
 
-# --- the update: the fix to the job's arguments and script (PR #64) ----------------------------
-# Shaped like the real plan read read-only on 2026-10-10 from the applied stack with no drift:
-# 2 updates in place, 11 no-ops. The script object's ETag moves to the repository's script (its
-# version_id is known after apply), and the job gains the script's four dated arguments.
+# --- the update: Glue 5 logging and no metrics (M5b second fix) --------------------------------
+# On the applied stack with no drift: the job's default_arguments update in place (the four
+# Glue-4 logging/metrics arguments go, --custom-logGroup-prefix arrives), two log groups are
+# created and the empty /aws-glue/ecp-shape group is deleted. 1 update, 2 creates, 1 delete,
+# 10 no-ops; nothing else.
 
-OLD_SCRIPT_ETAG = "291331c34b6cadaf68fb80a95027b842"
-NEW_ARGUMENTS = ("--start", "--end", "--window-start", "--window-end")
-APPLIED = [JOB, ROLE, ROLE_POLICY, LOG, SCRIPT, BUNDLE]
+REMOVED_ARGUMENTS = {
+    "--enable-metrics": "",
+    "--enable-continuous-cloudwatch-log": "true",
+    "--continuous-log-logGroup": "/aws-glue/ecp-shape",
+    "--enable-continuous-log-filter": "true",
+}
+APPLIED = [JOB, ROLE, ROLE_POLICY, LOG_OLD, SCRIPT, BUNDLE]
+CREATED = [LOG_OUT, LOG_ERR]
+UNCHANGED = [a for a in ADDRESSES if a not in (JOB, *CREATED)]
 
 
 def update_plan() -> dict[str, Any]:
@@ -497,21 +508,26 @@ def update_plan() -> dict[str, Any]:
     ]
     for r in p["resource_changes"]:
         c = r["change"]
+        if r["address"] in CREATED:
+            continue  # a create: nothing before
         c["before"] = copy.deepcopy(c["after"])
         c["actions"] = ["no-op"]
     job = change(p, JOB)["change"]
     job["actions"] = ["update"]
     for side in ("before", "after"):  # the provider's read-back, recorded by the refresh-only apply
         job[side].update(connections=[], security_configuration="", non_overridable_arguments={})
-    job["before"]["default_arguments"] = {
-        k: v for k, v in ARGUMENTS.items() if k not in NEW_ARGUMENTS
-    }
-    script = change(p, SCRIPT)["change"]
-    script["actions"] = ["update"]
-    script["before"]["etag"] = OLD_SCRIPT_ETAG
-    script["before"]["version_id"] = "null"
-    script["after"].pop("version_id", None)
-    script["after_unknown"] = {"version_id": True}
+    old = {k: v for k, v in ARGUMENTS.items() if k != "--custom-logGroup-prefix"}
+    job["before"]["default_arguments"] = {**old, **REMOVED_ARGUMENTS}
+    p["resource_changes"].append(
+        {
+            "address": LOG_OLD, "mode": "managed", "type": "aws_cloudwatch_log_group",
+            "action_reason": "delete_because_no_resource_config",
+            "change": {
+                "actions": ["delete"], "after": None, "after_unknown": {},
+                "before": {"name": "/aws-glue/ecp-shape", "retention_in_days": 14},
+            },
+        }
+    )  # fmt: skip
     return p
 
 
@@ -523,11 +539,10 @@ def run_update(p: dict[str, Any], stack: Path) -> list[str]:
 def test_the_reviewed_update_plan_passes(stack: Path) -> None:
     problems, report = gpc.check(update_plan(), stack, "update")
     assert problems == []
-    assert "summary: 0 to add, 2 to change, 0 to destroy" in report
-    assert [x for x in report if x.startswith("update")] == [
-        f"update   {JOB}",
-        f"update   {SCRIPT}",
-    ]
+    assert "summary: 2 to add, 1 to change, 1 to destroy" in report
+    assert sorted(x for x in report if not x.startswith(("no-op", "summary"))) == sorted(
+        [f"create   {LOG_OUT}", f"create   {LOG_ERR}", f"update   {JOB}", f"delete   {LOG_OLD}"]
+    )
 
 
 def test_the_update_plan_is_refused_in_create_mode_and_the_create_plan_in_update_mode(
@@ -555,7 +570,7 @@ def test_an_unknown_change_mode_is_refused(stack: Path) -> None:
 
 def test_update_mode_refuses_drift(stack: Path) -> None:
     p = update_plan()
-    p["resource_drift"] = [{"address": LOG}]
+    p["resource_drift"] = [{"address": LOG_OLD}]
     assert any("resource_drift" in x for x in run_update(p, stack))
 
 
@@ -570,16 +585,22 @@ def test_update_mode_needs_the_applied_state(stack: Path) -> None:
         {"address": "aws_s3_bucket.old", "mode": "managed", "values": {}}
     )
     assert any("state" in x for x in run_update(p, stack))
+    p = update_plan()  # the new groups are not in the state yet
+    p["prior_state"]["values"]["root_module"]["resources"].append(
+        {"address": LOG_OUT, "mode": "managed", "values": {}}
+    )
+    assert any("state" in x for x in run_update(p, stack))
 
 
-@pytest.mark.parametrize("address", [JOB, SCRIPT])
-def test_a_missing_update_is_refused(stack: Path, address: str) -> None:
-    p = update_plan()
-    change(p, address)["change"]["actions"] = ["no-op"]
-    assert any(f"missing change: update {address}" in x for x in run_update(p, stack))
+def test_a_missing_change_is_refused(stack: Path) -> None:
+    for address, verb in [(JOB, "update"), (LOG_OUT, "create"), (LOG_ERR, "create"),
+                          (LOG_OLD, "delete")]:  # fmt: skip
+        p = update_plan()
+        p["resource_changes"] = [r for r in p["resource_changes"] if r["address"] != address]
+        assert any(f"missing change: {verb} {address}" in x for x in run_update(p, stack))
 
 
-@pytest.mark.parametrize("address", [x for x in ADDRESSES if x not in (JOB, SCRIPT)])
+@pytest.mark.parametrize("address", UNCHANGED)
 @pytest.mark.parametrize("actions", [["update"], ["delete", "create"], ["delete"], ["create"]])
 def test_any_other_resource_must_stay_unchanged(
     stack: Path, address: str, actions: list[str]
@@ -592,15 +613,52 @@ def test_any_other_resource_must_stay_unchanged(
 
 
 @pytest.mark.parametrize(
-    "actions", [["delete", "create"], ["create", "delete"], ["delete"], ["create"]]
+    "actions", [["delete", "create"], ["create", "delete"], ["delete"], ["create"], ["no-op"]]
 )
-@pytest.mark.parametrize("address", [JOB, SCRIPT])
-def test_the_two_changes_must_be_in_place(stack: Path, address: str, actions: list[str]) -> None:
+def test_the_job_must_be_updated_in_place(stack: Path, actions: list[str]) -> None:
+    p = update_plan()
+    change(p, JOB)["change"]["actions"] = actions
+    assert run_update(p, stack) != []
+
+
+@pytest.mark.parametrize("address", CREATED)
+@pytest.mark.parametrize("actions", [["no-op"], ["update"], ["delete"], ["delete", "create"]])
+def test_the_new_log_groups_must_be_plain_creates(
+    stack: Path, address: str, actions: list[str]
+) -> None:
     p = update_plan()
     change(p, address)["change"]["actions"] = actions
-    assert any(
-        f"unexpected change: {'+'.join(actions)} {address}" in x for x in run_update(p, stack)
-    )
+    assert run_update(p, stack) != []
+
+
+@pytest.mark.parametrize("actions", [["no-op"], ["update"], ["create"], ["delete", "create"]])
+def test_the_old_log_group_must_be_deleted(stack: Path, actions: list[str]) -> None:
+    p = update_plan()
+    change(p, LOG_OLD)["change"]["actions"] = actions
+    assert run_update(p, stack) != []
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [("name", "/aws-glue/jobs/output"), ("retention_in_days", 0)],
+)
+def test_only_the_empty_first_log_group_may_be_deleted(
+    stack: Path, attribute: str, value: Any
+) -> None:
+    p = update_plan()
+    change(p, LOG_OLD)["change"]["before"][attribute] = value
+    assert any(LOG_OLD in x for x in run_update(p, stack))
+
+
+def test_another_deleted_resource_is_refused(stack: Path) -> None:
+    p = update_plan()
+    p["resource_changes"].append(
+        {"address": "aws_cloudwatch_log_group.jobs", "mode": "managed",
+         "type": "aws_cloudwatch_log_group",
+         "change": {"actions": ["delete"], "before": {"name": "/aws-glue/jobs/error"},
+                    "after": None, "after_unknown": {}}}
+    )  # fmt: skip
+    assert any("unexpected change: delete" in x for x in run_update(p, stack))
 
 
 def test_a_new_resource_is_refused(stack: Path) -> None:
@@ -609,7 +667,25 @@ def test_a_new_resource_is_refused(stack: Path) -> None:
     assert any("unexpected change: create aws_glue_crawler.x" in x for x in run_update(p, stack))
 
 
-# the job: only default_arguments, to exactly the reviewed arguments
+@pytest.mark.parametrize(
+    ("address", "path", "value"),
+    [
+        (LOG_OUT, ("name",), "/aws-glue/ecp-shape"),
+        (LOG_OUT, ("name",), "/aws-glue/jobs/output"),
+        (LOG_OUT, ("retention_in_days",), 0),
+        (LOG_ERR, ("name",), "/aws-glue/other/error"),
+        (LOG_ERR, ("retention_in_days",), 3650),
+    ],
+)
+def test_the_created_log_groups_are_the_reviewed_ones(
+    stack: Path, address: str, path: tuple, value: Any
+) -> None:
+    p = update_plan()
+    change(p, address)["change"]["after"][path[0]] = value
+    assert any(address in x for x in run_update(p, stack))
+
+
+# the job: only default_arguments, from the Glue-4 set to exactly the reviewed one
 
 
 @pytest.mark.parametrize(
@@ -637,6 +713,13 @@ def test_the_job_may_change_nothing_but_its_arguments(
         lambda a: a.update({"--enable-glue-datacatalog": ""}),
         lambda a: a.pop("--window-end"),
         lambda a: a.pop("--partitions"),
+        lambda a: a.pop("--custom-logGroup-prefix"),
+        lambda a: a.update({"--custom-logGroup-prefix": "/aws-glue/jobs"}),
+        lambda a: a.update({"--custom-logStream-prefix": "x"}),
+        lambda a: a.update({"--enable-metrics": ""}),
+        lambda a: a.update({"--enable-continuous-cloudwatch-log": "true"}),
+        lambda a: a.update({"--continuous-log-logGroup": "/aws-glue/ecp-shape"}),
+        lambda a: a.update({"--enable-continuous-log-filter": "true"}),
     ],
 )
 def test_the_arguments_after_must_be_exactly_the_reviewed_ones(stack: Path, mutate) -> None:  # type: ignore[no-untyped-def]
@@ -652,59 +735,33 @@ def test_the_arguments_after_must_be_exactly_the_reviewed_ones(stack: Path, muta
         lambda a: a.update({"--partitions": "800"}),
         lambda a: a.pop("--extra-py-files"),
         lambda a: a.update({"--conf": "x"}),
+        lambda a: a.pop("--enable-metrics"),
+        lambda a: a.update({"--enable-metrics": "true"}),
+        lambda a: a.update({"--continuous-log-logGroup": "/aws-glue/other"}),
+        lambda a: a.update({"--custom-logGroup-prefix": "/aws-glue/ecp-shape"}),
     ],
 )
-def test_the_existing_arguments_may_not_change(stack: Path, mutate) -> None:  # type: ignore[no-untyped-def]
+def test_the_arguments_before_must_be_the_applied_ones(stack: Path, mutate) -> None:  # type: ignore[no-untyped-def]
     p = update_plan()
     mutate(change(p, JOB)["change"]["before"]["default_arguments"])
     assert any(JOB in x for x in run_update(p, stack))
 
 
-def test_an_argument_may_not_be_removed_by_the_update(stack: Path) -> None:
+def test_the_job_may_have_nothing_unknown_after_apply(stack: Path) -> None:
     p = update_plan()
-    p["resource_changes"][ADDRESSES.index(JOB)]["change"]["before"]["default_arguments"][
-        "--legacy"
-    ] = "x"
+    change(p, JOB)["change"]["after_unknown"] = {"arn": True}
     assert any(JOB in x for x in run_update(p, stack))
 
 
-# the script object: only the ETag (and the version it creates), to the repository's script
+# the script and the bundle, IAM: unchanged, and still the reviewed ones
 
 
-def test_the_script_etag_after_must_be_the_repositorys(stack: Path) -> None:
+def test_the_script_may_not_change_in_this_update(stack: Path) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["after"]["etag"] = md5(b"something else")
-    assert any(SCRIPT in x and "repository" in x for x in run_update(p, stack))
-
-
-def test_the_script_etag_must_actually_change(stack: Path) -> None:
-    p = update_plan()
-    change(p, SCRIPT)["change"]["before"]["etag"] = change(p, SCRIPT)["change"]["after"]["etag"]
+    c = change(p, SCRIPT)["change"]
+    c["actions"] = ["update"]
+    c["before"]["etag"] = md5(b"an older script")
     assert any(SCRIPT in x for x in run_update(p, stack))
-
-
-@pytest.mark.parametrize(
-    ("attribute", "value"),
-    [("key", "glue/other.py"), ("source", "/elsewhere/evil.py"), ("content_type", "text/x"),
-     ("kms_key_id", "k"), ("acl", "public-read"), ("storage_class", "GLACIER")],
-)  # fmt: skip
-def test_the_script_object_may_change_nothing_but_its_etag(
-    stack: Path, attribute: str, value: str
-) -> None:
-    p = update_plan()
-    change(p, SCRIPT)["change"]["before"][attribute] = value
-    assert any(SCRIPT in x for x in run_update(p, stack))
-
-
-def test_the_script_object_may_have_other_attributes_unknown_only_for_its_version(
-    stack: Path,
-) -> None:
-    p = update_plan()
-    change(p, SCRIPT)["change"]["after_unknown"] = {"version_id": True, "bucket": True}
-    assert any(SCRIPT in x for x in run_update(p, stack))
-
-
-# the bundle, IAM: unchanged, and still the reviewed ones
 
 
 def test_a_bundle_that_is_not_the_repositorys_is_refused_even_unchanged(stack: Path) -> None:
@@ -712,6 +769,13 @@ def test_a_bundle_that_is_not_the_repositorys_is_refused_even_unchanged(stack: P
     for side in ("before", "after"):
         change(p, BUNDLE)["change"][side]["etag"] = md5(b"another bundle")
     assert any(BUNDLE in x and "repository" in x for x in run_update(p, stack))
+
+
+def test_a_script_that_is_not_the_repositorys_is_refused_even_unchanged(stack: Path) -> None:
+    p = update_plan()
+    for side in ("before", "after"):
+        change(p, SCRIPT)["change"][side]["etag"] = md5(b"another script")
+    assert any(SCRIPT in x and "repository" in x for x in run_update(p, stack))
 
 
 def test_a_role_policy_that_is_not_the_template_is_refused_even_unchanged(stack: Path) -> None:

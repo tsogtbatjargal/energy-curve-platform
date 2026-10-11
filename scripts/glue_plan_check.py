@@ -8,28 +8,29 @@ Run it from the clean checkout the saved plan was made from: it rebuilds the bun
 infra/glue's source. It runs after policy_gate.py --stack glue (ADR-0006 rules, PLAN.md R1 and R2),
 not instead of it. One stage: nothing here depends on an image digest.
 
-The plan must be exactly the 13 creates of the reviewed stack, from an empty state:
+The plan must be exactly the 14 creates of the reviewed stack, from an empty state:
 - the stack's own bucket (the pinned registry module) with its reviewed settings, never the batch
   store; the two S3 objects, whose hashes equal the repository's `jobs/glue/shape_job.py` and the
   bundle `scripts/build_glue_bundle.py` builds, so Glue runs exactly the reviewed source;
 - the job role: the workload boundary, and trust and inline policy equal to the reviewed templates
   for this account, known at plan time;
-- the log group, and the Glue job with every setting and argument exactly as reviewed (Glue 5.1,
-  two G.1X workers, a 10-minute cap, no retries, no connection, no Data Catalog, no PyPI modules;
-  the job's six own arguments are all passed, since the script defaults none).
+- the two log groups (Glue 5 writes to <prefix>/output and <prefix>/error), and the Glue job with
+  every setting and argument exactly as reviewed (Glue 5.1, two G.1X workers, a 10-minute
+  cap, no retries, no connection, no Data Catalog, no PyPI modules;
+  the job's six own arguments are all passed, since the script defaults none; no metrics and no
+  Glue 4 continuous-logging arguments, which Glue 5 ignores, only --custom-logGroup-prefix).
 Nothing else: no crawler, catalog, trigger, endpoint, security configuration, KMS key, alarm,
 network or any other service. Also: a sound plan (not errored, complete, no deferred changes, no
 drift, no output changes), ca-central-1, the caller is expected_account_id and not the management
 account, and the source has exactly one module call, the bucket, at 5.16.2, with no override file
 or JSON configuration.
 
-`--change update` (the fix to the job's arguments and script, PR #64) is for the applied stack with
-no drift (a refresh-only apply records the provider's read-back first): exactly two in-place
-updates and eleven no-ops. The script object's ETag moves to the repository script's hash (its
-version_id becomes known after apply), and the job's default_arguments become exactly the
-reviewed ones, the existing arguments untouched and the script's own dated arguments added. Every
-other attribute of both is unchanged. No other resource changes: not the bundle, not the role or
-its policy, not the bucket, not the log group. Every resource, changed or not, must still be the
+`--change update` (the Glue 5 logging fix) is for the applied stack with no drift (a refresh-only
+apply records the provider's read-back first): the job's default_arguments update in place (the
+metrics flag and the three Glue 4 logging arguments go, --custom-logGroup-prefix arrives, every
+other argument and attribute untouched), the two log groups are created, the first apply's empty
+/aws-glue/ecp-shape group is deleted, and the other ten resources are no-ops: not the script, the
+bundle, the role or its policy, nor the bucket. Every resource, changed or not, must still be the
 reviewed one.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
@@ -56,16 +57,14 @@ REGION = "ca-central-1"
 MODULE = ("bucket", "terraform-aws-modules/s3-bucket/aws", "5.16.2")
 VARIABLES = frozenset({"region", "owner", "expected_account_id"})
 _B = "module.bucket.aws_s3_bucket"
-JOB, ROLE, ROLE_POLICY, LOG = (
-    "aws_glue_job.shape",
-    "aws_iam_role.glue",
-    "aws_iam_role_policy.glue",
-    "aws_cloudwatch_log_group.glue",
-)
+JOB, ROLE, ROLE_POLICY = "aws_glue_job.shape", "aws_iam_role.glue", "aws_iam_role_policy.glue"
+LOG_OUT, LOG_ERR = "aws_cloudwatch_log_group.output", "aws_cloudwatch_log_group.error"
+LOG_OLD = "aws_cloudwatch_log_group.glue"  # the first apply's group; the Glue 5 fix deletes it
+LOG_PREFIX = "/aws-glue/ecp-shape"
 SCRIPT, BUNDLE = "aws_s3_object.script", "aws_s3_object.bundle"
 CREATES = frozenset(
     {
-        JOB, ROLE, ROLE_POLICY, LOG, SCRIPT, BUNDLE,
+        JOB, ROLE, ROLE_POLICY, LOG_OUT, LOG_ERR, SCRIPT, BUNDLE,
         f"{_B}.this[0]", f"{_B}_lifecycle_configuration.this[0]",
         f"{_B}_ownership_controls.this[0]", f"{_B}_policy.this[0]",
         f"{_B}_public_access_block.this[0]",
@@ -96,8 +95,10 @@ SETTINGS = [
     (LIFECYCLE, ("rule", 1, "status"), "Enabled"),
     (LIFECYCLE, ("rule", 1, "noncurrent_version_expiration", 0, "noncurrent_days"), 30),
     (LIFECYCLE, ("rule", 1, "abort_incomplete_multipart_upload", 0, "days_after_initiation"), 1),
-    (LOG, ("name",), "/aws-glue/ecp-shape"),
-    (LOG, ("retention_in_days",), 14),
+    (LOG_OUT, ("name",), f"{LOG_PREFIX}/output"),
+    (LOG_OUT, ("retention_in_days",), 14),
+    (LOG_ERR, ("name",), f"{LOG_PREFIX}/error"),
+    (LOG_ERR, ("retention_in_days",), 14),
     (ROLE, ("name",), "ecp-glue-shape"),
     (ROLE_POLICY, ("name",), "ecp-glue-shape"),
     (JOB, ("name",), "ecp-glue-shape"),
@@ -121,19 +122,23 @@ JOB_OWN_ARGUMENTS = (
     "--partitions",
     "--output",
 )
-UPDATES = {JOB, SCRIPT}
-APPLIED = frozenset({JOB, ROLE, ROLE_POLICY, LOG, SCRIPT, BUNDLE})
-ADDED_BY_THE_FIX = ("--start", "--end", "--window-start", "--window-end")
+# The update (Glue 5 logging, no metrics): the job's arguments change in place, the two log groups
+# are created, the first apply's empty group is deleted, and nothing else moves.
+UPDATES, NEW_GROUPS = {JOB}, {LOG_OUT, LOG_ERR}
+APPLIED = frozenset({JOB, ROLE, ROLE_POLICY, LOG_OLD, SCRIPT, BUNDLE})
+REMOVED_BY_THE_FIX = {
+    "--enable-metrics": "",
+    "--enable-continuous-cloudwatch-log": "true",
+    "--continuous-log-logGroup": LOG_PREFIX,
+    "--enable-continuous-log-filter": "true",
+}
 
 
 def arguments(bucket: str) -> dict[str, str]:
     return {
         "--job-language": "python",
         "--extra-py-files": f"s3://{bucket}/glue/energy_curves_m5.zip",
-        "--enable-metrics": "",
-        "--enable-continuous-cloudwatch-log": "true",
-        "--continuous-log-logGroup": "/aws-glue/ecp-shape",
-        "--enable-continuous-log-filter": "true",
+        "--custom-logGroup-prefix": LOG_PREFIX,
         "--start": "1983-01-03",
         "--end": "2024-04-05",
         "--window-start": "2014-01-01",
@@ -289,77 +294,80 @@ def check_source(stack_dir: Path) -> list[str]:
 
 
 def check_update(address: str, change: dict[str, Any]) -> list[str]:
-    """The two in-place updates: what may differ between before and after, and nothing more."""
+    """The job's in-place update: only default_arguments differ, from the applied set (with the
+    Glue 4 logging and metrics arguments) to exactly the reviewed one."""
     before, after = change.get("before") or {}, change.get("after") or {}
     unknown = {k for k, v in (change.get("after_unknown") or {}).items() if v}
     differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
     problems = []
-    if address == SCRIPT:
-        if unknown - {"version_id"}:
-            problems.append(f"{address}: only version_id may be unknown after apply")
-        if differing - {"etag", "version_id"}:
-            problems.append(
-                f"{address}: changes {', '.join(sorted(differing - {'etag', 'version_id'}))}"
-            )
-        if before.get("etag") == after.get("etag"):
-            problems.append(f"{address}: etag does not change")
-    if address == JOB:
-        if unknown:
-            problems.append(f"{address}: nothing may be unknown after apply")
-        if differing - {"default_arguments"}:
-            problems.append(
-                f"{address}: changes {', '.join(sorted(differing - {'default_arguments'}))}"
-            )
-        old, new = before.get("default_arguments") or {}, after.get("default_arguments") or {}
-        if any(old.get(k) != new.get(k) for k in set(old) | set(new) if k not in ADDED_BY_THE_FIX):
-            problems.append(f"{address}: default_arguments change beyond the script's dated ones")
-        if any(k in old for k in ADDED_BY_THE_FIX) and old != new:
-            problems.append(f"{address}: default_arguments already hold the dated ones")
+    if unknown:
+        problems.append(f"{address}: nothing may be unknown after apply")
+    if differing - {"default_arguments"}:
+        problems.append(
+            f"{address}: changes {', '.join(sorted(differing - {'default_arguments'}))}"
+        )
+    old, new = before.get("default_arguments") or {}, after.get("default_arguments") or {}
+    kept = {k: v for k, v in new.items() if k != "--custom-logGroup-prefix"}
+    if old != {**kept, **REMOVED_BY_THE_FIX}:
+        problems.append(f"{address}: default_arguments before are not the applied ones")
     return problems
+
+
+def check_deleted(address: str, change: dict[str, Any]) -> list[str]:
+    """Only the first apply's log group (empty, 14 days) may be deleted."""
+    before = change.get("before") or {}
+    if (before.get("name"), before.get("retention_in_days")) != (LOG_PREFIX, 14):
+        return [f"{address}: the deleted group is not the first apply's /aws-glue/ecp-shape"]
+    return []
+
+
+def expected_actions(mode: str) -> dict[str, str]:
+    if mode == "create":
+        return {a: "create" for a in CREATES}
+    return {
+        **{a: "no-op" for a in CREATES - UPDATES - NEW_GROUPS},
+        **{a: "update" for a in UPDATES},
+        **{a: "create" for a in NEW_GROUPS},
+        LOG_OLD: "delete",
+    }
 
 
 def check(
     plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
 ) -> tuple[list[str], list[str]]:
     """(problems, report) for a saved plan of infra/glue: `create` from an empty state, or
-    `update` (the two in-place changes of PR #64) on the applied stack."""
+    `update` (the Glue 5 logging fix) on the applied stack."""
     if mode not in ("create", "update"):
         return [f"unknown change mode {mode}"], []
     problems, account = check_common(plan, mode)
     problems += check_source(stack_dir or STACK)
     report: list[str] = []
+    want = expected_actions(mode)
     seen: set[str] = set()
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]
         actions = change["actions"]
         report.append(f"{'+'.join(actions):8} {address}")
-        unchanged = actions == ["no-op"]
-        if mode == "create":
-            ok = address in CREATES and actions == ["create"] and change.get("importing") is None
-        else:
-            ok = (
-                (address in UPDATES and actions == ["update"])
-                or (address in CREATES - UPDATES and unchanged)
-            ) and change.get("importing") is None
-        if not ok:
-            if mode == "update" and address in UPDATES and unchanged:
-                continue  # reported below as the missing update
+        if (
+            want.get(address) is None
+            or actions != [want[address]]
+            or change.get("importing") is not None
+        ):
             problems.append(f"unexpected change: {'+'.join(actions)} {address}")
             continue
         seen.add(address)
+        if address == LOG_OLD:
+            problems += check_deleted(address, change)
+            continue
         if mode == "update" and address in UPDATES:
             problems += check_update(address, change)
         if account:
             problems += check_create(address, change, account)
-    for address in sorted(CREATES - seen):
-        verb = "update" if mode == "update" and address in UPDATES else "create"
-        if mode == "update" and address not in UPDATES:
-            problems.append(f"missing resource: {address} must be in the plan, unchanged")
-        else:
-            problems.append(f"missing change: {verb} {address}")
+    for address in sorted(set(want) - seen):
+        problems.append(f"missing change: {want[address]} {address}")
+    counts = [sum(v == a for v in want.values()) for a in ("create", "update", "delete")]
     report.append(
-        f"summary: {len(CREATES) if mode == 'create' else 0} to add,"
-        f" {2 if mode == 'update' else 0} to change, 0 to destroy"
+        "summary: {} to add, {} to change, {} to destroy".format(*counts)
         if not problems
         else "summary: not the reviewed shape"
     )
