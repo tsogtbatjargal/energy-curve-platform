@@ -272,6 +272,47 @@ def test_main_writes_the_parameters_and_their_hash(spark, tmp_path: Path) -> Non
     assert digest == reference.params_sha256
 
 
+def run_main(spark, out: Path) -> str:  # type: ignore[no-untyped-def]
+    import shape_job
+
+    return shape_job.main(
+        ["--start", "2014-01-01", "--end", "2014-12-31", "--window-start", "2014-01-01",
+         "--window-end", "2014-12-31", "--partitions", "2", "--output", str(out)],
+        spark=spark,
+    )  # fmt: skip
+
+
+def test_the_job_can_be_rerun_into_the_same_output(spark, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """The third cloud run could not have worked: saveAsTextFile refuses an existing directory
+    (FileAlreadyExistsException), and the second run's files were in m5/shape/."""
+    out = tmp_path / "out"
+    first = run_main(spark, out)
+    second = run_main(spark, out)
+    assert first == second
+    for name in ("shape_params.csv", "shape_params.sha256"):
+        assert sorted(p.name for p in (out / name).glob("part-*")) == ["part-00000"]
+    assert (out / "shape_params.sha256" / "part-00000").read_text().strip() == second
+
+
+def test_a_rerun_replaces_stale_files_under_its_two_outputs_and_touches_nothing_else(
+    spark,
+    tmp_path: Path,  # type: ignore[no-untyped-def]
+) -> None:
+    out = tmp_path / "out"
+    run_main(spark, out)
+    (out / "shape_params.csv" / "part-00001").write_text("stale\n")  # e.g. a wider earlier run
+    (out / "shape_params.csv" / "_SUCCESS").write_text("")
+    (out / "other").mkdir()
+    (out / "other" / "keep.txt").write_text("keep\n")
+    (out / "unrelated.csv").write_text("keep\n")
+    run_main(spark, out)
+    names = {p.name for p in (out / "shape_params.csv").iterdir() if p.is_file()}
+    assert "part-00000" in names and "part-00001" not in names  # the stale file is gone
+    assert not (out / "shape_params.csv" / "_SUCCESS").read_text()  # and it is the new, empty one
+    assert (out / "other" / "keep.txt").read_text() == "keep\n"
+    assert (out / "unrelated.csv").read_text() == "keep\n"
+
+
 # --- the built bundle, shipped the way Glue ships it ---------------------------------------------
 
 REFERENCE_SHA256 = "4a111aa831712d152a387c8c8dcd9687132241ea0488a05dbdc925eacf253af4"

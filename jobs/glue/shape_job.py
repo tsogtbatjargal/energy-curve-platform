@@ -129,8 +129,19 @@ def estimate_shape_spark(
     )
 
 
+def _delete(spark: Any, path: str) -> None:
+    """Remove `path` (a file or directory) through the Hadoop FileSystem of its own scheme, so a
+    rerun can replace it: saveAsTextFile refuses an existing directory."""
+    target = spark._jvm.org.apache.hadoop.fs.Path(path)
+    fs = target.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+    if fs.exists(target):
+        fs.delete(target, True)
+
+
 def _write(spark: Any, text: str, path: str) -> None:
-    """One-element text file under `path` (Spark writes `path/part-00000`)."""
+    """One-element text file under `path` (Spark writes `path/part-00000`), replacing what an
+    earlier run left there. Only `path` itself is deleted, never its parent."""
+    _delete(spark, path)
     spark.sparkContext.parallelize([text.rstrip("\n")], 1).saveAsTextFile(path)
 
 
