@@ -79,3 +79,15 @@ deny contains msg if {
 	not valid_boundary(rc)
 	msg := sprintf("%s: workload roles need permissions_boundary = the ecp-workload-boundary policy ARN, known at plan time (stack %s, PLAN.md R2)", [rc.address, stack])
 }
+
+# A role's trust never names everyone. A trust that is unknown at plan time is not judged here; the
+# plan checks of the workload stacks require theirs to be known and equal to the reviewed template.
+deny contains msg if {
+	some rc in lib.resources_of("aws_iam_role")
+	is_string(lib.after(rc).assume_role_policy)
+	doc := json.unmarshal(lib.after(rc).assume_role_policy)
+	some stmt in as_list(doc.Statement)
+	stmt.Effect == "Allow"
+	any_principal(stmt.Principal)
+	msg := sprintf("%s: the role's trust allows any principal", [rc.address])
+}

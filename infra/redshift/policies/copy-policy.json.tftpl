@@ -1,0 +1,47 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheShapeParameters",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}/m5/shape/jr_*/shape_params.csv/part-00000"
+    },
+    {
+      "Sid": "ReadTheGoldFiles",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": [
+        "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/current.parquet",
+        "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/revisions.parquet",
+        "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/curves.parquet"
+      ]
+    },
+    {
+      "Sid": "CopyListsTheShapeKey",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "m5/shape/jr_*/shape_params.csv/part-00000"
+        }
+      }
+    },
+    {
+      "Sid": "CopyListsTheGoldKeys",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::ecp-data-${account_id}-${region}",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "store/runs/*/*/gold/current.parquet",
+            "store/runs/*/*/gold/revisions.parquet",
+            "store/runs/*/*/gold/curves.parquet"
+          ]
+        }
+      }
+    }
+  ]
+}

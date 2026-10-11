@@ -65,3 +65,21 @@ deny contains msg if {
 	stack != "demo"
 	msg := sprintf("%s: %s endpoint outside the demo stack (stack=%q)", [rc.address, type, stack])
 }
+
+# ADR-0023: the Redshift stack's VPC has no way out. The warehouse is reached through the Redshift
+# service, so there is no internet gateway, route, elastic IP or endpoint, and (rule above) no NAT
+# gateway. A plan for another stack, or one made without a stack name, is not judged by this rule.
+redshift_no_way_out := {
+	"aws_internet_gateway",
+	"aws_egress_only_internet_gateway",
+	"aws_route",
+	"aws_eip",
+	"aws_vpc_endpoint",
+}
+
+deny contains msg if {
+	data.ecp.stack == "redshift"
+	some rc in lib.resources
+	rc.type in redshift_no_way_out
+	msg := sprintf("%s: the Redshift stack's VPC has no gateway, internet route, address or endpoint (ADR-0023)", [rc.address])
+}

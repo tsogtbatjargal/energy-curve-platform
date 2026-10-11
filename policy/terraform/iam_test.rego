@@ -92,3 +92,44 @@ test_deleted_roles_are_not_checked if {
 	count(iam.deny) == 0 with input as {"resource_changes": [gone]}
 		with data.ecp.stack as "batch"
 }
+
+# PLAN.md R2 for the Redshift stack: both roles carry the boundary, and a trust never names everyone.
+redshift_role(boundary, trust) := rc("aws_iam_role", {"permissions_boundary": boundary, "assume_role_policy": json.marshal({"Version": "2012-10-17", "Statement": trust})})
+
+test_redshift_role_without_boundary_denied if {
+	r := redshift_role(null, [{"Effect": "Allow", "Principal": {"Service": "redshift.amazonaws.com"}, "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 1 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_redshift_role_with_boundary_and_service_trust_allowed if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"Service": ["redshift.amazonaws.com", "redshift-serverless.amazonaws.com"]}, "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 0 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_trust_of_everyone_denied if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": "*", "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 1 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_trust_of_any_aws_principal_denied if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"AWS": ["*"]}, "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 1 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_trust_of_the_account_root_with_a_condition_allowed if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "sts:AssumeRole", "Condition": {"ArnLike": {"aws:PrincipalArn": "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*"}}}])
+	count(iam.deny) == 0 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+# The COPY role's read of the shape file and the three gold files is scoped, so no rule denies it.
+test_copy_role_scoped_read_allowed if {
+	p := rc("aws_iam_role_policy", {"policy": policy_doc([
+		{"Effect": "Allow", "Action": "s3:GetObject", "Resource": [
+			"arn:aws:s3:::ecp-data-123456789012-ca-central-1/store/runs/*/*/gold/current.parquet",
+			"arn:aws:s3:::ecp-data-123456789012-ca-central-1/store/runs/*/*/gold/revisions.parquet",
+			"arn:aws:s3:::ecp-data-123456789012-ca-central-1/store/runs/*/*/gold/curves.parquet",
+		]},
+		{"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::ecp-data-123456789012-ca-central-1", "Condition": {"StringLike": {"s3:prefix": ["store/runs/*/*/gold/curves.parquet"]}}},
+	])})
+	count(iam.deny) == 0 with input as {"resource_changes": [p]} with data.ecp.stack as "redshift"
+}

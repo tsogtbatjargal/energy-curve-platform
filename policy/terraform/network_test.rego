@@ -74,3 +74,42 @@ test_unchanged_violation_still_denied if {
 	sg := {"address": "aws_security_group.legacy", "mode": "managed", "type": "aws_security_group", "change": {"actions": ["no-op"], "after": open_ssh}}
 	count(network.deny) == 1 with input as plan([sg])
 }
+
+# ADR-0023: the Redshift stack's VPC has no way out. The same resources are fine elsewhere.
+test_redshift_stack_internet_gateway_denied if {
+	count(network.deny) == 1 with input as plan([rc("aws_internet_gateway", {})]) with data.ecp.stack as "redshift"
+}
+
+test_redshift_stack_internet_route_denied if {
+	count(network.deny) == 1 with input as plan([rc("aws_route", {"destination_cidr_block": "0.0.0.0/0"})]) with data.ecp.stack as "redshift"
+}
+
+test_redshift_stack_elastic_ip_denied if {
+	count(network.deny) == 1 with input as plan([rc("aws_eip", {})]) with data.ecp.stack as "redshift"
+}
+
+test_redshift_stack_gateway_endpoint_denied if {
+	count(network.deny) == 1 with input as plan([rc("aws_vpc_endpoint", {"vpc_endpoint_type": "Gateway", "tags_all": {"stack": "redshift"}})]) with data.ecp.stack as "redshift"
+}
+
+test_redshift_stack_nat_gateway_denied if {
+	count(network.deny) == 1 with input as plan([rc("aws_nat_gateway", {"tags_all": {"stack": "redshift"}})]) with data.ecp.stack as "redshift"
+}
+
+test_redshift_stack_private_network_allowed if {
+	count(network.deny) == 0 with input as plan([
+		rc("aws_vpc", {"cidr_block": "10.43.0.0/16"}),
+		rc("aws_subnet", {"map_public_ip_on_launch": false}),
+		rc("aws_route_table", {}),
+		rc("aws_security_group", {"ingress": []}),
+	])
+		with data.ecp.stack as "redshift"
+}
+
+test_internet_gateway_is_fine_in_the_batch_stack if {
+	count(network.deny) == 0 with input as plan([rc("aws_internet_gateway", {})]) with data.ecp.stack as "batch"
+}
+
+test_internet_route_is_fine_without_a_stack_name if {
+	count(network.deny) == 0 with input as plan([rc("aws_route", {"destination_cidr_block": "0.0.0.0/0"})])
+}

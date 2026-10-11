@@ -188,5 +188,62 @@ test_private_rds_allowed if {
 }
 
 test_public_redshift_workgroup_replaced_denied if {
-	count(storage.deny) == 1 with input as {"resource_changes": [res("aws_redshiftserverless_workgroup", "wg", ["delete", "create"], {"publicly_accessible": true})]}
+	count(storage.deny) == 1 with input as {"resource_changes": [res("aws_redshiftserverless_workgroup", "wg", ["delete", "create"], {"base_capacity": 8, "max_capacity": 8, "publicly_accessible": true})]}
+}
+
+# ADR-0023: Redshift Serverless is created at a reviewed size, and with IAM only.
+workgroup(after) := {"resource_changes": [res("aws_redshiftserverless_workgroup", "wg", ["create"], after)]}
+
+namespace(after) := {"resource_changes": [res("aws_redshiftserverless_namespace", "ns", ["create"], after)]}
+
+test_workgroup_at_8_rpu_allowed if {
+	count(storage.deny) == 0 with input as workgroup({"base_capacity": 8, "max_capacity": 8, "publicly_accessible": false})
+}
+
+test_workgroup_at_4_rpu_allowed if {
+	count(storage.deny) == 0 with input as workgroup({"base_capacity": 4, "max_capacity": 8, "publicly_accessible": false})
+}
+
+test_workgroup_without_base_capacity_denied if {
+	count(storage.deny) == 1 with input as workgroup({"max_capacity": 8, "publicly_accessible": false})
+}
+
+test_workgroup_with_unknown_base_capacity_denied if {
+	count(storage.deny) == 1 with input as workgroup({"base_capacity": null, "max_capacity": 8, "publicly_accessible": false})
+}
+
+test_workgroup_at_the_default_128_rpu_denied if {
+	count(storage.deny) == 1 with input as workgroup({"base_capacity": 128, "max_capacity": 8, "publicly_accessible": false})
+}
+
+test_workgroup_without_max_capacity_denied if {
+	count(storage.deny) == 1 with input as workgroup({"base_capacity": 8, "publicly_accessible": false})
+}
+
+test_workgroup_that_scales_past_8_rpu_denied if {
+	count(storage.deny) == 1 with input as workgroup({"base_capacity": 8, "max_capacity": 16, "publicly_accessible": false})
+}
+
+test_workgroup_with_max_capacity_turned_off_denied if {
+	count(storage.deny) == 1 with input as workgroup({"base_capacity": 8, "max_capacity": -1, "publicly_accessible": false})
+}
+
+test_namespace_with_a_password_denied if {
+	count(storage.deny) == 1 with input as namespace({"admin_user_password": "x"})
+}
+
+test_namespace_with_a_write_only_password_denied if {
+	count(storage.deny) == 1 with input as namespace({"admin_user_password_wo": "x"})
+}
+
+test_namespace_with_a_managed_secret_denied if {
+	count(storage.deny) == 1 with input as namespace({"manage_admin_password": true})
+}
+
+test_namespace_without_admin_credentials_allowed if {
+	count(storage.deny) == 0 with input as namespace({"namespace_name": "ecp-redshift", "admin_user_password": null, "admin_user_password_wo": null, "manage_admin_password": null})
+}
+
+test_namespace_with_the_secret_turned_off_allowed if {
+	count(storage.deny) == 0 with input as namespace({"manage_admin_password": false})
 }
