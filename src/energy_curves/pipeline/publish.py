@@ -9,7 +9,8 @@ The pointer write is the commit point, and it is conditional (ADR-0019): it succ
 pointer is still the one this publish read (If-Match on its tag, or "must not exist" for the first
 version). Two runs racing to publish cannot both win, with or without the local lock. The version
 record under published/versions/ is an index written after the commit; the pointer itself is
-authoritative for its own version, so a crash between the two loses nothing.
+authoritative for its own version, so a crash between the two loses nothing. Before each
+commit publish rewrites the current version's record if it is missing or differs from the pointer's.
 """
 
 from __future__ import annotations
@@ -127,6 +128,12 @@ def published_logical_ids(store: ArtifactStore) -> dict[str, int]:
     return out
 
 
+def record_matches(store: ArtifactStore, version: int, pointer_doc: bytes) -> bool:
+    """Whether the version's index record exists and parses to the same JSON as the pointer."""
+    key = version_key(version)
+    return store.exists(key) and json.loads(store.get(key)) == json.loads(pointer_doc)
+
+
 def publish(store: ArtifactStore, manifest_key: str, manifest: dict[str, Any]) -> Pointer:
     tagged = store.get_tagged(POINTER_KEY)
     current = Pointer(**json.loads(tagged[0])) if tagged else None
@@ -143,8 +150,8 @@ def publish(store: ArtifactStore, manifest_key: str, manifest: dict[str, Any]) -
         manifest["dataset_version"], manifest["logical_input_id"], manifest_key, manifest_sha
     )
     doc = dumps(pointer.__dict__)
-    if tagged and not store.exists(version_key(current_version)):
-        store.put(version_key(current_version), tagged[0])  # repair: lost after its commit
+    if tagged and not record_matches(store, current_version, tagged[0]):
+        store.put(version_key(current_version), tagged[0])  # repair: lost, or wrong, before now
     try:
         store.put_if(POINTER_KEY, doc, tag=tagged[1] if tagged else None)  # the commit
     except PreconditionFailed as exc:

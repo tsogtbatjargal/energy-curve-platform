@@ -182,10 +182,21 @@ def test_a_stale_record_at_the_pointer_version_does_not_shadow_it(store: Artifac
     """Stores from before ADR-0019 wrote the record first; a crash could leave a record at the
     version a later run then published under another input. The pointer wins."""
     first = ingest(store, JAN)
+    pointer_one = read_pointer(store)
     store.put(
         version_key(1), json.dumps({"dataset_version": 1, "logical_input_id": "stale"}).encode()
     )
     assert published_logical_ids(store) == {first.logical_input_id: 1}
+    # The next publish must repair the wrong record, not only a missing one: once version 2 is
+    # the pointer, version 1 is read from its record, and a stale one would drop the real input.
+    second = ingest(store, FEB)
+    assert second.dataset_version == 2
+    assert published_logical_ids(store) == {first.logical_input_id: 1, second.logical_input_id: 2}
+    from energy_curves.db import importer
+
+    versions = importer.published_versions(store)  # type: ignore[arg-type]
+    assert [v.dataset_version for v in versions] == [1, 2]
+    assert versions[0] == pointer_one  # the real manifest, not the stale record's
 
 
 def test_the_publish_module_documents_the_commit() -> None:
