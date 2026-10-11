@@ -8,12 +8,13 @@
       "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}/m5/shape/jr_*/shape_params.csv/part-00000"
     },
     {
-      "Sid": "ReadTheTwoGoldFiles",
+      "Sid": "ReadTheGoldFiles",
       "Effect": "Allow",
       "Action": "s3:GetObject",
       "Resource": [
         "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/current.parquet",
-        "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/revisions.parquet"
+        "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/revisions.parquet",
+        "arn:aws:s3:::ecp-data-${account_id}-${region}/store/runs/*/*/gold/curves.parquet"
       ]
     },
     {
@@ -36,7 +37,8 @@
         "StringLike": {
           "s3:prefix": [
             "store/runs/*/*/gold/current.parquet",
-            "store/runs/*/*/gold/revisions.parquet"
+            "store/runs/*/*/gold/revisions.parquet",
+            "store/runs/*/*/gold/curves.parquet"
           ]
         }
       }

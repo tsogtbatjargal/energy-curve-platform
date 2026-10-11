@@ -636,3 +636,24 @@ def test_the_policy_gate_refuses_a_role_without_the_boundary_or_trusting_everyon
     change(p, CALLER)["after"]["assume_role_policy"] = json.dumps(doc)
     code, out = gate(p)
     assert code == 1 and "permissions_boundary" in out and "any principal" in out
+
+
+def test_a_copy_policy_that_lacks_the_curves_file_is_refused(stack: Path) -> None:
+    """The plan check compares the planned policy with the reviewed template; a policy from before
+    gold/curves.parquet was added is not the reviewed one."""
+    p = plan()
+    doc = json.loads(change(p, COPY_POLICY)["after"]["policy"])
+    for stmt in doc["Statement"]:
+        if "gold" in stmt["Sid"].lower():
+            if stmt["Sid"] == "CopyListsTheGoldKeys":
+                key = stmt["Condition"]["StringLike"]["s3:prefix"]
+                stmt["Condition"]["StringLike"]["s3:prefix"] = [k for k in key if "curves" not in k]
+            else:
+                stmt["Resource"] = [r for r in stmt["Resource"] if "curves" not in r]
+    change(p, COPY_POLICY)["after"]["policy"] = json.dumps(doc)
+    assert any(COPY_POLICY in x and "template" in x for x in run(p, stack))
+
+
+def test_the_reviewed_copy_policy_names_the_curves_file(stack: Path) -> None:
+    text = change(plan(), COPY_POLICY)["after"]["policy"]
+    assert text.count("gold/curves.parquet") == 2  # the read and the listing condition

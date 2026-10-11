@@ -2,7 +2,7 @@
 # reviewed inline policy from policies/ (tests/test_redshift_iam.py evaluates them against the
 # boundary offline).
 #
-# copy:   assumed by Redshift to read exactly the shape file and the two gold files for COPY.
+# copy:   assumed by Redshift to read exactly the shape file and the three gold files for COPY.
 # caller: assumed by the operator (this account's AdministratorAccess sessions) to run
 #         statements through the Data API on this stack's workgroup. No password, no secret.
 resource "aws_iam_role" "copy" {

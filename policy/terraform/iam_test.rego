@@ -120,3 +120,16 @@ test_trust_of_the_account_root_with_a_condition_allowed if {
 	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "sts:AssumeRole", "Condition": {"ArnLike": {"aws:PrincipalArn": "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*"}}}])
 	count(iam.deny) == 0 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
 }
+
+# The COPY role's read of the shape file and the three gold files is scoped, so no rule denies it.
+test_copy_role_scoped_read_allowed if {
+	p := rc("aws_iam_role_policy", {"policy": policy_doc([
+		{"Effect": "Allow", "Action": "s3:GetObject", "Resource": [
+			"arn:aws:s3:::ecp-data-123456789012-ca-central-1/store/runs/*/*/gold/current.parquet",
+			"arn:aws:s3:::ecp-data-123456789012-ca-central-1/store/runs/*/*/gold/revisions.parquet",
+			"arn:aws:s3:::ecp-data-123456789012-ca-central-1/store/runs/*/*/gold/curves.parquet",
+		]},
+		{"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::ecp-data-123456789012-ca-central-1", "Condition": {"StringLike": {"s3:prefix": ["store/runs/*/*/gold/curves.parquet"]}}},
+	])})
+	count(iam.deny) == 0 with input as {"resource_changes": [p]} with data.ecp.stack as "redshift"
+}

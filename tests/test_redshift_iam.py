@@ -30,6 +30,7 @@ SHAPE_KEY = "m5/shape/jr_" + "a" * 64 + "/shape_params.csv/part-00000"
 GOLD = (
     "store/runs/in-1/attempt-1/gold/current.parquet",
     "store/runs/in-1/attempt-1/gold/revisions.parquet",
+    "store/runs/in-1/attempt-1/gold/curves.parquet",  # the modelled curves (runner.py)
 )
 STATE_BUCKET = r2.VALUES["state_bucket_arn"]
 
@@ -95,16 +96,18 @@ def test_no_statement_allows_everything_on_everything(name: str) -> None:
             assert set(as_list(stmt["Action"])) <= NO_RESOURCE_TYPE, stmt["Sid"]
 
 
-# --- the COPY role: read exactly the shape file and the two gold files ---------------------------
+# --- the COPY role: read exactly the shape file and the three gold files ----------------------
 
 
 COPY_ALLOWED = [
     ("s3:GetObject", f"{GLUE}/{SHAPE_KEY}", None),
     ("s3:GetObject", f"{DATA}/{GOLD[0]}", None),
     ("s3:GetObject", f"{DATA}/{GOLD[1]}", None),
+    ("s3:GetObject", f"{DATA}/{GOLD[2]}", None),
     ("s3:ListBucket", GLUE, {"s3:prefix": SHAPE_KEY}),
     ("s3:ListBucket", DATA, {"s3:prefix": GOLD[0]}),
     ("s3:ListBucket", DATA, {"s3:prefix": GOLD[1]}),
+    ("s3:ListBucket", DATA, {"s3:prefix": GOLD[2]}),
 ]
 
 
@@ -124,6 +127,8 @@ COPY_DENIED = [
     ("s3:GetObject", f"{DATA}/store/runs/in-1/attempt-1/manifest.json", None),
     ("s3:GetObject", f"{DATA}/store/runs/in-1/attempt-1/silver/x.parquet", None),
     ("s3:GetObject", f"{DATA}/store/runs/in-1/attempt-1/gold/other.parquet", None),
+    ("s3:GetObject", f"{DATA}/store/runs/in-1/attempt-1/gold/curves.parquet.bak", None),
+    ("s3:GetObject", f"{DATA}/store/runs/in-1/attempt-1/gold/curves", None),
     ("s3:GetObject", f"{DATA}/store/runs/in-1/attempt-1/gold/current.parquet.bak", None),
     # no write, no delete, no wider read
     ("s3:PutObject", f"{GLUE}/{SHAPE_KEY}", None),
@@ -139,6 +144,7 @@ COPY_DENIED = [
     ("s3:ListBucket", GLUE, {"s3:prefix": "m5/"}),
     ("s3:ListBucket", GLUE, {"s3:prefix": "m5/shape/"}),
     ("s3:ListBucket", DATA, {"s3:prefix": "store/"}),
+    ("s3:ListBucket", DATA, {"s3:prefix": "store/runs/in-1/attempt-1/gold/"}),
     ("s3:ListBucket", DATA, {"s3:prefix": "store/published/current.json"}),
     ("s3:ListBucket", f"arn:aws:s3:::ecp-tfstate-{ACCOUNT}-{REGION}", {"s3:prefix": SHAPE_KEY}),
     # nothing else
@@ -154,6 +160,17 @@ COPY_DENIED = [
 @pytest.mark.parametrize(("action", "resource", "context"), COPY_DENIED)
 def test_the_copy_role_cannot_do_more(action, resource, context) -> None:  # type: ignore[no-untyped-def]
     assert as_copy(action, resource, context) != ALLOWED
+
+
+def test_the_copy_role_names_exactly_the_three_gold_files_for_reading_and_listing() -> None:
+    """runner.py writes gold/current.parquet, gold/revisions.parquet and gold/curves.parquet (the
+    forward curves built from the shape parameters); D1's gold curves include all three."""
+    want = {f"store/runs/*/*/gold/{name}.parquet" for name in ("current", "revisions", "curves")}
+    by_sid = {stmt["Sid"]: stmt for stmt in policy("copy-policy")["Statement"]}
+    read = by_sid["ReadTheGoldFiles"]
+    assert {r.removeprefix(f"{DATA}/") for r in as_list(read["Resource"])} == want
+    listing = by_sid["CopyListsTheGoldKeys"]
+    assert set(as_list(listing["Condition"]["StringLike"]["s3:prefix"])) == want
 
 
 def test_the_copy_role_cannot_read_the_terraform_state_even_with_a_wide_policy() -> None:
