@@ -13,10 +13,11 @@ nothing is read from outside the job). Remote output paths are exercised in M5b.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -32,6 +33,9 @@ from energy_curves.curves.shape_core import (
 )
 from energy_curves.synthetic_prices import SHAPE_SERIES, history
 
+RUN_ID = re.compile(r"jr_[0-9a-f]{64}")  # Glue's JOB_RUN_ID
+RECORD_SCHEMA = 1
+OUTPUTS = ("shape_params.csv", "shape_params.sha256")
 LOG = logging.getLogger("shape_job")
 FUTURES = tuple(s for s in SHAPE_SERIES if s != "RWTC")
 
@@ -129,20 +133,30 @@ def estimate_shape_spark(
     )
 
 
-def _delete(spark: Any, path: str) -> None:
-    """Remove `path` (a file or directory) through the Hadoop FileSystem of its own scheme, so a
-    rerun can replace it: saveAsTextFile refuses an existing directory."""
+def _hadoop_path(spark: Any, path: str) -> tuple[Any, Any]:
     target = spark._jvm.org.apache.hadoop.fs.Path(path)
-    fs = target.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
-    if fs.exists(target):
-        fs.delete(target, True)
+    return target, target.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
 
 
 def _write(spark: Any, text: str, path: str) -> None:
-    """One-element text file under `path` (Spark writes `path/part-00000`), replacing what an
-    earlier run left there. Only `path` itself is deleted, never its parent."""
-    _delete(spark, path)
+    """One-element text file under `path` (Spark writes `path/part-00000`). Nothing is replaced:
+    saveAsTextFile refuses an existing directory."""
     spark.sparkContext.parallelize([text.rstrip("\n")], 1).saveAsTextFile(path)
+
+
+def _size(spark: Any, path: str) -> int:
+    target, fs = _hadoop_path(spark, path)
+    return int(fs.getFileStatus(target).getLen())
+
+
+def _write_record(spark: Any, path: str, document: dict[str, Any]) -> None:
+    """The completion record: one object, created in one call and without overwrite, so it exists
+    whole or not at all (S3 makes an object visible when its stream is closed)."""
+    target, fs = _hadoop_path(spark, path)
+    body = bytearray(json.dumps(document, sort_keys=True, indent=1).encode() + b"\n")
+    stream = fs.create(target, False)
+    stream.write(body)
+    stream.close()  # not in a `finally`: a failed write must not publish a partial record
 
 
 def iso_date(text: str) -> date:
@@ -153,6 +167,13 @@ def iso_date(text: str) -> date:
         return date.fromisoformat(text)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def run_id(text: str) -> str:
+    """A Glue run id, exactly: it becomes a path segment, so nothing else may pass."""
+    if not RUN_ID.fullmatch(text):
+        raise argparse.ArgumentTypeError("not a Glue job run id (jr_ and 64 lowercase hex digits)")
+    return text
 
 
 def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
@@ -166,6 +187,7 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--window-end", type=iso_date, required=True)
     parser.add_argument("--partitions", type=int, required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--JOB_RUN_ID", type=run_id, required=True)
     args, unknown = parser.parse_known_args(argv)
     names = sorted({a.split("=", 1)[0] for a in unknown if a.startswith("--")})
     if names:
@@ -174,20 +196,44 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None, spark: Any = None) -> str:
-    """Generate the history, estimate the shape, write the parameters and their SHA-256 under
-    --output. Returns the SHA-256."""
+    """Generate the history, estimate the shape and write the parameters and their SHA-256 under
+    `<--output>/<JOB_RUN_ID>/`, then the completion record `_complete.json` last. A run writes
+    only its own prefix and deletes nothing; a prefix that already exists is refused. Returns the
+    SHA-256."""
     args = parse_arguments(argv)
     if spark is None:
         from pyspark.sql import SparkSession
 
         spark = SparkSession.builder.getOrCreate()
+    run = f"{args.output.rstrip('/')}/{args.JOB_RUN_ID}"
+    target, fs = _hadoop_path(spark, run)
+    if fs.exists(target):
+        raise FileExistsError("this run's output prefix already exists; nothing was written")
     outcome = estimate_shape_spark(
         history_df(spark, args.start, args.end, args.partitions),
         (args.window_start, args.window_end),
     )
-    output = args.output.rstrip("/")
-    _write(spark, CSV_HEADER + canonical_text(outcome.params), f"{output}/shape_params.csv")
-    _write(spark, outcome.params_sha256, f"{output}/shape_params.sha256")
+    _write(spark, CSV_HEADER + canonical_text(outcome.params), f"{run}/{OUTPUTS[0]}")
+    _write(spark, outcome.params_sha256, f"{run}/{OUTPUTS[1]}")
+    _write_record(
+        spark,
+        f"{run}/_complete.json",
+        {
+            "schema": RECORD_SCHEMA,
+            "run_id": args.JOB_RUN_ID,
+            "params_sha256": outcome.params_sha256,
+            "rows": len(outcome.params),
+            "outputs": {name: _size(spark, f"{run}/{name}/part-00000") for name in OUTPUTS},
+            "arguments": {
+                "start": args.start.isoformat(),
+                "end": args.end.isoformat(),
+                "window_start": args.window_start.isoformat(),
+                "window_end": args.window_end.isoformat(),
+                "partitions": args.partitions,
+            },
+            "completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        },
+    )
     return outcome.params_sha256
 
 
