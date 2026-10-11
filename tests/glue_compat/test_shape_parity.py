@@ -301,14 +301,19 @@ def test_a_rerun_replaces_stale_files_under_its_two_outputs_and_touches_nothing_
     out = tmp_path / "out"
     run_main(spark, out)
     (out / "shape_params.csv" / "part-00001").write_text("stale\n")  # e.g. a wider earlier run
-    (out / "shape_params.csv" / "_SUCCESS").write_text("")
+    (out / "shape_params.csv" / "_SUCCESS").write_text("stale marker\n")
+    (out / "shape_params.csv" / "part-00000").write_text("stale\n")
     (out / "other").mkdir()
     (out / "other" / "keep.txt").write_text("keep\n")
     (out / "unrelated.csv").write_text("keep\n")
     run_main(spark, out)
     names = {p.name for p in (out / "shape_params.csv").iterdir() if p.is_file()}
     assert "part-00000" in names and "part-00001" not in names  # the stale file is gone
-    assert not (out / "shape_params.csv" / "_SUCCESS").read_text()  # and it is the new, empty one
+    marker = out / "shape_params.csv" / "_SUCCESS"  # a non-empty planted marker tells old from new
+    assert not marker.exists() or marker.read_text() == ""
+    assert (
+        (out / "shape_params.csv" / "part-00000").read_text().startswith("position,month,s,n_obs")
+    )
     assert (out / "other" / "keep.txt").read_text() == "keep\n"
     assert (out / "unrelated.csv").read_text() == "keep\n"
 
