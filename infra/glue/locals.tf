@@ -3,10 +3,10 @@
 locals {
   account_id = var.expected_account_id
 
-  name         = "ecp-glue-shape"
-  bucket       = "ecp-glue-${local.account_id}-${var.region}"
-  log_group    = "/aws-glue/ecp-shape"
-  boundary_arn = "arn:aws:iam::${local.account_id}:policy/ecp-workload-boundary"
+  name             = "ecp-glue-shape"
+  bucket           = "ecp-glue-${local.account_id}-${var.region}"
+  log_group_prefix = "/aws-glue/ecp-shape"
+  boundary_arn     = "arn:aws:iam::${local.account_id}:policy/ecp-workload-boundary"
 
   script_key = "glue/shape_job.py"
   bundle_key = "glue/energy_curves_m5.zip"

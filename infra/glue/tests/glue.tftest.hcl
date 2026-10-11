@@ -48,20 +48,34 @@ run "the_arguments_are_exactly_the_reviewed_ones" {
 
   assert {
     condition = jsonencode(aws_glue_job.shape.default_arguments) == jsonencode({
-      "--job-language"                     = "python"
-      "--extra-py-files"                   = "s3://ecp-glue-333333333333-ca-central-1/glue/energy_curves_m5.zip"
-      "--enable-metrics"                   = ""
-      "--enable-continuous-cloudwatch-log" = "true"
-      "--continuous-log-logGroup"          = "/aws-glue/ecp-shape"
-      "--enable-continuous-log-filter"     = "true"
-      "--start"                            = "1983-01-03"
-      "--end"                              = "2024-04-05"
-      "--window-start"                     = "2014-01-01"
-      "--window-end"                       = "2024-04-05"
-      "--partitions"                       = "8"
-      "--output"                           = "s3://ecp-glue-333333333333-ca-central-1/m5/shape"
+      "--job-language"           = "python"
+      "--extra-py-files"         = "s3://ecp-glue-333333333333-ca-central-1/glue/energy_curves_m5.zip"
+      "--custom-logGroup-prefix" = "/aws-glue/ecp-shape"
+      "--start"                  = "1983-01-03"
+      "--end"                    = "2024-04-05"
+      "--window-start"           = "2014-01-01"
+      "--window-end"             = "2024-04-05"
+      "--partitions"             = "8"
+      "--output"                 = "s3://ecp-glue-333333333333-ca-central-1/m5/shape"
     })
     error_message = "No Data Catalog flag, no temp dir, no PyPI modules: the job needs only its bundle."
+  }
+}
+
+run "the_logs_go_to_two_managed_groups_under_the_prefix" {
+  command = apply
+
+  assert {
+    condition     = aws_cloudwatch_log_group.output.name == "/aws-glue/ecp-shape/output" && aws_cloudwatch_log_group.error.name == "/aws-glue/ecp-shape/error"
+    error_message = "Glue 5 writes to <--custom-logGroup-prefix>/output and /error."
+  }
+  assert {
+    condition     = aws_cloudwatch_log_group.output.retention_in_days == 14 && aws_cloudwatch_log_group.error.retention_in_days == 14
+    error_message = "Both groups keep 14 days."
+  }
+  assert {
+    condition     = !contains(keys(aws_glue_job.shape.default_arguments), "--enable-metrics") && !contains(keys(aws_glue_job.shape.default_arguments), "--enable-continuous-cloudwatch-log") && !contains(keys(aws_glue_job.shape.default_arguments), "--continuous-log-logGroup") && !contains(keys(aws_glue_job.shape.default_arguments), "--enable-continuous-log-filter")
+    error_message = "No metrics sink (it needs cloudwatch:PutMetricData) and no Glue 4 logging arguments (Glue 5 ignores them)."
   }
 }
 
