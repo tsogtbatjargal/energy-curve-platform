@@ -22,6 +22,7 @@ STEPS = {s["name"]: s for s in JOB["steps"] if "name" in s}
 BATCH_ONLY = "matrix.stack == 'batch'"
 BOOTSTRAP_ONLY = "matrix.stack == 'bootstrap'"
 GLUE_ONLY = "matrix.stack == 'glue'"
+REDSHIFT_ONLY = "matrix.stack == 'redshift'"
 
 
 def batch_plan_step() -> dict[str, Any]:
@@ -31,7 +32,7 @@ def batch_plan_step() -> dict[str, Any]:
 
 
 def test_both_stacks_are_planned_by_the_same_job() -> None:
-    assert JOB["strategy"]["matrix"]["stack"] == ["bootstrap", "batch", "glue"]
+    assert JOB["strategy"]["matrix"]["stack"] == ["bootstrap", "batch", "glue", "redshift"]
     assert JOB["permissions"] == {"contents": "read", "id-token": "write"}
 
 
@@ -105,10 +106,11 @@ def test_the_bootstrap_plan_is_unchanged() -> None:
 def test_each_stack_has_its_own_policy_gate() -> None:
     gates = [s for s in JOB["steps"] if "policy_gate.py" in s.get("run", "")]
     by_guard = {s.get("if"): s["run"] for s in gates}
-    assert set(by_guard) == {BOOTSTRAP_ONLY, BATCH_ONLY, GLUE_ONLY}
+    assert set(by_guard) == {BOOTSTRAP_ONLY, BATCH_ONLY, GLUE_ONLY, REDSHIFT_ONLY}
     assert '--stack "$STACK"' in by_guard[BOOTSTRAP_ONLY]
     assert '--stack "$STACK" --stack-dir .' in by_guard[BATCH_ONLY]
     assert '--stack "$STACK" --stack-dir .' in by_guard[GLUE_ONLY]
+    assert '--stack "$STACK" --stack-dir .' in by_guard[REDSHIFT_ONLY]
 
 
 def test_plan_files_are_removed_even_when_a_step_fails() -> None:
@@ -152,3 +154,38 @@ def test_the_glue_stack_is_tested_offline_in_the_static_job() -> None:
     run = step["run"]
     assert run.index("build_glue_bundle.py") < run.index("init -backend=false") < run.index("test")
     assert "terraform -chdir=infra/glue test" in run
+
+
+def test_the_redshift_plan_prints_only_a_summary_and_is_gated_by_its_own_rules() -> None:
+    names = [s.get("name") for s in JOB["steps"]]
+    plan = names.index("terraform plan (redshift, summary only)")
+    gate = names.index("policy gate (redshift)")
+    assert names.index("terraform init") < plan < gate < names.index("remove plan artifacts")
+    step = STEPS["terraform plan (redshift, summary only)"]
+    assert step["if"] == REDSHIFT_ONLY
+    run = step["run"]
+    assert "-out=tfplan > plan.txt" in run and "grep -E '^(Plan:|No changes)' plan.txt" in run
+    assert "grep -E '^Error' plan.txt" in run and "sed -E 's/[0-9]{12}/<account>/g'" in run
+    assert "cat plan" not in run and "show -json tfplan > plan.json" in run
+    gate_step = STEPS["policy gate (redshift)"]
+    assert gate_step["if"] == REDSHIFT_ONLY
+    assert '--stack "$STACK" --stack-dir .' in gate_step["run"]
+
+
+def test_the_redshift_stack_is_tested_offline_in_the_static_job() -> None:
+    steps = WORKFLOW["jobs"]["iac-static"]["steps"]
+    step = next(s for s in steps if s.get("name") == "terraform test (redshift, mocked provider)")
+    run = step["run"]
+    assert run.index("init -backend=false") < run.index("test")
+    assert "terraform -chdir=infra/redshift test" in run
+
+
+def test_the_plan_role_needs_no_change_for_the_redshift_plan() -> None:
+    """The plan reads only: the role is ReadOnlyAccess (infra/bootstrap), which covers
+    ec2:DescribeAvailabilityZones, organizations:DescribeOrganization and sts:GetCallerIdentity.
+    Nothing in the stack is a data source beyond those three."""
+    stack = ROOT / "infra" / "redshift"
+    text = "\n".join(p.read_text() for p in stack.glob("*.tf"))
+    assert sorted(re.findall(r'^data "(\w+)"', text, re.MULTILINE)) == [
+        "aws_availability_zones", "aws_caller_identity", "aws_organizations_organization",
+    ]  # fmt: skip

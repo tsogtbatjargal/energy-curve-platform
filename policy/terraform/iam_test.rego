@@ -92,3 +92,31 @@ test_deleted_roles_are_not_checked if {
 	count(iam.deny) == 0 with input as {"resource_changes": [gone]}
 		with data.ecp.stack as "batch"
 }
+
+# PLAN.md R2 for the Redshift stack: both roles carry the boundary, and a trust never names everyone.
+redshift_role(boundary, trust) := rc("aws_iam_role", {"permissions_boundary": boundary, "assume_role_policy": json.marshal({"Version": "2012-10-17", "Statement": trust})})
+
+test_redshift_role_without_boundary_denied if {
+	r := redshift_role(null, [{"Effect": "Allow", "Principal": {"Service": "redshift.amazonaws.com"}, "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 1 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_redshift_role_with_boundary_and_service_trust_allowed if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"Service": ["redshift.amazonaws.com", "redshift-serverless.amazonaws.com"]}, "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 0 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_trust_of_everyone_denied if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": "*", "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 1 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_trust_of_any_aws_principal_denied if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"AWS": ["*"]}, "Action": "sts:AssumeRole"}])
+	count(iam.deny) == 1 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}
+
+test_trust_of_the_account_root_with_a_condition_allowed if {
+	r := redshift_role("arn:aws:iam::123456789012:policy/ecp-workload-boundary", [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "sts:AssumeRole", "Condition": {"ArnLike": {"aws:PrincipalArn": "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*"}}}])
+	count(iam.deny) == 0 with input as {"resource_changes": [r]} with data.ecp.stack as "redshift"
+}

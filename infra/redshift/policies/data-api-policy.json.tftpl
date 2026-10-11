@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunStatementsOnThisStacksWorkgroup",
+      "Effect": "Allow",
+      "Action": [
+        "redshift-data:ExecuteStatement",
+        "redshift-data:BatchExecuteStatement",
+        "redshift-serverless:GetCredentials"
+      ],
+      "Resource": "arn:aws:redshift-serverless:${region}:${account_id}:workgroup/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/stack": "redshift"
+        }
+      }
+    },
+    {
+      "Sid": "ReadStatementStatusAndResults",
+      "Effect": "Allow",
+      "Action": [
+        "redshift-data:DescribeStatement",
+        "redshift-data:GetStatementResult",
+        "redshift-data:ListStatements"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -113,3 +113,36 @@ deny contains msg if {
 	lib.after(rc).publicly_accessible == true
 	msg := sprintf("%s: publicly_accessible must be false", [rc.address])
 }
+
+# ADR-0023: Redshift Serverless is created at a reviewed size. The default base capacity is 128 RPU
+# ($52.80 an hour) and "-1" turns the maximum off, so both must be set, between 4 and 8 RPU. A
+# value unknown at plan time is not provably small.
+redshift_max_rpu := 8
+
+capacity_ok(after, key) if {
+	c := object.get(after, key, null)
+	is_number(c)
+	c >= 4
+	c <= redshift_max_rpu
+}
+
+deny contains msg if {
+	some rc in lib.resources_of("aws_redshiftserverless_workgroup")
+	some key in {"base_capacity", "max_capacity"}
+	not capacity_ok(lib.after(rc), key)
+	msg := sprintf("%s: %s must be set, between 4 and %d RPU", [rc.address, key, redshift_max_rpu])
+}
+
+# The warehouse is IAM only (the Data API): no admin password in state, no managed secret.
+deny contains msg if {
+	some rc in lib.resources_of("aws_redshiftserverless_namespace")
+	some key in {"admin_user_password", "admin_user_password_wo"}
+	object.get(lib.after(rc), key, null) != null
+	msg := sprintf("%s: %s must not be set; the Redshift stack is IAM only", [rc.address, key])
+}
+
+deny contains msg if {
+	some rc in lib.resources_of("aws_redshiftserverless_namespace")
+	object.get(lib.after(rc), "manage_admin_password", null) == true
+	msg := sprintf("%s: manage_admin_password must not be set; the Redshift stack is IAM only", [rc.address])
+}
