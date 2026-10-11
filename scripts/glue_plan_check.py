@@ -25,12 +25,11 @@ drift, no output changes), ca-central-1, the caller is expected_account_id and n
 account, and the source has exactly one module call, the bucket, at 5.16.2, with no override file
 or JSON configuration.
 
-`--change update` (the Glue 5 logging fix) is for the applied stack with no drift (a refresh-only
-apply records the provider's read-back first): the job's default_arguments update in place (the
-metrics flag and the three Glue 4 logging arguments go, --custom-logGroup-prefix arrives, every
-other argument and attribute untouched), the two log groups are created, the first apply's empty
-/aws-glue/ecp-shape group is deleted, and the other ten resources are no-ops: not the script, the
-bundle, the role or its policy, nor the bucket. Every resource, changed or not, must still be the
+`--change update` (the job's rerun fix) is for the applied stack with no drift (a refresh-only
+apply records the provider's read-back first): exactly one in-place update, the script object, and
+thirteen no-ops. The script's ETag moves to the repository script's hash (its version_id is known
+only after apply) and no other attribute changes. The job, both log groups, the bundle, the role
+and its policy and the bucket do not change. Every resource, changed or not, must still be the
 reviewed one.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
@@ -59,7 +58,6 @@ VARIABLES = frozenset({"region", "owner", "expected_account_id"})
 _B = "module.bucket.aws_s3_bucket"
 JOB, ROLE, ROLE_POLICY = "aws_glue_job.shape", "aws_iam_role.glue", "aws_iam_role_policy.glue"
 LOG_OUT, LOG_ERR = "aws_cloudwatch_log_group.output", "aws_cloudwatch_log_group.error"
-LOG_OLD = "aws_cloudwatch_log_group.glue"  # the first apply's group; the Glue 5 fix deletes it
 LOG_PREFIX = "/aws-glue/ecp-shape"
 SCRIPT, BUNDLE = "aws_s3_object.script", "aws_s3_object.bundle"
 CREATES = frozenset(
@@ -122,16 +120,9 @@ JOB_OWN_ARGUMENTS = (
     "--partitions",
     "--output",
 )
-# The update (Glue 5 logging, no metrics): the job's arguments change in place, the two log groups
-# are created, the first apply's empty group is deleted, and nothing else moves.
-UPDATES, NEW_GROUPS = {JOB}, {LOG_OUT, LOG_ERR}
-APPLIED = frozenset({JOB, ROLE, ROLE_POLICY, LOG_OLD, SCRIPT, BUNDLE})
-REMOVED_BY_THE_FIX = {
-    "--enable-metrics": "",
-    "--enable-continuous-cloudwatch-log": "true",
-    "--continuous-log-logGroup": LOG_PREFIX,
-    "--enable-continuous-log-filter": "true",
-}
+# The update (a job that can be rerun): only the script object changes, to the repository's script.
+UPDATES = {SCRIPT}
+APPLIED = frozenset({JOB, ROLE, ROLE_POLICY, LOG_OUT, LOG_ERR, SCRIPT, BUNDLE})
 
 
 def arguments(bucket: str) -> dict[str, str]:
@@ -294,49 +285,33 @@ def check_source(stack_dir: Path) -> list[str]:
 
 
 def check_update(address: str, change: dict[str, Any]) -> list[str]:
-    """The job's in-place update: only default_arguments differ, from the applied set (with the
-    Glue 4 logging and metrics arguments) to exactly the reviewed one."""
+    """The script object's in-place update: its ETag moves (to the repository script's hash, which
+    check_create verifies) and its version_id, known only after apply. Nothing else differs."""
     before, after = change.get("before") or {}, change.get("after") or {}
     unknown = {k for k, v in (change.get("after_unknown") or {}).items() if v}
     differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
     problems = []
-    if unknown:
-        problems.append(f"{address}: nothing may be unknown after apply")
-    if differing - {"default_arguments"}:
+    if unknown - {"version_id"}:
+        problems.append(f"{address}: only version_id may be unknown after apply")
+    if differing - {"etag", "version_id"}:
         problems.append(
-            f"{address}: changes {', '.join(sorted(differing - {'default_arguments'}))}"
+            f"{address}: changes {', '.join(sorted(differing - {'etag', 'version_id'}))}"
         )
-    old, new = before.get("default_arguments") or {}, after.get("default_arguments") or {}
-    kept = {k: v for k, v in new.items() if k != "--custom-logGroup-prefix"}
-    if old != {**kept, **REMOVED_BY_THE_FIX}:
-        problems.append(f"{address}: default_arguments before are not the applied ones")
+    if before.get("etag") == after.get("etag"):
+        problems.append(f"{address}: etag does not change")
     return problems
 
 
-def check_deleted(address: str, change: dict[str, Any]) -> list[str]:
-    """Only the first apply's log group (empty, 14 days) may be deleted."""
-    before = change.get("before") or {}
-    if (before.get("name"), before.get("retention_in_days")) != (LOG_PREFIX, 14):
-        return [f"{address}: the deleted group is not the first apply's /aws-glue/ecp-shape"]
-    return []
-
-
 def expected_actions(mode: str) -> dict[str, str]:
-    if mode == "create":
-        return {a: "create" for a in CREATES}
-    return {
-        **{a: "no-op" for a in CREATES - UPDATES - NEW_GROUPS},
-        **{a: "update" for a in UPDATES},
-        **{a: "create" for a in NEW_GROUPS},
-        LOG_OLD: "delete",
-    }
+    return {a: ("update" if mode == "update" and a in UPDATES else
+                "no-op" if mode == "update" else "create") for a in CREATES}  # fmt: skip
 
 
 def check(
     plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
 ) -> tuple[list[str], list[str]]:
     """(problems, report) for a saved plan of infra/glue: `create` from an empty state, or
-    `update` (the Glue 5 logging fix) on the applied stack."""
+    `update` (the script object alone) on the applied stack."""
     if mode not in ("create", "update"):
         return [f"unknown change mode {mode}"], []
     problems, account = check_common(plan, mode)
@@ -356,9 +331,6 @@ def check(
             problems.append(f"unexpected change: {'+'.join(actions)} {address}")
             continue
         seen.add(address)
-        if address == LOG_OLD:
-            problems += check_deleted(address, change)
-            continue
         if mode == "update" and address in UPDATES:
             problems += check_update(address, change)
         if account:
