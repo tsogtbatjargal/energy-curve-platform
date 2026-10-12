@@ -34,7 +34,7 @@ Points are labelled `Spot, C1–C4` (contract positions). Real data supports not
 | EventBridge Scheduler | Daily trigger |
 | Glue (PySpark) | Historical backfill and seasonal-shape estimation, run on demand |
 | Redshift Serverless | Curve and price history, analytical queries; on only for sessions |
-| S3 | Bronze / Silver / Gold, run manifests, GitHub Pages snapshot source |
+| S3 | Bronze / Silver / Gold, run manifests |
 | Postgres 17 | `market` schema (rebuildable from published artifacts: versions, prices, revisions, curves, attempts) and `app` schema (owned by Postgres: outbox, alert rules/state/history, notifications; backed up separately) — [ADR-0013](adr/0013-m3-serving-architecture.md) |
 | Valkey (Redis-compatible) | Response cache scoped to dataset version, Pub/Sub for alerts and updates |
 | FastAPI + w2ui | API, server-sent events, UI |
@@ -43,7 +43,7 @@ Points are labelled `Spot, C1–C4` (contract positions). Real data supports not
 
 - **local:** app, Postgres and Valkey run in podman compose (ports bound to 127.0.0.1); filesystem artifact store; offline fixtures.
 - **batch (always on):** no VPC for Lambda; Fargate in public subnets with no inbound rules; S3 gateway endpoint; no NAT.
-- **demo-day (about 48 h, then destroyed):**
+- **temporary environment (optional, about 48 h, then destroyed):**
   - API on Fargate behind an ALB.
   - RDS Postgres 17 and ElastiCache Valkey 9.1 in private subnets.
   - One NAT gateway.
@@ -141,7 +141,7 @@ So a hash of the plan JSON alone would not change when the actions changed.
 - **Rules until rights are confirmed:**
   - No real price values in the public repo. Test fixtures copy EIA's response *structure* but use synthetic values.
   - Real data lives only in a git-ignored local cache.
-  - ~~Before M6 publishes the GitHub Pages snapshot, decide what may be shown publicly~~ **Decided: synthetic data only.** No public output (the GitHub Pages snapshot, screenshots, the video, the README) shows or derives from real EIA prices. Real data stays in the git-ignored `data/`, for local use.
+  - ~~Before anything is published, decide what may be shown publicly~~ **Decided: synthetic data only.** Any public output (the README, published documents, images and artefacts) uses synthetic data only; none shows or derives from real EIA prices. Real data stays in the git-ignored `data/`, for local use.
 
 ## Milestones
 
@@ -153,12 +153,11 @@ So a hash of the plan JSON alone would not change when the actions changed.
 | M3 | Four PRs reviewed one at a time (ADR-0013). M3a: compose, migrations, importer, outbox, backup/restore. M3b: API, cache, SSE. M3c: crossing alerts via the outbox. M3d: w2ui, replay, Playwright (including mobile smoke) | 20–28 (revisable) |
 | M4 | AWS batch: S3, Lambda, Fargate, Step Functions, Scheduler, alarm | 5–7 |
 | M5 | Glue PySpark backfill and shape estimation, Polars parity test, Redshift load and queries | 5–7 |
-| M6 | Demo-day stack, video, teardown; GitHub Pages snapshot | 4–6 |
-| M7 | ADR review, runbook, mock interview and Q&A | 3–4 |
+| M6 | Optional demo environment and teardown | 4–6 |
 
 **Estimated AWS spend:** about $15–20 of the $40 budget.
 
-- demo-day stack: about $7
+- temporary environment: about $7
 - Redshift sessions: about $5
 - Glue: about $2
 - batch: about $1–2 per month
@@ -170,6 +169,5 @@ These are estimates; recheck against ca-central-1 prices before M4.
 - One command runs the offline demo locally.
 - The AWS batch has succeeded at least once.
 - The Glue backfill and a Redshift query have each run at least once.
-- The demo-day stack has been recorded and destroyed.
-- The GitHub Pages snapshot is live.
+- Any temporary environment has been verified and destroyed.
 - CI is green.
