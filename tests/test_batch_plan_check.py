@@ -1095,8 +1095,12 @@ LIFECYCLE = "aws_ecr_lifecycle_policy.batch"
 
 def with_lifecycle_replace(p: dict[str, Any], after_policy: str | None = None) -> dict[str, Any]:
     c = change(p, LIFECYCLE)["change"]
-    c["before"] = dict(c["after"], policy=lifecycle_document(2))
+    # The real replace plan: the computed id and registry_id are known before, unknown after.
+    c["before"] = dict(
+        c["after"], policy=lifecycle_document(2), id="ecp-batch", registry_id="1" * 12
+    )
     c["after"] = dict(c["after"], policy=after_policy or lifecycle_document(5))
+    c["after_unknown"] = {"id": True, "registry_id": True}
     c["actions"] = ["delete", "create"]
     c["replace_paths"] = [["policy"]]
     return p
@@ -1152,6 +1156,50 @@ def test_stage4_refuses_a_lifecycle_replacement_that_changes_anything_else(stack
     p = with_lifecycle_replace(plan(4))
     change(p, LIFECYCLE)["change"]["after"]["repository"] = "other"
     assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_known_different_registry_id_on_the_lifecycle_replacement(
+    stack: Path,
+) -> None:
+    p = with_lifecycle_replace(plan(4))
+    c = change(p, LIFECYCLE)["change"]
+    c["after"]["registry_id"] = "2" * 12
+    c["after_unknown"] = {"id": True}
+    assert any("only the policy may change" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_known_different_id_on_the_lifecycle_replacement(stack: Path) -> None:
+    p = with_lifecycle_replace(plan(4))
+    c = change(p, LIFECYCLE)["change"]
+    c["after"]["id"] = "other"
+    c["after_unknown"] = {"registry_id": True}
+    assert any("only the policy may change" in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize("attribute", ["repository", "unexpected"])
+def test_stage4_refuses_any_other_attribute_unknown_after_the_lifecycle_replacement(
+    stack: Path, attribute: str
+) -> None:
+    p = with_lifecycle_replace(plan(4))
+    change(p, LIFECYCLE)["change"]["after_unknown"][attribute] = True
+    assert any("only the policy may change" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_an_attribute_that_disappears_from_the_lifecycle_replacement(
+    stack: Path,
+) -> None:
+    p = with_lifecycle_replace(plan(4))
+    c = change(p, LIFECYCLE)["change"]
+    c["before"]["extra"] = "x"
+    assert any("only the policy may change" in x for x in run(p, 4, stack))
+
+
+def test_stage4_still_accepts_a_replacement_whose_computed_ids_are_unchanged(stack: Path) -> None:
+    p = with_lifecycle_replace(plan(4))
+    c = change(p, LIFECYCLE)["change"]
+    c["after"].update(id="ecp-batch", registry_id="1" * 12)
+    c["after_unknown"] = {}
+    assert run(p, 4, stack) == []
 
 
 @pytest.mark.parametrize("paths", [[["repository"]], [["policy"], ["repository"]], []])

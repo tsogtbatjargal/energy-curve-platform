@@ -206,14 +206,25 @@ def check_lifecycle(address: str, change: dict[str, Any]) -> list[str]:
     """The ECR lifecycle policy planned for a create, or for the one replacement a rollout may
     carry. The provider replaces the policy when its document changes (CI's plan of the 2 -> 5
     change: 1 to add, 1 to destroy), so only `policy` may force it, from the 2-image document to
-    the reviewed 5-image one, and nothing else may differ."""
+    the reviewed 5-image one. Only the computed id and registry_id may differ, and only as unknown
+    after the replacement; nothing else may differ."""
     problems = check_policy(address, change, "policy", REVIEWED_LIFECYCLE)
     if change["actions"] != ["create"]:
         before, after = change.get("before") or {}, change.get("after") or {}
         if known_document({"after": before}, "policy") != lifecycle_document(2):
             problems.append(f"{address}: the replacement must start from the 2-image document")
-        changed = [k for k in {*before, *after} if k != "policy" and before.get(k) != after.get(k)]
-        if changed or (change.get("after_unknown") or {}).get("repository"):
+        # A replace leaves the computed id and registry_id unknown after; a known change to
+        # either, and any other difference or unknown attribute, is refused.
+        unknown = {k for k, v in (change.get("after_unknown") or {}).items() if v}
+        computed = {"id", "registry_id"}
+        changed = [
+            k
+            for k in {*before, *after}
+            if k != "policy"
+            and before.get(k) != after.get(k)
+            and not (k in computed and k in unknown)
+        ]
+        if changed or unknown - computed:
             problems.append(f"{address}: only the policy may change")
         if change.get("replace_paths") != [["policy"]]:
             problems.append(f"{address}: the policy must be the only reason for the replacement")
