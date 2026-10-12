@@ -39,6 +39,8 @@ change: the function updated in place (the image only), the task definition repl
 reason (`container_definitions`; a new revision) and the state machine updated in place (only its
 definition, which names the new task-definition ARN, so it is unknown at plan time). The new
 function, container and state machine settings must equal the reviewed ones on the approved digest.
+A rollout may also carry one more in-place update, the ECR lifecycle policy: only `policy` changes,
+from the 2-image document to the reviewed 5-image one (REVIEWED_LIFECYCLE, infra/batch/ecr.tf).
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values (the alert address in particular).
@@ -107,6 +109,17 @@ LAMBDA = "aws_lambda_function.stage[0]"
 TASK = "aws_ecs_task_definition.pipeline[0]"
 SFN = "aws_sfn_state_machine.batch[0]"
 ROLLOUT = frozenset({LAMBDA, TASK, SFN})
+LIFECYCLE = "aws_ecr_lifecycle_policy.batch"
+
+
+def lifecycle_document(keep: int) -> dict[str, Any]:
+    return {"rules": [{
+        "rulePriority": 1, "description": f"Keep the {keep} newest images",
+        "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": keep},
+        "action": {"type": "expire"}}]}  # fmt: skip
+
+
+REVIEWED_LIFECYCLE = lifecycle_document(5)  # the stack's ecr.tf; a rollout raised it from 2
 
 
 def schedule_input(account: str) -> str:
@@ -187,6 +200,20 @@ def check_policy(address: str, change: dict[str, Any], attribute: str, want: Any
     return []
 
 
+def check_lifecycle(address: str, change: dict[str, Any]) -> list[str]:
+    """The ECR lifecycle policy planned for a create, or for the one in-place update a rollout may
+    carry: only `policy` changes, from the 2-image document to the reviewed 5-image one."""
+    problems = check_policy(address, change, "policy", REVIEWED_LIFECYCLE)
+    if change["actions"] == ["update"]:
+        before, after = change.get("before") or {}, change.get("after") or {}
+        if known_document({"after": before}, "policy") != lifecycle_document(2):
+            problems.append(f"{address}: the update must start from the 2-image document")
+        changed = [k for k in {*before, *after} if k != "policy" and before.get(k) != after.get(k)]
+        if changed or (change.get("after_unknown") or {}).get("repository"):
+            problems.append(f"{address}: only the policy may change")
+    return problems
+
+
 def check_stage1_create(address: str, change: dict[str, Any], account: str) -> list[str]:
     after = change.get("after") or {}
     problems = [
@@ -194,6 +221,8 @@ def check_stage1_create(address: str, change: dict[str, Any], account: str) -> l
         for a, path, want in STAGE1_SETTINGS
         if a == address and dig(after, path) != want
     ]
+    if address == LIFECYCLE:
+        problems += check_lifecycle(address, change)
     if address == f"{_B}.this[0]" and after.get("bucket") != f"ecp-data-{account}-{REGION}":
         problems.append(f"{address}: bucket is not ecp-data-<account>-{REGION}")
     if address == "aws_sns_topic_subscription.email":
@@ -489,8 +518,8 @@ def check(
             digest = ""
         if variable(plan, "image_digest") != digest:
             problems.append("image_digest is not the approved digest")
-        # `terraform show -json` records a -var value as a string; a bool never appears, but
-        # `1 == True` in Python, so test for True by identity.
+        # `terraform show -json` records a -var value as a string; a variable file can give a
+        # native bool, so accept both. `1 == True` in Python, so test for True by identity.
         enabled = variable(plan, "schedule_enabled")
         if not (enabled is True or enabled == "true"):
             problems.append(f"stage {stage} needs schedule_enabled = true")
@@ -508,6 +537,7 @@ def check(
         return [f"unknown stage {stage}"], report
 
     seen: set[str] = set()
+    lifecycle_updated = False
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]
         actions = change["actions"]
@@ -522,6 +552,11 @@ def check(
             seen.add(address)
             continue
         report.append(f"{'+'.join(actions):8} {address}")
+        if stage == 4 and address == LIFECYCLE and actions == ["update"]:
+            seen.add(address)
+            lifecycle_updated = True
+            problems += check_lifecycle(address, change)
+            continue
         if stage == 4 and address in ROLLOUT:
             want = [["delete", "create"], ["create", "delete"]] if address == TASK else [["update"]]
             if actions not in want:
@@ -550,7 +585,7 @@ def check(
         problems.append(f"missing stage-1 resource: {address} must be in the plan, unchanged")
     report.append(
         f"summary: stage {stage}, {len(expected) if stage < 3 else int(stage == 4)} to add,"
-        f" {(0, 0, 0, 1, 2)[stage]} to change, {int(stage == 4)} to destroy"
+        f" {(0, 0, 0, 1, 2)[stage] + lifecycle_updated} to change, {int(stage == 4)} to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )

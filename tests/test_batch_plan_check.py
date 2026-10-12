@@ -42,6 +42,14 @@ def role_arn(name: str) -> str:
     return f"arn:aws:iam::{MEMBER}:role/ecp-batch-{name}"
 
 
+def lifecycle_document(keep: int, description: str | None = None) -> str:
+    """The ECR lifecycle policy as `jsonencode` renders it: keep the newest `keep` images."""
+    return json.dumps({"rules": [{
+        "rulePriority": 1, "description": description or f"Keep the {keep} newest images",
+        "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": keep},
+        "action": {"type": "expire"}}]}, separators=(",", ":"))  # fmt: skip
+
+
 def stage1_creates() -> dict[str, dict[str, Any]]:
     """Address -> planned `after` of every stage-1 create, with the reviewed settings."""
     s3 = f"{MOD}.aws_s3_bucket"
@@ -66,7 +74,8 @@ def stage1_creates() -> dict[str, dict[str, Any]]:
             "name": "ecp-batch", "image_tag_mutability": "IMMUTABLE", "force_delete": False,
             "image_scanning_configuration": [{"scan_on_push": True}],
             "encryption_configuration": [{"encryption_type": "AES256", "kms_key": None}]},
-        "aws_ecr_lifecycle_policy.batch": {},
+        "aws_ecr_lifecycle_policy.batch": {
+            "repository": "ecp-batch", "policy": lifecycle_document(5)},
         "aws_ecr_repository_policy.batch": {"policy": template("ecr-repository")},
         "aws_vpc.batch": {"cidr_block": "10.42.0.0/16"},
         "aws_default_security_group.batch": {"ingress": [], "egress": []},
@@ -1075,3 +1084,119 @@ def test_stage4_still_refuses_drift_an_errored_plan_and_the_wrong_account(stack:
     p = plan(4)
     p["variables"]["expected_account_id"]["value"] = "444444444444"
     assert any("expected_account_id" in x for x in run(p, 4, stack))
+
+
+# --- the ECR lifecycle: an in-place update from 2 images to 5 is part of a rollout ---------------
+
+LIFECYCLE = "aws_ecr_lifecycle_policy.batch"
+
+
+def with_lifecycle_update(p: dict[str, Any], after_policy: str | None = None) -> dict[str, Any]:
+    c = change(p, LIFECYCLE)["change"]
+    c["before"] = dict(c["after"], policy=lifecycle_document(2))
+    c["after"] = dict(c["after"], policy=after_policy or lifecycle_document(5))
+    c["actions"] = ["update"]
+    return p
+
+
+def test_the_reviewed_lifecycle_document_is_the_one_in_the_stack_source() -> None:
+    source = (bpc.STACK / "ecr.tf").read_text()
+    assert "countNumber = 5" in source and "Keep the 5 newest images" in source
+    assert json.loads(lifecycle_document(5)) == bpc.REVIEWED_LIFECYCLE
+
+
+def test_a_rollout_may_raise_the_lifecycle_from_two_images_to_five(stack: Path) -> None:
+    problems, report = bpc.check(with_lifecycle_update(plan(4)), 4, DIGEST, stack)
+    assert problems == []
+    assert f"update   {LIFECYCLE}" in report
+    assert "summary: stage 4, 1 to add, 3 to change, 1 to destroy" in report
+
+
+@pytest.mark.parametrize("keep", [1, 2, 3, 10, 0])
+def test_stage4_refuses_a_lifecycle_that_keeps_another_number_of_images(
+    stack: Path, keep: int
+) -> None:
+    p = with_lifecycle_update(plan(4), lifecycle_document(keep))
+    assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["rules"][0]["selection"].update(tagStatus="tagged"),
+        lambda d: d["rules"][0]["selection"].update(countType="sinceImagePushed"),
+        lambda d: d["rules"][0]["action"].update(type="other"),
+        lambda d: d["rules"][0].update(rulePriority=2),
+        lambda d: d["rules"].append(dict(d["rules"][0], rulePriority=2)),
+        lambda d: d["rules"][0].update(description="Keep everything"),
+    ],
+)
+def test_stage4_refuses_a_lifecycle_document_that_differs_in_anything_but_the_count(
+    stack: Path, mutate: Any
+) -> None:
+    doc = json.loads(lifecycle_document(5))
+    mutate(doc)
+    p = with_lifecycle_update(plan(4), json.dumps(doc))
+    assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_lifecycle_update_that_changes_anything_else(stack: Path) -> None:
+    p = with_lifecycle_update(plan(4))
+    change(p, LIFECYCLE)["change"]["after"]["repository"] = "other"
+    assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_lifecycle_document_unknown_at_plan_time(stack: Path) -> None:
+    p = with_lifecycle_update(plan(4))
+    c = change(p, LIFECYCLE)["change"]
+    del c["after"]["policy"]
+    c["after_unknown"] = {"policy": True}
+    assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize("actions", [["delete", "create"], ["create", "delete"], ["delete"]])
+def test_stage4_refuses_a_lifecycle_policy_replaced_or_destroyed(
+    stack: Path, actions: list[str]
+) -> None:
+    p = with_lifecycle_update(plan(4))
+    change(p, LIFECYCLE)["change"]["actions"] = actions
+    assert any(f"unexpected change: {'+'.join(actions)} {LIFECYCLE}" in x for x in run(p, 4, stack))
+
+
+def test_stage4_refuses_a_lifecycle_update_from_a_document_that_was_not_the_deployed_one(
+    stack: Path,
+) -> None:
+    p = with_lifecycle_update(plan(4))
+    change(p, LIFECYCLE)["change"]["before"]["policy"] = lifecycle_document(7)
+    assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
+@pytest.mark.parametrize("stage", [2, 3])
+def test_only_a_rollout_may_update_the_lifecycle(stack: Path, stage: int) -> None:
+    p = with_lifecycle_update(plan(stage))
+    assert any(f"unexpected change: update {LIFECYCLE}" in x for x in run(p, stage, stack))
+
+
+def test_stage1_refuses_a_lifecycle_document_other_than_the_reviewed_one(stack: Path) -> None:
+    p = plan(1)
+    change(p, LIFECYCLE)["change"]["after"]["policy"] = lifecycle_document(2)
+    assert any(LIFECYCLE in x for x in run(p, 1, stack))
+
+
+# --- schedule_enabled in a rollout: the same two spellings as stage 3 ---------------------------
+
+
+@pytest.mark.parametrize("value", [True, "true"])
+def test_stage4_accepts_schedule_enabled_true_as_a_bool_or_a_string(
+    stack: Path, value: Any
+) -> None:
+    p = plan(4)
+    p["variables"]["schedule_enabled"] = {"value": value}
+    assert run(p, 4, stack) == []
+
+
+@pytest.mark.parametrize("value", ["false", "True", "TRUE", 1, "1", False, None, "", "yes"])
+def test_stage4_refuses_any_other_schedule_enabled_value(stack: Path, value: Any) -> None:
+    p = plan(4)
+    p["variables"]["schedule_enabled"] = {"value": value}
+    assert "stage 4 needs schedule_enabled = true" in run(p, 4, stack)
