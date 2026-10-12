@@ -17,9 +17,8 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from energy_curves.catalog import SERIES, Kind
 
 FUTURES_END = date(2024, 4, 5)  # mirrors EIA: no futures after this date
-NEGATIVE_DAY = date(
-    2020, 4, 20
-)  # a negative-price day, as the real market had; values are fictional
+# A negative-price day, as the real market had; the values on it are fictional.
+NEGATIVE_DAY = date(2020, 4, 20)
 EPOCH = date(2000, 1, 1)
 
 

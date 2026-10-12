@@ -17,6 +17,7 @@ file with the local cache.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -32,7 +33,14 @@ from energy_curves.synthetic_prices import synthetic_price
 REPO = Path(__file__).resolve().parents[1]
 PUBLIC_DIRS = ("public", "site", "snapshot")
 EXAMPLES = frozenset({"61.25", "99.99"})  # synthetic values the README and tests document
-REAL_SETTLEMENTS = ("-37.63", "19.33")  # EIA WTI and Brent, 2020-04-20: never public
+# SHA-256 of the two canonical price strings of the real 2020-04-20 WTI and Brent settlements.
+# Digests, not values: the repository holds no real settlement, not even in the guard.
+REAL_SETTLEMENT_SHA256 = frozenset(
+    {
+        "2f3825b49f756038e424714a9ad00478021705a801e9fa3d4184a9a153c04443",
+        "3ce33b49cff17108df31481c7868deb408559b32458b6eea1ee071177dffd12e",
+    }
+)
 REAL_DATA_VARIABLES = ("ECP_REAL_DATA_DIR", "DATA_DIR")
 SERIES_WORDS = re.compile(r"WTI|Brent|RWTC|RBRTE|RCLC|\bprice|crude|\$", re.IGNORECASE)
 PRICE = re.compile(r"(?<![\d.])-?\d{1,4}\.\d{2}(?![\d.]|\.\d)")
@@ -102,10 +110,16 @@ def check_prices(text: str, name: str) -> None:
                 )
 
 
+def has_real_settlement(text: str) -> bool:
+    return any(
+        hashlib.sha256(token.encode()).hexdigest() in REAL_SETTLEMENT_SHA256
+        for token in PRICE.findall(text)
+    )
+
+
 def check_artifact(text: str, name: str) -> None:
-    for value in REAL_SETTLEMENTS:
-        if re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", text):
-            raise PublicOutputRefused(f"{name}: carries a real settlement ({value})")
+    if has_real_settlement(text):
+        raise PublicOutputRefused(f"{name}: carries a real settlement")
     if DISCLAIMER not in text or "synthetic" not in text.lower():
         raise PublicOutputRefused(
             f"{name}: lacks the modelled-estimate disclaimer or the synthetic notice"
