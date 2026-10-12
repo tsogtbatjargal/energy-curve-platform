@@ -32,6 +32,7 @@ from energy_curves.synthetic_prices import synthetic_price
 REPO = Path(__file__).resolve().parents[1]
 PUBLIC_DIRS = ("public", "site", "snapshot")
 EXAMPLES = frozenset({"61.25", "99.99"})  # synthetic values the README and tests document
+REAL_SETTLEMENTS = ("-37.63", "19.33")  # EIA WTI and Brent, 2020-04-20: never public
 REAL_DATA_VARIABLES = ("ECP_REAL_DATA_DIR", "DATA_DIR")
 SERIES_WORDS = re.compile(r"WTI|Brent|RWTC|RBRTE|RCLC|\bprice|crude|\$", re.IGNORECASE)
 PRICE = re.compile(r"(?<![\d.])-?\d{1,4}\.\d{2}(?![\d.]|\.\d)")
@@ -102,6 +103,9 @@ def check_prices(text: str, name: str) -> None:
 
 
 def check_artifact(text: str, name: str) -> None:
+    for value in REAL_SETTLEMENTS:
+        if re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", text):
+            raise PublicOutputRefused(f"{name}: carries a real settlement ({value})")
     if DISCLAIMER not in text or "synthetic" not in text.lower():
         raise PublicOutputRefused(
             f"{name}: lacks the modelled-estimate disclaimer or the synthetic notice"

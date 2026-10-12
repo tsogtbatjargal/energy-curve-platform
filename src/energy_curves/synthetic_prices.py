@@ -17,7 +17,9 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from energy_curves.catalog import SERIES, Kind
 
 FUTURES_END = date(2024, 4, 5)  # mirrors EIA: no futures after this date
-NEGATIVE_DAY = date(2020, 4, 20)  # mirrors the real negative WTI settlement
+NEGATIVE_DAY = date(
+    2020, 4, 20
+)  # a negative-price day, as the real market had; values are fictional
 EPOCH = date(2000, 1, 1)
 
 
@@ -43,9 +45,9 @@ def synthetic_price(series_id: str, d: date) -> Decimal | None:
         return None
     series = SERIES[series_id]
     if series_id == "RWTC":
-        value = -37.63 if d == NEGATIVE_DAY else _wti(d)
+        value = -8.88 if d == NEGATIVE_DAY else _wti(d)
     elif series_id == "RBRTE":
-        value = 19.33 if d == NEGATIVE_DAY else _wti(d) + 4 + 0.8 * _noise("RBRTE", d)
+        value = 22.22 if d == NEGATIVE_DAY else _wti(d) + 4 + 0.8 * _noise("RBRTE", d)
     else:
         if series.kind is not Kind.FUTURE or d > FUTURES_END:
             return None

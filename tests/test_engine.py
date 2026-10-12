@@ -93,7 +93,7 @@ def test_missing_leg_is_a_gap_not_forward_filled() -> None:
 
 
 def test_non_positive_anchor_is_a_gap() -> None:
-    curves = build([("RWTC", D1, "-37.63"), ("RBRTE", D1, "19.33")])
+    curves = build([("RWTC", D1, "-8.88"), ("RBRTE", D1, "22.22")])  # synthetic values
     assert point(curves, "WTI", D1, "C2")["status"] == "gap"
     assert "non-positive RWTC spot" in str(point(curves, "WTI", D1, "C2")["gap_reason"])
     assert point(curves, "BRENT", D1, "C2")["status"] == "ok"

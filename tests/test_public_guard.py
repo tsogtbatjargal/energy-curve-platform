@@ -8,6 +8,7 @@ the opt-in `realdata` test, which compares the public files with the local cache
 
 import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 
@@ -138,6 +139,53 @@ def test_the_synthetic_prices_are_the_generators_and_the_allowed_examples_only()
     assert str(synthetic_price("RWTC", date(2024, 1, 2))) in values
     assert "61.25" in values and "99.99" in values  # the documented examples
     assert len(values) > 1000
+
+
+@pytest.mark.parametrize("real", pg.REAL_SETTLEMENTS)
+def test_the_real_2020_04_20_settlements_are_refused_by_name(real: str) -> None:
+    with pytest.raises(pg.PublicOutputRefused, match="real"):
+        pg.check_artifact(GOOD + f"WTI spot {real}\n", "snapshot.txt")
+
+
+def test_the_generator_no_longer_reproduces_the_real_settlements() -> None:
+    from energy_curves.synthetic_prices import NEGATIVE_DAY, synthetic_price
+
+    assert not set(pg.REAL_SETTLEMENTS) & pg.synthetic_prices()
+    wti, brent = synthetic_price("RWTC", NEGATIVE_DAY), synthetic_price("RBRTE", NEGATIVE_DAY)
+    assert wti is not None and wti < 0  # still a negative day, so the exclusion path is covered
+    assert brent is not None and brent > 0
+
+
+def test_no_tracked_file_carries_a_real_settlement() -> None:
+    import subprocess
+
+    tracked = (
+        subprocess.run(  # noqa: S603
+            ["git", "ls-files", "-z"],  # noqa: S607
+            cwd=pg.REPO,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .split("\0")
+    )
+    own = {"scripts/public_guard.py", "tests/test_public_guard.py"}
+    pattern = re.compile(
+        r"(?<![\d.])(" + "|".join(map(re.escape, pg.REAL_SETTLEMENTS)) + r")(?!\d)"
+    )
+    hits = []
+    for name in tracked:
+        path = pg.REPO / name
+        if not name or name in own or "/vendor/" in name or not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        hits += [
+            f"{name}:{n}" for n, line in enumerate(text.splitlines(), 1) if pattern.search(line)
+        ]
+    assert not hits, hits
 
 
 def test_versions_and_unrelated_numbers_are_not_mistaken_for_prices() -> None:
