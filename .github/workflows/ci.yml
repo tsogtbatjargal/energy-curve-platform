@@ -182,6 +182,8 @@ jobs:
           docker run --rm --network none -v "$store:/store" -e ECP_STORE_URL=file:///store \
             --entrypoint python ecp-batch:ci -m energy_curves.cloud task ci-1 | tail -1 | tee run.json
           grep -q '"status": "published"' run.json
+      - name: smoke test the negative-price day and the publish repair
+        run: docker run --rm -i --network none --entrypoint python ecp-batch:ci - < scripts/image_smoke.py
 
   glue-compat:
     # AWS Glue 5.1 runtime (ADR-0007): Python 3.11, Java 17, PySpark 3.5.6. Runs the whole suite

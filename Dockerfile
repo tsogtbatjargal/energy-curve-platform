@@ -5,9 +5,9 @@
 # proposes; an index digest fixes every platform's manifest. The build selects linux/amd64 with
 # `docker build --platform linux/amd64` (ADR-0020). Runtime dependencies come from uv.lock,
 # installed by pip with --require-hashes, so the image gets exactly the locked, verified wheels.
-FROM ghcr.io/astral-sh/uv:0.12.24@sha256:3af4716e991d6956a41e573eab705d0ee08500cd829ed30293eb8472f372c65a AS uv
+FROM ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 AS uv
 
-FROM public.ecr.aws/lambda/python:3.12@sha256:d0a4fa8f489a7d9f05a95e642ffd599bea3b07339adb510185a8a14653944b1c
+FROM public.ecr.aws/lambda/python:3.12@sha256:719d7d69d6e946b2ddd2d039723dc9415d0bcf1eecb6e12fa35dac58e23cebc6
 # OS security updates at build time. Amazon Linux 2023 locks its repositories to the image's
 # release, so a plain upgrade misses fixes published since; --releasever=latest reaches them. The
 # deployed image is identified by its own digest, and CI scans it (trivy, fixed HIGH/CRITICAL).
