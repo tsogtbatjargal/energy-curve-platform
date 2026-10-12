@@ -106,4 +106,4 @@ Redshift Serverless compute $0.4125 per RPU-hour (billed per second; nothing whi
 - `synthetic.py` and `shape.py` re-export the moved names, so no importer changes.
 - The deployed batch image does not change. `jobs/` is outside its build context, but `src/` gains two modules, so the next rebuild (not this PR) carries them; their behaviour is identical, pinned by the digest test.
 - If a 4-RPU workgroup is refused in ca-central-1, 8 RPU doubles the session price; the plan check stops for a decision instead of growing silently. *(It was: the documented list of Regions with 4 RPU excludes ca-central-1, so the stack is 8 RPU; see M5c-1.)*
-- Not decided here: what M6 publishes (PLAN.md R3).
+- Not decided here: what M6 publishes (PLAN.md R3). *(Note 2026-10-12: R3 is decided for any public output; see the ADR-0011 note.)*

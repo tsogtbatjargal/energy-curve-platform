@@ -87,7 +87,7 @@ The serving tables (`observations`, `curve_points`) hold only the latest snapsho
 - **Local-only HTTP protection:** bind to `127.0.0.1`; validate `Host` and `Origin`; CSRF tokens on state-changing endpoints; no permissive CORS.
 
 ### Data shown (ADR-0011)
-Real EIA data is shown locally only. Screenshots, video and CI artefacts use synthetic data and synthetic parameters. The "SYNTHETIC DATA" badge appears in the UI and in exports.
+Real EIA data is shown locally only. Screenshots, video and CI artefacts use synthetic data and synthetic parameters. The "SYNTHETIC DATA" badge appears in the UI and in exports. *(Note 2026-10-12: the rule covers any public output, whatever its form; see the ADR-0011 note.)*
 
 ## Delivery
 Four PRs, each implemented and reviewed one at a time. Estimated 20–28 hours, subject to revision.

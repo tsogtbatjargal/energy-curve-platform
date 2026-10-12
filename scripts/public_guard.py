@@ -1,14 +1,14 @@
 """R3 (PLAN.md, ADR-0011 addendum): public outputs are synthetic only.
 
-The GitHub Pages snapshot, screenshots, the video and the README show nothing real. This module is
-the guard the snapshot builder must call on its input (`require_synthetic_store`) and the checks
-CI runs over every public file:
+No public output shows anything real: not the README, documents, images or published artefacts.
+This module is the guard any builder of a public artefact must call on its input
+(`require_synthetic_store`) and the checks CI runs over every public file:
 - `require_synthetic_store`: the store is not under the repository's git-ignored `data/` or the
   configured real-data directory (symlinks resolved), has a published pointer, and its manifest
   says `source: synthetic`. Anything unreadable is a refusal.
 - `check_artifact`: an output carries the modelled-estimate disclaimer AND a synthetic notice, and
   every price in it is one the synthetic generator can produce (or a documented example).
-- `check_workflow`: a Pages workflow reads no real-data path, no EIA key and no real source.
+- `check_workflow`: a publishing workflow reads no real-data path, no EIA key and no real source.
 
 The price check is a tripwire for stray real values, not a proof; the proof is that the builder only
 reads a store that passed `require_synthetic_store`. The opt-in realdata test compares every public
@@ -116,7 +116,7 @@ def check_workflow(text: str, name: str) -> None:
 
 
 def public_files(repo: Path = REPO) -> list[Path]:
-    """The README, the Pages workflow(s) and everything in the snapshot output directories."""
+    """The README, publishing workflow(s) and everything in the public output directories."""
     files = [repo / "README.md"]
     files += sorted((repo / ".github" / "workflows").glob("pages*.y*ml"))
     for directory in PUBLIC_DIRS:

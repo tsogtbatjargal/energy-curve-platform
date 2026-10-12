@@ -22,3 +22,5 @@ A NAT gateway costs about $1 per day per gateway, plus data processing charges. 
 - The batch profile costs almost nothing for networking.
 - A single NAT gateway is a single-AZ point of failure. That is acceptable for a demo; a production setup would use one per AZ.
 - SSM needs the bastion's outbound path, through the NAT gateway or SSM interface endpoints. We use the NAT gateway.
+
+**Note (2026-10-12).** The temporary private environment is optional and is not part of this repository's delivered scope. The rule that only a stack tagged `demo` may have a NAT gateway or an interface endpoint is unchanged.

@@ -1,7 +1,7 @@
 """R3 (PLAN.md, ADR-0011 addendum): public outputs are synthetic only. These tests enforce it.
 
-What is public: the README, the Pages workflow, and the snapshot output (the GitHub Pages source).
-The snapshot builder does not exist yet; when it does it must call `require_synthetic_store` on its
+What is public: the README, any publishing workflow, and the output directories in PUBLIC_DIRS.
+No artefact builder exists yet; when one does it must call `require_synthetic_store` on its
 input, and this file already fails the build if it does not. Nothing here needs real data except
 the opt-in `realdata` test, which compares the public files with the local cache.
 """
@@ -150,7 +150,7 @@ def test_the_check_applies_to_every_output_format(name: str) -> None:
         pg.check_artifact("Brent 12.34", name)
 
 
-# --- the Pages workflow reads no real data -----------------------------------------------------
+# --- a publishing workflow reads no real data -----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -167,12 +167,14 @@ def test_the_check_applies_to_every_output_format(name: str) -> None:
 )
 def test_a_workflow_that_reads_real_data_or_the_eia_key_is_refused(line: str) -> None:
     with pytest.raises(pg.PublicOutputRefused):
-        pg.check_workflow(f"name: pages\njobs:\n  b:\n    steps:\n      - {line}\n", "pages.yml")
+        pg.check_workflow(
+            f"name: publish\njobs:\n  b:\n    steps:\n      - {line}\n", "publish.yml"
+        )
 
 
 def test_a_workflow_that_builds_from_synthetic_data_is_accepted() -> None:
-    text = "name: pages\njobs:\n  b:\n    steps:\n      - run: ECP_SOURCE=synthetic python x.py\n"
-    pg.check_workflow(text, "pages.yml")
+    text = "name: publish\njobs:\n  b:\n    steps:\n      - run: ECP_SOURCE=synthetic python x.py\n"
+    pg.check_workflow(text, "publish.yml")
 
 
 # --- the repository's public files, today ------------------------------------------------------
