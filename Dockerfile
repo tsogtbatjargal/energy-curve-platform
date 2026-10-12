@@ -7,7 +7,7 @@
 # installed by pip with --require-hashes, so the image gets exactly the locked, verified wheels.
 FROM ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 AS uv
 
-FROM public.ecr.aws/lambda/python:3.12@sha256:719d7d69d6e946b2ddd2d039723dc9415d0bcf1eecb6e12fa35dac58e23cebc6
+FROM public.ecr.aws/lambda/python:3.12@sha256:1b1c7d7a8822976799864f4d8cd725b6749d8a66cdc8f4101d5586d9c648bbaf
 # OS security updates at build time. Amazon Linux 2023 locks its repositories to the image's
 # release, so a plain upgrade misses fixes published since; --releasever=latest reaches them. The
 # deployed image is identified by its own digest, and CI scans it (trivy, fixed HIGH/CRITICAL).
