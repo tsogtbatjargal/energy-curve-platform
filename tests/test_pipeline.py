@@ -202,7 +202,8 @@ def test_non_positive_price_preserved(tmp_path: Path) -> None:
     ingest(tmp_path, req)
     cur = load_published(LocalArtifactStore(tmp_path)).current
     row = cur.filter(pl.col("observation_date") == date(2020, 4, 20)).row(0, named=True)
-    assert row["price"] == Decimal("-37.63") and row["non_positive"] is True
+    # -8.88 is the synthetic generator's fictional value for this negative-price day
+    assert row["price"] == Decimal("-8.88") and row["non_positive"] is True
 
 
 # --- crash recovery ---
