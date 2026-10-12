@@ -30,12 +30,11 @@ drift, no output changes), ca-central-1, the caller is expected_account_id and n
 account, and the source has exactly one module call, the bucket, at 5.16.2, with no override file
 or JSON configuration.
 
-`--change update` (the job's rerun fix) is for the applied stack with no drift (a refresh-only
-apply records the provider's read-back first): exactly one in-place update, the script object, and
-thirteen no-ops. The script's ETag moves to the repository script's hash (its version_id is known
-only after apply) and no other attribute changes. The job, both log groups, the bundle, the role
-and its policy and the bucket do not change. Every resource, changed or not, must still be the
-reviewed one.
+`--change update` is the reviewed delete narrowing and bundle refresh, with no drift: exactly
+in-place updates of the inline role policy (only policy, from the prior broad document to the
+current reviewed template) and the bundle object (only etag and its computed version_id). The
+bundle ETag must be the repository bundle's hash. The script, job, role, logs and bucket stay
+unchanged; every resource must still be the reviewed one. No Glue plan or apply is implied.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values.
@@ -125,8 +124,8 @@ JOB_OWN_ARGUMENTS = (
     "--partitions",
     "--output",
 )
-# The update (a job that can be rerun): only the script object changes, to the repository's script.
-UPDATES = {SCRIPT}
+# The reviewed update narrows deletes and refreshes the bundle changed by the generator fix.
+UPDATES = {ROLE_POLICY, BUNDLE}
 APPLIED = frozenset({JOB, ROLE, ROLE_POLICY, LOG_OUT, LOG_ERR, SCRIPT, BUNDLE})
 
 
@@ -333,21 +332,40 @@ def check_source(stack_dir: Path) -> list[str]:
     return problems
 
 
-def check_update(address: str, change: dict[str, Any]) -> list[str]:
-    """The script object's in-place update: its ETag moves (to the repository script's hash, which
-    check_create verifies) and its version_id, known only after apply. Nothing else differs."""
+def prior_role_policy(account: str) -> Any:
+    """The previously reviewed document: DeleteObject shared m5/* with Get/Put/Abort."""
+    doc = render("glue-policy", account)
+    doc["Statement"] = [s for s in doc["Statement"] if s["Sid"] != "DeleteCommitterStaging"]
+    writes = next(s for s in doc["Statement"] if s["Sid"] == "WriteTheOutputs")
+    writes["Action"].insert(2, "s3:DeleteObject")
+    return doc
+
+
+def check_update(address: str, change: dict[str, Any], account: str | None) -> list[str]:
+    """Only the policy document or the bundle ETag/computed version may change."""
     before, after = change.get("before") or {}, change.get("after") or {}
     unknown = {k for k, v in (change.get("after_unknown") or {}).items() if v}
     differing = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
     problems = []
-    if unknown - {"version_id"}:
-        problems.append(f"{address}: only version_id may be unknown after apply")
-    if differing - {"etag", "version_id"}:
-        problems.append(
-            f"{address}: changes {', '.join(sorted(differing - {'etag', 'version_id'}))}"
-        )
-    if before.get("etag") == after.get("etag"):
-        problems.append(f"{address}: etag does not change")
+    allowed = {"policy"} if address == ROLE_POLICY else {"etag", "version_id"}
+    if differing - allowed:
+        problems.append(f"{address}: changes {', '.join(sorted(differing - allowed))}")
+    if address == ROLE_POLICY:
+        if unknown:
+            problems.append(f"{address}: no attribute may be unknown after the policy update")
+        if differing != {"policy"}:
+            problems.append(f"{address}: policy must change, and nothing else")
+        try:
+            old = json.loads(before.get("policy", ""))
+        except (TypeError, json.JSONDecodeError):
+            old = None
+        if not account or old != prior_role_policy(account):
+            problems.append(f"{address}: policy before is not the reviewed broad document")
+    else:
+        if unknown != {"version_id"} or change["after_unknown"].get("version_id") is not True:
+            problems.append(f"{address}: only version_id must be unknown after apply")
+        if before.get("etag") == after.get("etag"):
+            problems.append(f"{address}: etag does not change")
     return problems
 
 
@@ -360,7 +378,7 @@ def check(
     plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
 ) -> tuple[list[str], list[str]]:
     """(problems, report) for a saved plan of infra/glue: `create` from an empty state, or
-    `update` (the script object alone) on the applied stack."""
+    `update` (policy and bundle only) on the applied stack."""
     if mode not in ("create", "update"):
         return [f"unknown change mode {mode}"], []
     problems, account = check_common(plan, mode)
@@ -381,7 +399,7 @@ def check(
             continue
         seen.add(address)
         if mode == "update" and address in UPDATES:
-            problems += check_update(address, change)
+            problems += check_update(address, change, account)
         if account:
             problems += check_create(address, change, account, plan)
     for address in sorted(set(want) - seen):

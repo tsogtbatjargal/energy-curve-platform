@@ -10,19 +10,39 @@
     {
       "Sid": "WriteTheOutputs",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:AbortMultipartUpload"
+      ],
       "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}/m5/*"
+    },
+    {
+      "Sid": "DeleteCommitterStaging",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": [
+        "arn:aws:s3:::ecp-glue-${account_id}-${region}/m5/shape/jr_*/shape_params.csv/.spark-staging-*",
+        "arn:aws:s3:::ecp-glue-${account_id}-${region}/m5/shape/jr_*/shape_params.sha256/.spark-staging-*"
+      ]
     },
     {
       "Sid": "ListSoMissingKeysAre404AndTheCommitterCanRename",
       "Effect": "Allow",
-      "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+      "Action": [
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads"
+      ],
       "Resource": "arn:aws:s3:::ecp-glue-${account_id}-${region}"
     },
     {
       "Sid": "OwnLogs",
       "Effect": "Allow",
-      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
       "Resource": [
         "arn:aws:logs:${region}:${account_id}:log-group:/aws-glue/*",
         "arn:aws:logs:${region}:${account_id}:log-group:/aws-glue/*:*"

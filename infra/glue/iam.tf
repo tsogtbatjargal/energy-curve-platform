@@ -7,6 +7,14 @@ resource "aws_iam_role" "glue" {
   permissions_boundary = local.boundary_arn
 }
 
+# The successful run-scoped Glue logs show HadoopMapRedCommitProtocol with direct writes enabled:
+# no _temporary output is written. Its Spark 3.5.6 parent still deletes .spark-staging-<jobId>
+# on commit/abort. Limit DeleteObject to that path under the two run outputs; final files and the
+# completion record are not deletable. A later Glue run must prove this narrower policy.
+# Sources (getStagingDir, commitJob/abortJob, and the mapred protocol's superclass):
+# https://github.com/apache/spark/blob/v3.5.6/core/src/main/scala/org/apache/spark/internal/io/FileCommitProtocol.scala#L232-L234
+# https://github.com/apache/spark/blob/v3.5.6/core/src/main/scala/org/apache/spark/internal/io/HadoopMapReduceCommitProtocol.scala#L173-L242
+# https://github.com/apache/spark/blob/v3.5.6/core/src/main/scala/org/apache/spark/internal/io/HadoopMapRedCommitProtocol.scala#L27-L34
 resource "aws_iam_role_policy" "glue" {
   name   = local.name
   role   = aws_iam_role.glue.id

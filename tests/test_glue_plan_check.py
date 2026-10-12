@@ -488,14 +488,46 @@ def test_main_exits_zero_for_the_reviewed_plan_and_nonzero_otherwise(
     assert "FAIL  region must be ca-central-1" in capsys.readouterr().out
 
 
-# --- the update: the job can be rerun (M5b third fix) ------------------------------------------
-# On the applied stack with no drift: the script object alone changes in place (its ETag moves to
-# the repository script's hash, its version_id is known after apply); the other thirteen resources
-# are no-ops.
+# --- the update: narrow deletes and refresh the generator bundle --------------------------------
+# On the applied stack with no drift: policy-only narrowing and bundle ETag/version_id changes;
+# the other twelve resources are no-ops.
 
-OLD_SCRIPT_ETAG = "291331c34b6cadaf68fb80a95027b842"
+OLD_BUNDLE_ETAG = "291331c34b6cadaf68fb80a95027b842"
 APPLIED = [JOB, ROLE, ROLE_POLICY, LOG_OUT, LOG_ERR, SCRIPT, BUNDLE]
-UNCHANGED = [a for a in ADDRESSES if a != SCRIPT]
+UNCHANGED = [a for a in ADDRESSES if a not in (BUNDLE, ROLE_POLICY)]
+
+
+def old_role_policy() -> dict[str, Any]:
+    doc = json.loads(template("glue-policy"))
+    doc["Statement"] = [s for s in doc["Statement"] if s["Sid"] != "DeleteCommitterStaging"]
+    writes = next(s for s in doc["Statement"] if s["Sid"] == "WriteTheOutputs")
+    writes["Action"] = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+    ]
+    return doc
+
+
+def narrow_role_policy() -> dict[str, Any]:
+    doc = old_role_policy()
+    next(s for s in doc["Statement"] if s["Sid"] == "WriteTheOutputs")["Action"].remove(
+        "s3:DeleteObject"
+    )
+    doc["Statement"].insert(
+        2,
+        {
+            "Sid": "DeleteCommitterStaging",
+            "Effect": "Allow",
+            "Action": "s3:DeleteObject",
+            "Resource": [
+                f"arn:aws:s3:::{BUCKET}/m5/shape/jr_*/{output}/.spark-staging-*"
+                for output in ("shape_params.csv", "shape_params.sha256")
+            ],
+        },
+    )
+    return doc
 
 
 def update_plan() -> dict[str, Any]:
@@ -513,12 +545,16 @@ def update_plan() -> dict[str, Any]:
                 r["change"][side].update(
                     connections=[], security_configuration="", non_overridable_arguments={}
                 )
-    script = change(p, SCRIPT)["change"]
-    script["actions"] = ["update"]
-    script["before"]["etag"] = OLD_SCRIPT_ETAG
-    script["before"]["version_id"] = "null"
-    script["after"].pop("version_id", None)
-    script["after_unknown"] = {"version_id": True}
+    bundle = change(p, BUNDLE)["change"]
+    bundle["actions"] = ["update"]
+    bundle["before"]["etag"] = OLD_BUNDLE_ETAG
+    bundle["before"]["version_id"] = "null"
+    bundle["after"].pop("version_id", None)
+    bundle["after_unknown"] = {"version_id": True}
+    role_policy = change(p, ROLE_POLICY)["change"]
+    role_policy["actions"] = ["update"]
+    role_policy["before"]["policy"] = json.dumps(old_role_policy())
+    role_policy["after"]["policy"] = json.dumps(narrow_role_policy())
     return p
 
 
@@ -530,8 +566,11 @@ def run_update(p: dict[str, Any], stack: Path) -> list[str]:
 def test_the_reviewed_update_plan_passes(stack: Path) -> None:
     problems, report = gpc.check(update_plan(), stack, "update")
     assert problems == []
-    assert "summary: 0 to add, 1 to change, 0 to destroy" in report
-    assert [x for x in report if not x.startswith(("no-op", "summary"))] == [f"update   {SCRIPT}"]
+    assert "summary: 0 to add, 2 to change, 0 to destroy" in report
+    assert [x for x in report if not x.startswith(("no-op", "summary"))] == [
+        f"update   {ROLE_POLICY}",
+        f"update   {BUNDLE}",
+    ]
 
 
 def test_the_update_plan_is_refused_in_create_mode_and_the_create_plan_in_update_mode(
@@ -577,8 +616,8 @@ def test_update_mode_needs_the_applied_state(stack: Path) -> None:
 
 def test_a_missing_update_is_refused(stack: Path) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["actions"] = ["no-op"]
-    assert any(f"missing change: update {SCRIPT}" in x for x in run_update(p, stack))
+    change(p, BUNDLE)["change"]["actions"] = ["no-op"]
+    assert any(f"missing change: update {BUNDLE}" in x for x in run_update(p, stack))
 
 
 @pytest.mark.parametrize("address", UNCHANGED)
@@ -596,11 +635,11 @@ def test_any_other_resource_must_stay_unchanged(
 @pytest.mark.parametrize(
     "actions", [["delete", "create"], ["create", "delete"], ["delete"], ["create"]]
 )
-def test_the_script_must_be_updated_in_place(stack: Path, actions: list[str]) -> None:
+def test_the_bundle_must_be_updated_in_place(stack: Path, actions: list[str]) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["actions"] = actions
+    change(p, BUNDLE)["change"]["actions"] = actions
     assert any(
-        f"unexpected change: {'+'.join(actions)} {SCRIPT}" in x for x in run_update(p, stack)
+        f"unexpected change: {'+'.join(actions)} {BUNDLE}" in x for x in run_update(p, stack)
     )
 
 
@@ -621,40 +660,40 @@ def test_a_delete_of_any_log_group_is_refused(stack: Path) -> None:
     assert any("unexpected change: delete" in x for x in run_update(p, stack))
 
 
-# the script object: only the ETag (and the version it creates), to the repository's script
+# the bundle object: only the ETag (and the version it creates), to the repository's bundle
 
 
-def test_the_script_etag_after_must_be_the_repositorys(stack: Path) -> None:
+def test_the_bundle_etag_after_must_be_the_repositorys(stack: Path) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["after"]["etag"] = md5(b"something else")
-    assert any(SCRIPT in x and "repository" in x for x in run_update(p, stack))
+    change(p, BUNDLE)["change"]["after"]["etag"] = md5(b"something else")
+    assert any(BUNDLE in x and "repository" in x for x in run_update(p, stack))
 
 
-def test_the_script_etag_must_actually_change(stack: Path) -> None:
+def test_the_bundle_etag_must_actually_change(stack: Path) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["before"]["etag"] = change(p, SCRIPT)["change"]["after"]["etag"]
-    assert any(SCRIPT in x and "etag does not change" in x for x in run_update(p, stack))
+    change(p, BUNDLE)["change"]["before"]["etag"] = change(p, BUNDLE)["change"]["after"]["etag"]
+    assert any(BUNDLE in x and "etag does not change" in x for x in run_update(p, stack))
 
 
 @pytest.mark.parametrize(
     ("attribute", "value"),
-    [("key", "glue/other.py"), ("source", "/elsewhere/evil.py"), ("content_type", "text/x"),
+    [("key", "glue/other.zip"), ("source", "/elsewhere/evil.zip"), ("content_type", "text/x"),
      ("kms_key_id", "k"), ("acl", "public-read"), ("storage_class", "GLACIER")],
 )  # fmt: skip
-def test_the_script_object_may_change_nothing_but_its_etag(
+def test_the_bundle_object_may_change_nothing_but_its_etag(
     stack: Path, attribute: str, value: str
 ) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["before"][attribute] = value
-    assert any(SCRIPT in x for x in run_update(p, stack))
+    change(p, BUNDLE)["change"]["before"][attribute] = value
+    assert any(BUNDLE in x for x in run_update(p, stack))
 
 
-def test_the_script_object_may_have_other_attributes_unknown_only_for_its_version(
+def test_the_bundle_object_may_have_other_attributes_unknown_only_for_its_version(
     stack: Path,
 ) -> None:
     p = update_plan()
-    change(p, SCRIPT)["change"]["after_unknown"] = {"version_id": True, "bucket": True}
-    assert any(SCRIPT in x for x in run_update(p, stack))
+    change(p, BUNDLE)["change"]["after_unknown"] = {"version_id": True, "bucket": True}
+    assert any(BUNDLE in x for x in run_update(p, stack))
 
 
 # the run-scoped output (M5c-0) needs no change to the job: the script puts each run under
@@ -841,12 +880,13 @@ def test_an_unknown_wiring_value_is_accepted_for_exactly_the_stacks_own_referenc
     ref: str,
     parent: str,  # type: ignore[no-untyped-def]
 ) -> None:
-    if mode == "update" and address == SCRIPT:
-        pytest.skip("the script's update may leave only version_id unknown")
     for refs in ([ref], [ref, parent], [parent, ref]):
         p = build()
         make_unknown(p, address, attribute, refs)
-        assert check_in(mode, p, stack) == [], refs
+        if mode == "update" and address in (ROLE_POLICY, BUNDLE):
+            assert check_in(mode, p, stack), refs  # both updated resources have known wiring
+        else:
+            assert check_in(mode, p, stack) == [], refs
 
 
 @pytest.mark.parametrize(("mode", "build"), MODES)
@@ -901,3 +941,49 @@ def test_an_unknown_wiring_value_without_a_configuration_expression_is_refused(
     c["after"].pop(attribute, None)
     c["after_unknown"] = {**c["after_unknown"], attribute: True}
     assert any(address in x and attribute in x for x in check_in(mode, p, stack))
+
+
+@pytest.mark.parametrize("address", [ROLE_POLICY, BUNDLE])
+def test_narrowing_needs_both_reviewed_updates(stack: Path, address: str) -> None:
+    p = update_plan()
+    change(p, address)["change"]["actions"] = ["no-op"]
+    assert run_update(p, stack)
+
+
+@pytest.mark.parametrize("attribute", ["name", "role", "id"])
+def test_policy_update_changes_only_the_document(stack: Path, attribute: str) -> None:
+    p = update_plan()
+    change(p, ROLE_POLICY)["change"]["before"][attribute] = "other"
+    assert any(ROLE_POLICY in x for x in run_update(p, stack))
+
+
+@pytest.mark.parametrize("attribute", ["policy", "role", "id"])
+def test_policy_update_must_be_known(stack: Path, attribute: str) -> None:
+    p = update_plan()
+    change(p, ROLE_POLICY)["change"]["after_unknown"] = {attribute: True}
+    assert any(ROLE_POLICY in x for x in run_update(p, stack))
+
+
+def test_policy_must_start_at_the_reviewed_broad_document(stack: Path) -> None:
+    p = update_plan()
+    doc = old_role_policy()
+    doc["Statement"].append({"Effect": "Allow", "Action": "s3:*", "Resource": "*"})
+    change(p, ROLE_POLICY)["change"]["before"]["policy"] = json.dumps(doc)
+    assert any(ROLE_POLICY in x for x in run_update(p, stack))
+
+
+def test_policy_must_actually_change(stack: Path) -> None:
+    p = update_plan()
+    c = change(p, ROLE_POLICY)["change"]
+    c["before"]["policy"] = c["after"]["policy"]
+    assert any(ROLE_POLICY in x for x in run_update(p, stack))
+
+
+@pytest.mark.parametrize("value", [False, "known-version"])
+def test_bundle_version_is_computed_after_apply(stack: Path, value: Any) -> None:
+    p = update_plan()
+    c = change(p, BUNDLE)["change"]
+    c["after_unknown"] = {"version_id": False}
+    if value is not False:
+        c["after"]["version_id"] = value
+    assert any(BUNDLE in x for x in run_update(p, stack))
