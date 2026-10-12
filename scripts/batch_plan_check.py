@@ -39,8 +39,9 @@ change: the function updated in place (the image only), the task definition repl
 reason (`container_definitions`; a new revision) and the state machine updated in place (only its
 definition, which names the new task-definition ARN, so it is unknown at plan time). The new
 function, container and state machine settings must equal the reviewed ones on the approved digest.
-A rollout may also carry one more in-place update, the ECR lifecycle policy: only `policy` changes,
-from the 2-image document to the reviewed 5-image one (REVIEWED_LIFECYCLE, infra/batch/ecr.tf).
+A rollout may also carry one more change, the ECR lifecycle policy, which the provider replaces
+when its document changes: `policy` is the only reason, from the 2-image document to the reviewed
+5-image one (REVIEWED_LIFECYCLE, infra/batch/ecr.tf), and nothing else differs.
 
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values (the alert address in particular).
@@ -110,6 +111,7 @@ TASK = "aws_ecs_task_definition.pipeline[0]"
 SFN = "aws_sfn_state_machine.batch[0]"
 ROLLOUT = frozenset({LAMBDA, TASK, SFN})
 LIFECYCLE = "aws_ecr_lifecycle_policy.batch"
+REPLACE = [["delete", "create"], ["create", "delete"]]
 
 
 def lifecycle_document(keep: int) -> dict[str, Any]:
@@ -201,16 +203,20 @@ def check_policy(address: str, change: dict[str, Any], attribute: str, want: Any
 
 
 def check_lifecycle(address: str, change: dict[str, Any]) -> list[str]:
-    """The ECR lifecycle policy planned for a create, or for the one in-place update a rollout may
-    carry: only `policy` changes, from the 2-image document to the reviewed 5-image one."""
+    """The ECR lifecycle policy planned for a create, or for the one replacement a rollout may
+    carry. The provider replaces the policy when its document changes (CI's plan of the 2 -> 5
+    change: 1 to add, 1 to destroy), so only `policy` may force it, from the 2-image document to
+    the reviewed 5-image one, and nothing else may differ."""
     problems = check_policy(address, change, "policy", REVIEWED_LIFECYCLE)
-    if change["actions"] == ["update"]:
+    if change["actions"] != ["create"]:
         before, after = change.get("before") or {}, change.get("after") or {}
         if known_document({"after": before}, "policy") != lifecycle_document(2):
-            problems.append(f"{address}: the update must start from the 2-image document")
+            problems.append(f"{address}: the replacement must start from the 2-image document")
         changed = [k for k in {*before, *after} if k != "policy" and before.get(k) != after.get(k)]
         if changed or (change.get("after_unknown") or {}).get("repository"):
             problems.append(f"{address}: only the policy may change")
+        if change.get("replace_paths") != [["policy"]]:
+            problems.append(f"{address}: the policy must be the only reason for the replacement")
     return problems
 
 
@@ -537,7 +543,7 @@ def check(
         return [f"unknown stage {stage}"], report
 
     seen: set[str] = set()
-    lifecycle_updated = False
+    replaced = 0
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]
         actions = change["actions"]
@@ -552,9 +558,9 @@ def check(
             seen.add(address)
             continue
         report.append(f"{'+'.join(actions):8} {address}")
-        if stage == 4 and address == LIFECYCLE and actions == ["update"]:
+        if stage == 4 and address == LIFECYCLE and actions in REPLACE:
             seen.add(address)
-            lifecycle_updated = True
+            replaced = 1
             problems += check_lifecycle(address, change)
             continue
         if stage == 4 and address in ROLLOUT:
@@ -584,8 +590,9 @@ def check(
     for address in sorted(unchanged - seen):
         problems.append(f"missing stage-1 resource: {address} must be in the plan, unchanged")
     report.append(
-        f"summary: stage {stage}, {len(expected) if stage < 3 else int(stage == 4)} to add,"
-        f" {(0, 0, 0, 1, 2)[stage] + lifecycle_updated} to change, {int(stage == 4)} to destroy"
+        f"summary: stage {stage},"
+        f" {len(expected) if stage < 3 else int(stage == 4) + replaced} to add,"
+        f" {(0, 0, 0, 1, 2)[stage]} to change, {int(stage == 4) + replaced} to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )

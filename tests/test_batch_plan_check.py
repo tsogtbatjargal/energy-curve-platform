@@ -1086,16 +1086,19 @@ def test_stage4_still_refuses_drift_an_errored_plan_and_the_wrong_account(stack:
     assert any("expected_account_id" in x for x in run(p, 4, stack))
 
 
-# --- the ECR lifecycle: an in-place update from 2 images to 5 is part of a rollout ---------------
+# --- the ECR lifecycle: the provider replaces the policy when its document changes --------------
+# CI's batch plan of the 2 -> 5 change reads "1 to add, 0 to change, 1 to destroy": a replacement
+# (delete and create, `policy` forcing it), not an in-place update.
 
 LIFECYCLE = "aws_ecr_lifecycle_policy.batch"
 
 
-def with_lifecycle_update(p: dict[str, Any], after_policy: str | None = None) -> dict[str, Any]:
+def with_lifecycle_replace(p: dict[str, Any], after_policy: str | None = None) -> dict[str, Any]:
     c = change(p, LIFECYCLE)["change"]
     c["before"] = dict(c["after"], policy=lifecycle_document(2))
     c["after"] = dict(c["after"], policy=after_policy or lifecycle_document(5))
-    c["actions"] = ["update"]
+    c["actions"] = ["delete", "create"]
+    c["replace_paths"] = [["policy"]]
     return p
 
 
@@ -1105,18 +1108,23 @@ def test_the_reviewed_lifecycle_document_is_the_one_in_the_stack_source() -> Non
     assert json.loads(lifecycle_document(5)) == bpc.REVIEWED_LIFECYCLE
 
 
-def test_a_rollout_may_raise_the_lifecycle_from_two_images_to_five(stack: Path) -> None:
-    problems, report = bpc.check(with_lifecycle_update(plan(4)), 4, DIGEST, stack)
+@pytest.mark.parametrize("actions", [["delete", "create"], ["create", "delete"]])
+def test_a_rollout_may_replace_the_lifecycle_policy_for_the_five_image_document(
+    stack: Path, actions: list[str]
+) -> None:
+    p = with_lifecycle_replace(plan(4))
+    change(p, LIFECYCLE)["change"]["actions"] = actions
+    problems, report = bpc.check(p, 4, DIGEST, stack)
     assert problems == []
-    assert f"update   {LIFECYCLE}" in report
-    assert "summary: stage 4, 1 to add, 3 to change, 1 to destroy" in report
+    assert f"{'+'.join(actions)} {LIFECYCLE}" in " ".join(report)
+    assert "summary: stage 4, 2 to add, 2 to change, 2 to destroy" in report
 
 
 @pytest.mark.parametrize("keep", [1, 2, 3, 10, 0])
 def test_stage4_refuses_a_lifecycle_that_keeps_another_number_of_images(
     stack: Path, keep: int
 ) -> None:
-    p = with_lifecycle_update(plan(4), lifecycle_document(keep))
+    p = with_lifecycle_replace(plan(4), lifecycle_document(keep))
     assert any(LIFECYCLE in x for x in run(p, 4, stack))
 
 
@@ -1136,45 +1144,52 @@ def test_stage4_refuses_a_lifecycle_document_that_differs_in_anything_but_the_co
 ) -> None:
     doc = json.loads(lifecycle_document(5))
     mutate(doc)
-    p = with_lifecycle_update(plan(4), json.dumps(doc))
+    p = with_lifecycle_replace(plan(4), json.dumps(doc))
     assert any(LIFECYCLE in x for x in run(p, 4, stack))
 
 
-def test_stage4_refuses_a_lifecycle_update_that_changes_anything_else(stack: Path) -> None:
-    p = with_lifecycle_update(plan(4))
+def test_stage4_refuses_a_lifecycle_replacement_that_changes_anything_else(stack: Path) -> None:
+    p = with_lifecycle_replace(plan(4))
     change(p, LIFECYCLE)["change"]["after"]["repository"] = "other"
     assert any(LIFECYCLE in x for x in run(p, 4, stack))
 
 
+@pytest.mark.parametrize("paths", [[["repository"]], [["policy"], ["repository"]], []])
+def test_stage4_refuses_a_lifecycle_replacement_for_another_reason(stack: Path, paths: Any) -> None:
+    p = with_lifecycle_replace(plan(4))
+    change(p, LIFECYCLE)["change"]["replace_paths"] = paths
+    assert any(LIFECYCLE in x for x in run(p, 4, stack))
+
+
 def test_stage4_refuses_a_lifecycle_document_unknown_at_plan_time(stack: Path) -> None:
-    p = with_lifecycle_update(plan(4))
+    p = with_lifecycle_replace(plan(4))
     c = change(p, LIFECYCLE)["change"]
     del c["after"]["policy"]
     c["after_unknown"] = {"policy": True}
     assert any(LIFECYCLE in x for x in run(p, 4, stack))
 
 
-@pytest.mark.parametrize("actions", [["delete", "create"], ["create", "delete"], ["delete"]])
-def test_stage4_refuses_a_lifecycle_policy_replaced_or_destroyed(
+@pytest.mark.parametrize("actions", [["update"], ["delete"], ["create"]])
+def test_stage4_refuses_any_other_change_to_the_lifecycle_policy(
     stack: Path, actions: list[str]
 ) -> None:
-    p = with_lifecycle_update(plan(4))
+    p = with_lifecycle_replace(plan(4))
     change(p, LIFECYCLE)["change"]["actions"] = actions
     assert any(f"unexpected change: {'+'.join(actions)} {LIFECYCLE}" in x for x in run(p, 4, stack))
 
 
-def test_stage4_refuses_a_lifecycle_update_from_a_document_that_was_not_the_deployed_one(
+def test_stage4_refuses_a_lifecycle_replaced_from_a_document_that_was_not_the_deployed_one(
     stack: Path,
 ) -> None:
-    p = with_lifecycle_update(plan(4))
+    p = with_lifecycle_replace(plan(4))
     change(p, LIFECYCLE)["change"]["before"]["policy"] = lifecycle_document(7)
     assert any(LIFECYCLE in x for x in run(p, 4, stack))
 
 
 @pytest.mark.parametrize("stage", [2, 3])
-def test_only_a_rollout_may_update_the_lifecycle(stack: Path, stage: int) -> None:
-    p = with_lifecycle_update(plan(stage))
-    assert any(f"unexpected change: update {LIFECYCLE}" in x for x in run(p, stage, stack))
+def test_only_a_rollout_may_replace_the_lifecycle(stack: Path, stage: int) -> None:
+    p = with_lifecycle_replace(plan(stage))
+    assert any(f"unexpected change: delete+create {LIFECYCLE}" in x for x in run(p, stage, stack))
 
 
 def test_stage1_refuses_a_lifecycle_document_other_than_the_reviewed_one(stack: Path) -> None:
