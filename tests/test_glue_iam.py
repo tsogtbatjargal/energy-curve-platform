@@ -85,7 +85,6 @@ NEEDED = [
     ("s3:PutObject", f"{BUCKET}/m5/shape/jr_x/shape_params.csv/part-00000"),
     ("s3:PutObject", f"{BUCKET}/m5/shape/jr_x/_complete.json"),
     ("s3:GetObject", f"{BUCKET}/m5/shape/jr_x/_complete.json"),
-    ("s3:DeleteObject", f"{BUCKET}/m5/shape/shape_params.csv/_temporary/0/x"),
     ("s3:AbortMultipartUpload", f"{BUCKET}/m5/shape/x"),
     ("s3:ListBucket", BUCKET),
     ("s3:ListBucketMultipartUploads", BUCKET),
@@ -148,3 +147,37 @@ def test_the_reviewed_documents_are_valid_json_as_terraform_renders_them() -> No
     for p in POLICIES.glob("*.json.tftpl"):
         rendered = policy(p.name.removesuffix(".json.tftpl"))
         assert json.loads(json.dumps(rendered))["Version"] == "2012-10-17"
+
+
+@pytest.mark.parametrize("output", ["shape_params.csv", "shape_params.sha256"])
+@pytest.mark.parametrize(
+    "suffix", [".spark-staging-job", ".spark-staging-job/part-00000", ".spark-staging-job_$folder$"]
+)
+def test_delete_is_limited_to_the_run_output_commit_protocol_staging(
+    output: str, suffix: str
+) -> None:
+    assert as_role("s3:DeleteObject", f"{BUCKET}/m5/shape/jr_test/{output}/{suffix}") == ALLOWED
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "m5/shape/jr_test/shape_params.csv/part-00000",
+        "m5/shape/jr_test/shape_params.sha256/part-00000",
+        "m5/shape/jr_test/shape_params.csv/_SUCCESS",
+        "m5/shape/jr_test/_complete.json",
+        "m5/shape/jr_test/shape_params.csv/_temporary/0/x",
+        "m5/shape/shape_params.csv/.spark-staging-job/x",
+        "m5/shape/not-a-run/shape_params.csv/.spark-staging-job/x",
+        "m5/shape/jr_test/other/.spark-staging-job/x",
+        "m5/other/jr_test/shape_params.csv/.spark-staging-job/x",
+        "m5/shape/jr_test/shape_params.csv/spark-staging-job/x",
+        "m5/shape/jr_test/shape_params.csv/.spark-staging/x",
+        "m5/shape/jr_test/shape_params.csv_$folder$",
+        "m5/shape/shape_params.csv/_temporary/0/x",
+        "m5/tmp/x",
+        "glue/energy_curves_m5.zip",
+    ],
+)
+def test_delete_cannot_remove_outputs_completion_legacy_or_unrelated_keys(key: str) -> None:
+    assert as_role("s3:DeleteObject", f"{BUCKET}/{key}") != ALLOWED
