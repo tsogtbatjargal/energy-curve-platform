@@ -657,3 +657,196 @@ def test_a_copy_policy_that_lacks_the_curves_file_is_refused(stack: Path) -> Non
 def test_the_reviewed_copy_policy_names_the_curves_file(stack: Path) -> None:
     text = change(plan(), COPY_POLICY)["after"]["policy"]
     assert text.count("gold/curves.parquet") == 2  # the read and the listing condition
+
+
+# --- update mode: the applied stack, 18 no-ops, the provider's read-back accepted ---------------
+# Shaped like the real fresh plan after the M5c-1 apply and refresh (2026-10-11): every resource
+# is a no-op, ids are known, tags read back as {}, the roles carry their own inline policy, and the
+# namespace reports the service's default admin name and the AWS-owned key.
+
+OWN_POLICY = {
+    COPY: ("ecp-redshift-copy", "copy-policy"),
+    CALLER: ("ecp-redshift-data-api", "data-api-policy"),
+}
+
+
+def update_plan() -> dict[str, Any]:
+    p = plan()
+    for r in p["resource_changes"]:
+        c = r["change"]
+        after = dict(c["after"])
+        for key in list(c["after_unknown"]):
+            after.setdefault(key, f"known-{key}")
+        after.update({"tags": {}, "tags_all": after.get("tags_all", {})})
+        c.update({"actions": ["no-op"], "before": after, "after": after, "after_unknown": {}})
+    for address in (RT, SG, DSG):
+        after = change(p, address)["after"]
+        after["route" if address == RT else "ingress"] = []
+        if address != RT:
+            after["egress"] = []
+    ns = change(p, NS)["after"]
+    ns.update(
+        {
+            "admin_username": "admin", "kms_key_id": "AWS_OWNED_KMS_KEY",
+            "admin_password_secret_kms_key_id": "", "default_iam_role_arn": "",
+            "log_exports": [], "iam_roles": [f"arn:aws:iam::{MEMBER}:role/ecp-redshift-copy"],
+        }
+    )  # fmt: skip
+    for role, (name, template_name) in OWN_POLICY.items():
+        change(p, role)["after"]["inline_policy"] = [
+            {"name": name, "policy": template(template_name)}
+        ]
+    change(p, COPY_POLICY)["after"]["role"] = "ecp-redshift-copy"  # a role's id is its name
+    change(p, CALLER_POLICY)["after"]["role"] = "ecp-redshift-data-api"
+    for address in (*SUBNETS, *ASSOCS):
+        change(p, address)["after"].setdefault("tags", {})
+    state = [{"address": a, "mode": "managed", "values": {}} for a in ADDRESSES]
+    p["prior_state"]["values"]["root_module"]["resources"] += state
+    return p
+
+
+def run_update(p: dict[str, Any], stack: Path) -> list[str]:
+    problems, _ = rpc.check(p, stack, mode="update")
+    return problems
+
+
+def test_the_applied_stack_with_the_read_back_passes_in_update_mode(stack: Path) -> None:
+    problems, report = rpc.check(update_plan(), stack, mode="update")
+    assert problems == []
+    assert "summary: 0 to add, 0 to change, 0 to destroy" in report
+    assert sum(line.startswith("no-op") for line in report) == 18
+
+
+def test_update_mode_accepts_the_service_default_admin_name(stack: Path) -> None:
+    p = update_plan()
+    assert change(p, NS)["after"]["admin_username"] == "admin"
+    assert run_update(p, stack) == []
+
+
+@pytest.mark.parametrize("name", ["root", "ecp", "Admin", "admin2", "admin ", "awsuser", "dev"])
+def test_update_mode_accepts_no_other_admin_name(stack: Path, name: str) -> None:
+    p = update_plan()
+    change(p, NS)["after"]["admin_username"] = name
+    assert any(NS in x and "admin_username" in x for x in run_update(p, stack))
+
+
+def test_create_mode_still_refuses_the_admin_name(stack: Path) -> None:
+    """The exception is for what the service reports after the create, not a plan that sets it."""
+    p = plan()
+    change(p, NS)["after"]["admin_username"] = "admin"
+    change(p, NS)["after_unknown"].pop("admin_username")
+    assert any(NS in x and "admin_username" in x for x in run(p, stack))
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("admin_user_password", "a-secret"), ("admin_user_password_wo", "a-secret"),
+        ("admin_user_password_wo_version", 1), ("manage_admin_password", True),
+        ("admin_password_secret_kms_key_id", "alias/x"), ("default_iam_role_arn", "arn:x"),
+        ("kms_key_id", "alias/x"), ("kms_key_id", "arn:aws:kms:ca-central-1:333333333333:key/x"),
+        ("log_exports", ["userlog"]),
+    ],
+)  # fmt: skip
+def test_update_mode_refuses_every_other_namespace_credential_or_key(
+    stack: Path, attribute: str, value: Any
+) -> None:
+    p = update_plan()
+    change(p, NS)["after"][attribute] = value
+    assert any(NS in x and attribute in x for x in run_update(p, stack)), attribute
+
+
+def test_update_mode_refuses_the_create_plan_and_create_mode_refuses_the_update_plan(
+    stack: Path,
+) -> None:
+    assert any("unexpected change: create" in x for x in run_update(plan(), stack))
+    assert run(update_plan(), stack) != []
+
+
+@pytest.mark.parametrize("actions", [["update"], ["create"], ["delete"], ["delete", "create"]])
+def test_update_mode_accepts_only_no_ops(stack: Path, actions: list[str]) -> None:
+    p = update_plan()
+    change(p, WG)["actions"] = actions
+    assert any(f"unexpected change: {'+'.join(actions)} {WG}" in x for x in run_update(p, stack))
+
+
+def test_update_mode_needs_the_applied_state(stack: Path) -> None:
+    p = update_plan()
+    p["prior_state"]["values"]["root_module"]["resources"].pop()
+    assert any("state is not the applied stack" in x for x in run_update(p, stack))
+    p = update_plan()
+    p["prior_state"]["values"]["root_module"]["resources"].append(
+        {"address": "aws_vpc.other", "mode": "managed", "values": {}}
+    )
+    assert any("state is not the applied stack" in x for x in run_update(p, stack))
+
+
+def test_update_mode_refuses_drift(stack: Path) -> None:
+    p = update_plan()
+    p["resource_drift"] = [{"address": SG}]
+    assert any("resource_drift" in x for x in run_update(p, stack))
+
+
+@pytest.mark.parametrize(
+    ("address", "attribute", "value"),
+    [
+        (WG, "base_capacity", 128), (WG, "max_capacity", 16), (WG, "publicly_accessible", True),
+        (WG, "enhanced_vpc_routing", True), (LIMIT, "amount", 40), (LIMIT, "breach_action", "log"),
+        (VPC, "cidr_block", "10.0.0.0/16"), (SUBNETS[0], "map_public_ip_on_launch", True),
+        (COPY, "permissions_boundary", None), (SLR, "aws_service_name", "ecs.amazonaws.com"),
+    ],
+)  # fmt: skip
+def test_update_mode_still_pins_the_reviewed_settings(
+    stack: Path, address: str, attribute: str, value: Any
+) -> None:
+    p = update_plan()
+    change(p, address)["after"][attribute] = value
+    assert any(address in x for x in run_update(p, stack)), attribute
+
+
+@pytest.mark.parametrize("address", [RT, SG, DSG])
+def test_update_mode_refuses_a_route_or_rule_read_back(stack: Path, address: str) -> None:
+    p = update_plan()
+    attribute = "route" if address == RT else "ingress"
+    change(p, address)["after"][attribute] = [{"cidr_blocks": ["0.0.0.0/0"]}]
+    assert any(address in x and attribute in x for x in run_update(p, stack))
+
+
+@pytest.mark.parametrize("address", [COPY, CALLER])
+def test_update_mode_requires_the_roles_own_reviewed_policy_as_the_only_inline_policy(
+    stack: Path, address: str
+) -> None:
+    name, template_name = OWN_POLICY[address]
+    for bad in (
+        [],
+        [{"name": "other", "policy": template(template_name)}],
+        [{"name": name, "policy": json.dumps({"Version": "2012-10-17", "Statement": []})}],
+        [{"name": name, "policy": template(template_name)}] * 2,
+    ):
+        p = update_plan()
+        change(p, address)["after"]["inline_policy"] = bad
+        assert any(address in x and "inline_policy" in x for x in run_update(p, stack)), bad
+
+
+def test_update_mode_checks_the_wiring_by_reference_even_when_the_ids_are_known(
+    stack: Path,
+) -> None:
+    for address, attribute in ((NS, "iam_roles"), (WG, "subnet_ids"), (LIMIT, "resource_arn"),
+                               (SUBNETS[0], "vpc_id"), (COPY_POLICY, "role")):  # fmt: skip
+        p = update_plan()
+        config(p, config_address(address))["expressions"][attribute] = {
+            "references": ["aws_iam_role.other.arn"]
+        }
+        assert any(address in x and attribute in x for x in run_update(p, stack)), attribute
+
+
+def test_update_mode_main_prints_ok_and_exits_zero(
+    stack: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(update_plan()))
+    assert rpc.main(["--stack-dir", str(stack), "--change", "update", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "OK    the reviewed shape" in out and MEMBER not in out
+    path.write_text(json.dumps(plan()))
+    assert rpc.main(["--stack-dir", str(stack), "--change", "update", str(path)]) == 1

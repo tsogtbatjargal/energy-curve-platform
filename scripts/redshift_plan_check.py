@@ -1,7 +1,7 @@
 """Pre-apply check of a saved infra/redshift plan (M5c-1, ADR-0023).
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/redshift_plan_check.py <plan.json>
+    python scripts/redshift_plan_check.py [--change create|update] <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it reads infra/redshift's source and
 its policy templates. It runs after policy_gate.py --stack redshift (ADR-0006 rules, PLAN.md R1 and
@@ -23,6 +23,15 @@ reviewed value or, when unknown at plan time, comes from an exact reference to t
 resource in the plan's configuration. Terraform lists the attribute reference, with or without the
 resource itself; anything else (a foreign resource, a variable, no expression) fails. Both
 warehouse resources must declare that they wait for the service-linked role.
+
+`--change update` is for the applied stack after the refresh: 18 no-ops and 0 drift, every
+resource still the reviewed one. The provider's read-back is accepted where AWS fills it in, and
+nothing else: tags as {}, empty rules and routes, each role's own reviewed policy as its only inline
+policy, and on the namespace the service's default admin name "admin" (Security Hub control
+RedshiftServerless.5; no password or secret was set, and there is no network path to a password
+login, ADR-0023) and the AWS-owned key "AWS_OWNED_KMS_KEY", which is what the service reports when
+no key is configured. Any other admin name or key fails. The wiring is checked by reference in the
+configuration even though the ids are known by then.
 
 Nothing else: no module, gateway, NAT, endpoint, address, route, rule resource, snapshot, endpoint
 access, resource policy, secret, key or any other service. Also: a sound plan (not errored,
@@ -107,6 +116,11 @@ SETTINGS = [
     *[(a, ("cidr_block",), c) for a, c in zip(SUBNETS, SUBNET_CIDRS.values(), strict=True)],
     *[(address, ("map_public_ip_on_launch",), False) for address in SUBNETS],
 ]  # fmt: skip
+# What the service reports for the attributes it fills in (update mode only).
+READ_BACK_ADMIN_NAME = "admin"
+READ_BACK_KEY = "AWS_OWNED_KMS_KEY"
+ROLE_OWN_POLICY = {COPY: ("ecp-redshift-copy", "copy-policy"),
+                   CALLER: ("ecp-redshift-data-api", "data-api-policy")}  # fmt: skip
 # Attributes that must hold no rule or route, or be left to the provider (unknown at plan time).
 EMPTY_OR_UNKNOWN = [
     (RT, "route"),
@@ -170,6 +184,13 @@ def render(name: str, account: str) -> Any:
     return policy_templates.render(name, {"account_id": account, "region": REGION}, POLICIES)
 
 
+def _json_or_none(text: Any) -> Any:
+    try:
+        return json.loads(text) if isinstance(text, str) else None
+    except json.JSONDecodeError:
+        return None
+
+
 def config_address(address: str) -> str:
     """`aws_subnet.private["a"]` -> `aws_subnet.private`: the configuration has no instances."""
     return address.split("[", 1)[0]
@@ -187,24 +208,31 @@ def is_unknown(value: Any) -> bool:
 
 
 def check_wiring(
-    plan: dict[str, Any], address: str, change: dict[str, Any], account: str
+    plan: dict[str, Any], address: str, change: dict[str, Any], account: str, mode: str = "create"
 ) -> list[str]:
+    """Create mode: a known value must be exactly the reviewed one, and an unknown one must come
+    from this stack's own resource. Update mode: the ids are known by now, so the configuration's
+    references are checked always, and a value the plan can name (a role or namespace name) too."""
     after, unknown = change.get("after") or {}, change.get("after_unknown") or {}
     problems = []
     for attribute, want, allowed in wiring(account).get(config_address(address), []):
-        if is_unknown(unknown.get(attribute)):
+        if mode == "update" or is_unknown(unknown.get(attribute)):
             refs = config_references(plan, config_address(address), attribute)
             if refs is None or frozenset(refs) not in allowed:
                 problems.append(
                     f"{address}: {attribute} is unknown and not from this stack's own resource"
+                    if mode == "create"
+                    else f"{address}: {attribute} is not from this stack's own resource"
                 )
+            if mode == "update" and want is not None and after.get(attribute) != want:
+                problems.append(f"{address}: {attribute} is not the reviewed value")
         elif want is None or after.get(attribute) != want:
             problems.append(f"{address}: {attribute} is not the reviewed value")
     return problems
 
 
 def check_create(
-    address: str, change: dict[str, Any], account: str, plan: dict[str, Any]
+    address: str, change: dict[str, Any], account: str, plan: dict[str, Any], mode: str = "create"
 ) -> list[str]:
     after = change.get("after") or {}
     problems = [
@@ -212,7 +240,7 @@ def check_create(
         for a, path, want in SETTINGS
         if a == address and dig(after, path) != want
     ]
-    problems += check_wiring(plan, address, change, account)
+    problems += check_wiring(plan, address, change, account, mode)
     for a, attribute in EMPTY_OR_UNKNOWN:  # absent (unknown at plan time) or empty, never a rule
         if a == address and after.get(attribute) not in (None, []):
             problems.append(f"{address}: {attribute} must hold no rule or route")
@@ -229,11 +257,28 @@ def check_create(
     if address in POLICY and known_document(change, "policy") != render(POLICY[address], account):
         problems.append(f"{address}: policy is not the reviewed template, known at plan time")
     if address == NS:
+        read_back = (
+            {"admin_username": READ_BACK_ADMIN_NAME, "kms_key_id": READ_BACK_KEY}
+            if mode == "update"
+            else {}
+        )
         for attribute in NAMESPACE_MUST_BE_UNSET:
-            if after.get(attribute) not in (None, [], ""):
+            value = after.get(attribute)
+            if value not in (None, [], "") and value != read_back.get(attribute, object()):
                 problems.append(f"{address}: {attribute} must not be set (IAM only)")
         if after.get("manage_admin_password") not in (None, False):
             problems.append(f"{address}: manage_admin_password must not be set (IAM only)")
+    if mode == "update" and address in ROLE_OWN_POLICY:
+        name, template_name = ROLE_OWN_POLICY[address]
+        inline = after.get("inline_policy") or []
+        if not (
+            len(inline) == 1
+            and inline[0].get("name") == name
+            and _json_or_none(inline[0].get("policy")) == render(template_name, account)
+        ):
+            problems.append(
+                f"{address}: inline_policy is not exactly the role's own reviewed policy"
+            )
     waits_for = config_resource(plan, config_address(address)).get("depends_on") or []
     if address in (NS, WG) and SLR not in waits_for:
         problems.append(f"{address}: does not wait for the service-linked role")
@@ -264,7 +309,7 @@ def check_zones(plan: dict[str, Any], changes: dict[str, dict[str, Any]]) -> lis
     return problems
 
 
-def check_common(plan: dict[str, Any]) -> tuple[list[str], str | None]:
+def check_common(plan: dict[str, Any], mode: str = "create") -> tuple[list[str], str | None]:
     problems: list[str] = []
     if plan.get("errored"):
         problems.append("the plan errored")
@@ -286,8 +331,13 @@ def check_common(plan: dict[str, Any]) -> tuple[list[str], str | None]:
     if not master or master == account:
         problems.append("this is the organization's management account, not a member")
     resources = (plan.get("prior_state") or {}).get("values", {}).get("root_module", {})
-    if {r["address"] for r in resources.get("resources", [])} - DATA:
+    owned = {r["address"] for r in resources.get("resources", [])} - DATA
+    if mode == "create" and owned:
         problems.append("the state is not empty: this stack starts from no managed resources")
+    if mode == "update" and owned != CREATES:
+        problems.append(
+            "the state is not the applied stack: it must hold exactly the reviewed ones"
+        )
     for name, out in (plan.get("output_changes") or {}).items():
         if out["actions"] not in UNCHANGED:
             problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
@@ -324,29 +374,36 @@ def check_source(stack_dir: Path) -> list[str]:
     return problems
 
 
-def check(plan: dict[str, Any], stack_dir: Path | None = None) -> tuple[list[str], list[str]]:
-    """(problems, report) for a saved plan of infra/redshift from an empty state."""
-    problems, account = check_common(plan)
+def check(
+    plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
+) -> tuple[list[str], list[str]]:
+    """(problems, report) for a saved plan of infra/redshift: `create` from an empty state, or
+    `update` (18 no-ops, the provider's read-back accepted) on the applied stack."""
+    if mode not in ("create", "update"):
+        return [f"unknown change mode {mode}"], []
+    problems, account = check_common(plan, mode)
     problems += check_source(stack_dir or STACK)
     report: list[str] = []
+    want = "create" if mode == "create" else "no-op"
     seen: set[str] = set()
     changes: dict[str, dict[str, Any]] = {}
     for rc in plan.get("resource_changes", []):
         address, change = rc["address"], rc["change"]
         actions = change["actions"]
         report.append(f"{'+'.join(actions):8} {address}")
-        if address not in CREATES or actions != ["create"] or change.get("importing") is not None:
+        if address not in CREATES or actions != [want] or change.get("importing") is not None:
             problems.append(f"unexpected change: {'+'.join(actions)} {address}")
             continue
         seen.add(address)
         changes[address] = change
         if account:
-            problems += check_create(address, change, account, plan)
+            problems += check_create(address, change, account, plan, mode)
     for address in sorted(CREATES - seen):
-        problems.append(f"missing change: create {address}")
+        problems.append(f"missing change: {want} {address}")
     problems += check_zones(plan, changes)
+    adds = len(CREATES) if mode == "create" else 0
     report.append(
-        f"summary: {len(CREATES)} to add, 0 to change, 0 to destroy"
+        f"summary: {adds} to add, 0 to change, 0 to destroy"
         if not problems
         else "summary: not the reviewed shape"
     )
@@ -356,9 +413,10 @@ def check(plan: dict[str, Any], stack_dir: Path | None = None) -> tuple[list[str
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="redshift_plan_check.py")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
+    parser.add_argument("--change", choices=("create", "update"), default="create")
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)
-    problems, report = check(json.loads(args.plan.read_text()), args.stack_dir)
+    problems, report = check(json.loads(args.plan.read_text()), args.stack_dir, args.change)
     print("\n".join([*report, *(f"FAIL  {p}" for p in problems)] or ["(empty plan)"]))
     if not problems:
         print("OK    the reviewed shape")
