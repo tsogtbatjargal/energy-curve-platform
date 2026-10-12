@@ -710,20 +710,154 @@ def test_the_data_api_client_is_built_from_an_assumed_ecp_redshift_data_api_sess
     assert client.meta.region_name == REGION
 
 
-def test_main_dry_run_prints_a_masked_summary_and_exits_zero(
-    ready: Any, capsys: pytest.CaptureFixture[str]
+class Stub:
+    """Stubbed identity and organization; counts every call made through `rl.client`."""
+
+    def __init__(self, s3: Any, arn: str, account: str, master: str) -> None:
+        self.s3, self.arn, self.account, self.master = s3, arn, account, master
+        self.made: list[str] = []
+        self.calls: list[str] = []
+
+    def client(self, name: str) -> Any:
+        self.made.append(name)
+        stub = self
+
+        class Sts:
+            def get_caller_identity(self) -> dict[str, str]:
+                stub.calls.append("sts.get_caller_identity")
+                return {"Account": stub.account, "Arn": stub.arn}
+
+            def assume_role(self, **kw: Any) -> Any:
+                stub.calls.append("sts.assume_role")
+                raise AssertionError("must not assume a role")
+
+        class Org:
+            def describe_organization(self) -> dict[str, Any]:
+                stub.calls.append("organizations.describe_organization")
+                return {"Organization": {"MasterAccountId": stub.master}}
+
+        if name == "sts":
+            return Sts()
+        if name == "organizations":
+            return Org()
+        if name == "s3":
+            stub.calls.append("s3")
+        return self.s3
+
+    def last_arg(self) -> None: ...
+
+
+MEMBER_ARN = f"arn:aws:sts::{ACCOUNT}:assumed-role/AWSReservedSSO_ecp-readonly_0123456789abcdef/me"
+MANAGEMENT = "999999999999"
+
+
+@pytest.fixture
+def stub(ready: Any, monkeypatch: pytest.MonkeyPatch) -> Stub:
+    st = Stub(ready, MEMBER_ARN, ACCOUNT, MANAGEMENT)
+    monkeypatch.setattr(rl, "client", st.client)
+    return st
+
+
+def test_main_dry_run_prints_the_identity_first_then_a_masked_summary(
+    stub: Stub, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert rl.main(["--dry-run", "--run-id", RUN]) == 0
+    assert rl.main(["--dry-run", "--run-id", RUN, "--expected-account", ACCOUNT]) == 0
     out = capsys.readouterr().out
-    for secret in (ACCOUNT, GLUE, DATA, RUN):
+    for secret in (ACCOUNT, GLUE, DATA, RUN, MANAGEMENT):
         assert secret not in out
+    first = out.splitlines()[0]
+    assert "AWSReservedSSO_ecp-readonly" in first and "member" in first and "not root" in first
     assert "dry run" in out
 
 
 def test_main_refuses_with_a_masked_message_and_exits_one(
-    ready: Any, capsys: pytest.CaptureFixture[str]
+    stub: Stub, ready: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ready.delete_object(Bucket=GLUE, Key=f"m5/shape/{RUN}/_complete.json")
-    assert rl.main(["--dry-run", "--run-id", RUN]) == 1
+    assert rl.main(["--dry-run", "--run-id", RUN, "--expected-account", ACCOUNT]) == 1
     out = capsys.readouterr().out
     assert "REFUSED" in out and ACCOUNT not in out and GLUE not in out and RUN not in out
+
+
+@pytest.mark.parametrize(
+    ("label", "arn", "account", "expected", "master"),
+    [
+        ("management account", f"arn:aws:sts::{ACCOUNT}:assumed-role/AWSReservedSSO_Admin_x/me",
+         ACCOUNT, ACCOUNT, ACCOUNT),
+        ("another account", MEMBER_ARN, "444444444444", ACCOUNT, MANAGEMENT),
+        ("root", f"arn:aws:iam::{ACCOUNT}:root", ACCOUNT, ACCOUNT, MANAGEMENT),
+        ("root session", f"arn:aws:sts::{ACCOUNT}:root", ACCOUNT, ACCOUNT, MANAGEMENT),
+    ],
+)  # fmt: skip
+@pytest.mark.parametrize("dry", [True, False])
+def test_main_refuses_the_wrong_caller_before_any_s3_assume_or_data_api_call(
+    ready: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    label: str, arn: str, account: str, expected: str, master: str, dry: bool,
+) -> None:  # fmt: skip
+    st = Stub(ready, arn, account, master)
+    monkeypatch.setattr(rl, "client", st.client)
+    argv = ["--run-id", RUN, "--expected-account", expected, *(["--dry-run"] if dry else [])]
+    assert rl.main(argv) == 1, label
+    out = capsys.readouterr().out
+    assert "REFUSED" in out
+    assert set(st.calls) <= {"sts.get_caller_identity", "organizations.describe_organization"}
+    assert "s3" not in st.made and "redshift-data" not in st.made
+    for secret in (ACCOUNT, "444444444444", MANAGEMENT):
+        assert secret not in out
+
+
+def test_main_prints_the_identity_even_when_it_refuses(
+    ready: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    st = Stub(ready, f"arn:aws:iam::{ACCOUNT}:root", ACCOUNT, MANAGEMENT)
+    monkeypatch.setattr(rl, "client", st.client)
+    rl.main(["--expected-account", ACCOUNT])
+    assert capsys.readouterr().out.splitlines()[0].startswith("identity:")
+
+
+def test_main_needs_an_expected_account_from_the_flag_or_the_tfvars(
+    stub: Stub, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(rl, "TFVARS", tmp_path / "missing.tfvars")
+    assert rl.main(["--dry-run"]) == 1
+    assert "expected account" in capsys.readouterr().out and stub.calls == []
+    tfvars = tmp_path / "terraform.tfvars"
+    tfvars.write_text(f'expected_account_id = "{ACCOUNT}"\n')
+    monkeypatch.setattr(rl, "TFVARS", tfvars)
+    assert rl.main(["--dry-run", "--run-id", RUN]) == 0
+    tfvars.write_text('expected_account_id = "not-an-account"\n')
+    assert rl.main(["--dry-run"]) == 1
+
+
+def test_a_client_error_is_printed_masked_without_a_traceback(
+    stub: Stub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from botocore.exceptions import ClientError
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": f"{ACCOUNT} cannot read {GLUE} {RUN}"}},
+            "GetObject",
+        )
+
+    monkeypatch.setattr(rl, "run_load", boom)
+    assert rl.main(["--dry-run", "--expected-account", ACCOUNT]) == 1
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    for secret in (ACCOUNT, GLUE, RUN):
+        assert secret not in text
+    assert "AccessDenied" in text and "Traceback" not in text
+
+
+def test_missing_credentials_are_printed_masked_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from botocore.exceptions import NoCredentialsError
+
+    def none(name: str) -> Any:
+        raise NoCredentialsError()
+
+    monkeypatch.setattr(rl, "client", none)
+    assert rl.main(["--dry-run", "--expected-account", ACCOUNT]) == 1
+    captured = capsys.readouterr()
+    assert "credentials" in captured.out.lower() and "Traceback" not in captured.out + captured.err

@@ -1,6 +1,6 @@
 """The operator's Redshift loader (M5c-2, ADR-0023).
 
-    uv run python scripts/redshift_load.py [--run-id jr_...] [--dry-run]
+    uv run python scripts/redshift_load.py [--run-id jr_...] [--dry-run] [--expected-account N]
 
 Loads the warehouse in `ecp-redshift` with exactly what has been verified, or loads nothing:
 - the Glue job's shape parameters from one completed run (`m5/shape/<run id>/`), and
@@ -31,6 +31,10 @@ empties the tables). The checks, in order:
 4. After loading, a SELECT back: the shape table must hold the 48 rows and rebuild the recorded
    hash; each gold table must hold the manifest's row count. Anything else empties the tables and
    fails.
+
+Before anything else it prints who is calling and refuses root, any account but the expected
+member account (--expected-account, or terraform.tfvars) and the organization's management account,
+with no S3, assume-role or Data API call made. AWS errors are printed masked, without a traceback.
 
 Messages never show an account ID, a bucket name or a full run id.
 """
@@ -64,6 +68,7 @@ from energy_curves.pipeline.publish import IntegrityError, read_manifest, read_p
 from energy_curves.storage.artifacts import S3ArtifactStore, sha256
 
 SQL = Path(__file__).resolve().parents[1] / "sql" / "redshift"
+TFVARS = Path(__file__).resolve().parents[1] / "infra" / "redshift" / "terraform.tfvars"
 REGION = "ca-central-1"
 WORKGROUP, DATABASE = "ecp-redshift", "ecp"
 CALLER_ROLE, COPY_ROLE = "ecp-redshift-data-api", "ecp-redshift-copy"
@@ -542,18 +547,70 @@ class NoDataApi:
         raise AssertionError("a dry run must not call the Data API")
 
 
-def main(argv: list[str] | None = None) -> int:
+def client(name: str) -> Any:
     import boto3
+
+    return boto3.client(name, region_name=REGION)
+
+
+def expected_account(flag: str | None) -> str:
+    """The member account this stack lives in: --expected-account, else the git-ignored tfvars."""
+    value = flag
+    if value is None and TFVARS.exists():
+        found = re.search(r'(?m)^\s*expected_account_id\s*=\s*"([^"]*)"', TFVARS.read_text())
+        value = found.group(1) if found else None
+    if value is None:
+        raise LoadRefused("no expected account: pass --expected-account or fill terraform.tfvars")
+    if not re.fullmatch(r"\d{12}", value):
+        raise LoadRefused("the expected account is not a 12-digit account ID")
+    return value
+
+
+def check_caller(sts: Any, org: Any, expected: str) -> str:
+    """Print who is calling (masked), then refuse root, the wrong account and the organization's
+    management account, before any S3, assume-role or Data API call. Returns the account."""
+    who = sts.get_caller_identity()
+    arn, account = str(who["Arn"]), str(who["Account"])
+    root = bool(re.search(r":root$", arn))
+    role = re.search(r"assumed-role/([^/]+)/", arn)
+    name = role.group(1) if role else mask(arn.rsplit(":", 1)[-1])
+    try:
+        master = org.describe_organization()["Organization"]["MasterAccountId"]
+    except Exception:  # noqa: BLE001 - not knowing the management account is a refusal
+        master = None
+    kind = (
+        "unknown account type"
+        if master is None
+        else ("management account" if master == account else "member")
+    )
+    print(f"identity: {name}, {kind}, {'root' if root else 'not root'}")  # noqa: T201
+    if root:
+        raise LoadRefused("the caller is the root user")
+    if master is None:
+        raise LoadRefused("cannot tell whether this is the management account")
+    if master == account:
+        raise LoadRefused("the caller is in the organization's management account")
+    if account != expected:
+        raise LoadRefused("the caller is not in the expected account")
+    return account
+
+
+def main(argv: list[str] | None = None) -> int:
+    from botocore.exceptions import BotoCoreError, ClientError
 
     parser = argparse.ArgumentParser(prog="redshift_load.py")
     parser.add_argument("--run-id", help="the Glue run to load; default: the newest completed one")
     parser.add_argument("--dry-run", action="store_true", help="verify everything, send nothing")
+    parser.add_argument(
+        "--expected-account", help="default: expected_account_id in terraform.tfvars"
+    )
     args = parser.parse_args(argv)
-    s3 = boto3.client("s3", region_name=REGION)
-    sts = boto3.client("sts", region_name=REGION)
-    account = sts.get_caller_identity()["Account"]
-    data = NoDataApi() if args.dry_run else data_api_client(sts, account, REGION)
     try:
+        expected = expected_account(args.expected_account)
+        sts = client("sts")
+        account = check_caller(sts, client("organizations"), expected)
+        s3 = client("s3")
+        data = NoDataApi() if args.dry_run else data_api_client(sts, account, REGION)
         summary = run_load(
             s3,
             data,
@@ -564,9 +621,12 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
     except (LoadRefused, PostLoadMismatch, LoadFailed) as exc:
-        print(f"REFUSED: {mask(str(exc))}")
+        print(f"REFUSED: {mask(str(exc))}")  # noqa: T201
         return 1
-    print(summary.text())
+    except (ClientError, BotoCoreError) as exc:
+        print(f"AWS ERROR: {mask(str(exc))}")  # noqa: T201
+        return 1
+    print(summary.text())  # noqa: T201
     return 0
 
 
