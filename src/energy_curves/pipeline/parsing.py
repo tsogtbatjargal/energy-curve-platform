@@ -2,7 +2,8 @@
 
 EIA returns numbers as JSON strings ("61.25"). Valid numeric strings must parse; anything else
 is rejected with a reason rather than coerced. Non-positive prices are valid observations
-(WTI settled at -37.63 on 2020-04-20) and are kept; only shape estimation excludes them.
+(the market has had negative settlements, e.g. WTI on 2020-04-20) and are kept; only shape
+estimation excludes them.
 """
 
 from __future__ import annotations

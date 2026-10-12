@@ -9,7 +9,7 @@ from energy_curves.pipeline.parsing import Rejected, parse_price, parse_row
     ("raw", "expected"),
     [
         ("61.25", "61.25"),
-        ("-37.63", "-37.63"),  # real WTI settlement on 2020-04-20; valid, kept
+        ("-8.88", "-8.88"),  # synthetic negative settlement; valid, kept
         ("0", "0"),
         ("100", "100"),
         ("70.123456", "70.123456"),

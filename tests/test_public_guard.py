@@ -140,6 +140,62 @@ def test_the_synthetic_prices_are_the_generators_and_the_allowed_examples_only()
     assert len(values) > 1000
 
 
+# The two real 2020-04-20 settlements, assembled so that no tracked file holds either as text.
+REAL = ("-" + "37" + "." + "63", "19" + "." + "33")
+
+
+@pytest.mark.parametrize("real", REAL)
+def test_the_real_2020_04_20_settlements_are_refused_by_name(real: str) -> None:
+    with pytest.raises(pg.PublicOutputRefused, match="real"):
+        pg.check_artifact(GOOD + f"WTI spot {real}\n", "snapshot.txt")
+
+
+def test_the_guard_matches_number_tokens_not_substrings() -> None:
+    assert pg.has_real_settlement(f"WTI {REAL[0]}, Brent {REAL[1]}.")
+    assert not pg.has_real_settlement(f"v{REAL[1]}.1 and 1{REAL[1]}")  # longer numbers
+    assert not pg.has_real_settlement("WTI -8.88, Brent 22.22")
+
+
+def test_the_generator_no_longer_reproduces_the_real_settlements() -> None:
+    from energy_curves.synthetic_prices import NEGATIVE_DAY, synthetic_price
+
+    assert not any(pg.has_real_settlement(v) for v in pg.synthetic_prices())
+    wti, brent = synthetic_price("RWTC", NEGATIVE_DAY), synthetic_price("RBRTE", NEGATIVE_DAY)
+    assert wti is not None and wti < 0  # still a negative day, so the exclusion path is covered
+    assert brent is not None and brent > 0
+
+
+def test_no_tracked_file_carries_a_real_settlement() -> None:
+    """Every tracked file, the guard and this test included: the guard stores digests only."""
+    import subprocess
+
+    tracked = (
+        subprocess.run(  # noqa: S603
+            ["git", "ls-files", "-z"],  # noqa: S607
+            cwd=pg.REPO,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .split("\0")
+    )
+    hits = []
+    for name in tracked:
+        path = pg.REPO / name
+        if not name or not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        hits += [
+            f"{name}:{n}"
+            for n, line in enumerate(text.splitlines(), 1)
+            if pg.has_real_settlement(line)
+        ]
+    assert not hits, hits
+
+
 def test_versions_and_unrelated_numbers_are_not_mistaken_for_prices() -> None:
     pg.check_artifact(GOOD + "Postgres 17.11 and Valkey 9.1.2 on 2026-10-12, 200 rows.\n", "x")
 
