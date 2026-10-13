@@ -13,6 +13,7 @@ import pytest
 import r2_policies as r2
 from hcl2.utils import SerializationOptions
 from iam_eval import ALLOWED, EXPLICIT_DENY, IMPLICIT_DENY, as_list, decide
+from session_manager_boundary import AFTER, AGENT_ACTIONS
 
 ROLE = f"arn:aws:iam::{r2.ACCOUNT}:role/ecp-batch-task"
 BOUNDED = {"iam:PermissionsBoundary": r2.BOUNDARY_ARN}
@@ -149,3 +150,36 @@ def test_a_bounded_role_with_administrator_access(
     action: str, resource: str, expected: str
 ) -> None:
     assert decide(EVERYTHING, action, resource, boundary=r2.boundary()) == expected
+
+
+# Session Manager agent amendment: the boundary permits an identity's agent grants only.
+@pytest.mark.parametrize("action", AGENT_ACTIONS)
+def test_bounded_roles_can_use_session_manager_agent_actions(action: str) -> None:
+    assert decide(EVERYTHING, action, "*", boundary=r2.boundary()) == ALLOWED
+    assert decide([], action, "*", boundary=r2.boundary()) == IMPLICIT_DENY
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "ssm:StartSession",
+        "ssm:TerminateSession",
+        "ssm:ResumeSession",
+        "ssm:SendCommand",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:PutInventory",
+        "ssm:GetDocument",
+        "ssmmessages:OtherAction",
+        "ec2messages:OtherAction",
+        "ec2:RunInstances",
+        "iam:CreateRole",
+        "sts:AssumeRole",
+    ],
+)
+def test_session_manager_amendment_does_not_allow_operator_or_admin_actions(action: str) -> None:
+    assert decide(EVERYTHING, action, "*", boundary=r2.boundary()) == IMPLICIT_DENY
+
+
+def test_session_manager_amendment_adds_exactly_eleven_actions_and_nothing_else() -> None:
+    assert r2.boundary() == AFTER
