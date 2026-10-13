@@ -133,3 +133,29 @@ test_copy_role_scoped_read_allowed if {
 	])})
 	count(iam.deny) == 0 with input as {"resource_changes": [p]} with data.ecp.stack as "redshift"
 }
+
+# AmazonSSMManagedInstanceCore v2's eleven agent actions are explicit, not a wildcard grant.
+session_manager_agent_actions := [
+	"ssm:UpdateInstanceInformation",
+	"ssmmessages:CreateControlChannel",
+	"ssmmessages:CreateDataChannel",
+	"ssmmessages:OpenControlChannel",
+	"ssmmessages:OpenDataChannel",
+	"ec2messages:AcknowledgeMessage",
+	"ec2messages:DeleteMessage",
+	"ec2messages:FailMessage",
+	"ec2messages:GetEndpoint",
+	"ec2messages:GetMessages",
+	"ec2messages:SendReply",
+]
+
+test_session_manager_agent_actions_allowed if {
+	p := rc("aws_iam_policy", {"policy": policy_doc([{"Effect": "Allow", "Action": session_manager_agent_actions, "Resource": "*"}])})
+	count(iam.deny) == 0 with input as {"resource_changes": [p]}
+}
+
+test_session_manager_agent_actions_do_not_exempt_wildcard_admin if {
+	actions := array.concat(session_manager_agent_actions, ["*"])
+	p := rc("aws_iam_policy", {"policy": policy_doc([{"Effect": "Allow", "Action": actions, "Resource": "*"}])})
+	count(iam.deny) == 1 with input as {"resource_changes": [p]}
+}

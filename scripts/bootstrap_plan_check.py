@@ -1,8 +1,12 @@
 """Pre-apply check of a saved bootstrap plan for a reviewed IAM change.
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/bootstrap_plan_check.py [--change r2|no-cross-account|first-apply|decommission] \
-        <plan.json>
+    python scripts/bootstrap_plan_check.py --change <mode> <plan.json>
+
+Modes: r2 (default), no-cross-account, session-manager, first-apply, decommission.
+
+`session-manager`: exactly one policy-only update of the workload boundary, from the
+pre-amendment template to the template with the eleven agent actions. Nothing else changes.
 
 `decommission` (ADR-0021 phase 5): `terraform plan -destroy` of the management instance; see
 check_decommission. It is this plan's gate: policy_gate.py exits 2 (VACUOUS) on a plan that only
@@ -52,6 +56,7 @@ CHANGES = {  # change -> (address -> (actions, attributes allowed to change; Non
         {"workload_boundary_arn": ["create"]},
     ),
     "no-cross-account": ({"aws_iam_role_policy.gha_deploy_iam": (["update"], {"policy"})}, {}),
+    "session-manager": ({"aws_iam_policy.workload_boundary": (["update"], {"policy"})}, {}),
 }
 EXPECTED, EXPECTED_OUTPUTS = CHANGES["r2"]
 BOUNDARY = "aws_iam_policy.workload_boundary"
@@ -113,7 +118,7 @@ def digest(document: Any) -> str:
     return hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def check(plan: dict[str, Any], change: str = "r2") -> tuple[list[str], list[str]]:
+def _check(plan: dict[str, Any], change: str = "r2") -> tuple[list[str], list[str]]:
     """(problems, report lines). Any problem means: stop, do not apply."""
     expected, expected_outputs = CHANGES[change]
     problems: list[str] = []
@@ -162,6 +167,70 @@ def check(plan: dict[str, Any], change: str = "r2") -> tuple[list[str], list[str
         report.append(f"{address}: policy sha256 {digest(planned)}, equals {name} template: {same}")
         if not same:
             problems.append(f"{address}: planned policy differs from the {name} template")
+    return problems, report
+
+
+# AmazonSSMManagedInstanceCore v2: agent registration and messaging only; no operator grants.
+# https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonSSMManagedInstanceCore.html
+SESSION_MANAGER_ACTIONS = frozenset(
+    {
+        "ssm:UpdateInstanceInformation",
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+        "ec2messages:AcknowledgeMessage",
+        "ec2messages:DeleteMessage",
+        "ec2messages:FailMessage",
+        "ec2messages:GetEndpoint",
+        "ec2messages:GetMessages",
+        "ec2messages:SendReply",
+    }
+)
+
+
+def check(plan: dict[str, Any], change: str = "r2") -> tuple[list[str], list[str]]:
+    if change == "session-manager":
+        return check_session_manager(plan)
+    return _check(plan, change)
+
+
+def check_session_manager(plan: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """One policy-only update from the old boundary to the exact amended template."""
+    try:
+        problems, report = _check(plan, "session-manager")
+        values = template_values(plan)
+    except (ValueError, KeyError, TypeError) as exc:
+        return [f"invalid boundary amendment plan ({type(exc).__name__})"], []
+    if plan.get("complete") is not True:
+        problems.append("the plan must be complete")
+    addresses: set[str] = set()
+    for rc in plan.get("resource_changes", []):
+        address, change = rc["address"], rc["change"]
+        if address in addresses:
+            problems.append(f"duplicate resource: {address}")
+        addresses.add(address)
+        if "importing" in change or change.get("replace_paths"):
+            problems.append(f"{address}: import or replacement is not allowed")
+        if address != BOUNDARY:
+            if change["actions"] != ["no-op"] or changed_attributes(change):
+                problems.append(f"{address}: must be an unchanged no-op")
+            continue
+        if rc.get("mode") != "managed" or rc.get("type") != "aws_iam_policy":
+            problems.append(f"{address}: must be the managed boundary policy")
+        old = policy_templates.render("workload-boundary", values)
+        services = next(stmt for stmt in old["Statement"] if stmt.get("Sid") == "WorkloadServices")
+        services["Action"] = [a for a in services["Action"] if a not in SESSION_MANAGER_ACTIONS]
+        try:
+            before = json.loads((change.get("before") or {}).get("policy", "null"))
+        except (ValueError, TypeError):
+            before = None
+        if before != old:
+            problems.append(f"{address}: before policy differs from the pre-amendment boundary")
+    for name, out in (plan.get("output_changes") or {}).items():
+        if out.get("after_unknown") or out.get("before") != out.get("after"):
+            problems.append(f"output changes: {name}")
+    report.append("summary: 0 to add, 1 to change, 0 to destroy (boundary policy only)")
     return problems, report
 
 
