@@ -192,6 +192,7 @@ jobs:
           valkey=public.ecr.aws/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
           docker pull "$postgres"
           docker pull "$valkey"
+          cli="from energy_curves import main; main()"
           docker network create --internal ecp-api-smoke
           trap 'docker rm -f ecp-api ecp-api-pg ecp-api-valkey; docker network rm ecp-api-smoke' EXIT
           docker run -d --name ecp-api-pg --network ecp-api-smoke --network-alias postgres \
@@ -200,11 +201,11 @@ jobs:
           for _ in $(seq 30); do docker exec ecp-api-pg pg_isready -U ecp -d ecp && break; sleep 1; done
           docker run --rm --network ecp-api-smoke \
             -e DATABASE_URL=postgresql://ecp:ecp@postgres:5432/ecp \
-            --entrypoint energy-curves ecp-batch:ci db-migrate
+            --entrypoint python ecp-batch:ci -c "$cli" db-migrate
           docker run -d --name ecp-api --network ecp-api-smoke \
             -e DATABASE_URL=postgresql://ecp:ecp@postgres:5432/ecp \
             -e REDIS_URL=redis://valkey:6379/0 \
-            --entrypoint energy-curves ecp-batch:ci serve --port 8000
+            --entrypoint python ecp-batch:ci -c "$cli" serve --port 8000
           docker exec -i ecp-api python - < scripts/image_api_smoke.py
 
   glue-compat:

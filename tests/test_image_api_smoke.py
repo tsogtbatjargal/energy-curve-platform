@@ -19,8 +19,8 @@ def test_ci_starts_the_installed_cli_with_an_entrypoint_override():
         "",
     )
     assert "docker network create --internal ecp-api-smoke" in run
-    assert "--entrypoint energy-curves ecp-batch:ci serve --port 8000" in run
-    assert "--entrypoint energy-curves ecp-batch:ci db-migrate" in run
+    assert '--entrypoint python ecp-batch:ci -c "$cli" serve --port 8000' in run
+    assert '--entrypoint python ecp-batch:ci -c "$cli" db-migrate' in run
     assert "docker exec -i ecp-api python - < scripts/image_api_smoke.py" in run
     assert "--network ecp-api-smoke" in run
 

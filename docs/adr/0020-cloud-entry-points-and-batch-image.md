@@ -100,7 +100,9 @@ The next rebuild (#77) is deployed by digest `sha256:06860528…e88322`, with bo
 ## API command and packaging check (2026-10-13)
 
 The installed image also runs the existing API CLI with the default entry point overridden:
-`docker run --entrypoint energy-curves <image> serve --port 8000`. The command binds loopback
+`docker run --entrypoint python <image> -c "from energy_curves import main; main()" serve --port 8000`.
+This uses the installed CLI function without depending on a console-script directory in `PATH`.
+The command binds loopback
 inside the container; it is not an external-listener configuration.
 
 CI starts pinned Postgres and Valkey containers on an `--internal` Docker network, migrates an
