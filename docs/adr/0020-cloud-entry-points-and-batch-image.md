@@ -96,3 +96,23 @@ A newer base digest (Dependabot #46) did not fix the three findings: both bases 
 ## Rollout status (2026-10-12)
 
 The next rebuild (#77) is deployed by digest `sha256:06860528…e88322`, with boto3 1.43.110, uv 0.13.0 and the updated Lambda base. The recorded build-time Trivy scan passed with CI flags and 0 vulnerabilities in both package targets; the offline image smoke passed. ECR reports no scan status, so no ECR scan result is claimed. The lifecycle now keeps five images; #46 remains open for the next rebuild. See the [rollout and recent-window correction](../evidence/m4c-rollout-2026-10-12.md).
+
+## API command and packaging check (2026-10-13)
+
+The installed image also runs the existing API CLI with the default entry point overridden:
+`docker run --entrypoint python <image> -c "from energy_curves import main; main()" serve --port 8000`.
+This uses the installed CLI function without depending on a console-script directory in `PATH`.
+The command binds loopback
+inside the container; it is not an external-listener configuration.
+
+CI starts pinned Postgres and Valkey containers on an `--internal` Docker network, migrates an
+empty test database using the installed `energy-curves db-migrate` command, and starts that API
+command in the built image on the same network. A probe inside the API container checks Valkey
+PING, HTTP 200 from `/api/health` and `/static/app.js`, and installed distribution metadata and
+files for the API module and all UI assets. There is no internet route, no real data, and no
+mocked or skipped dependency check. The app has no offline health mode, so actual test services
+are used.
+
+The deployed digest `sha256:06860528…e88322` was built from the same Dockerfile and package inputs:
+`git diff 1ae04a0..HEAD -- Dockerfile src/ pyproject.toml uv.lock` is empty. These checks add CI
+coverage; they do not change those inputs or require a new deployed image.

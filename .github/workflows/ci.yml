@@ -185,6 +185,29 @@ jobs:
       - name: smoke test the negative-price day and the publish repair
         run: docker run --rm -i --network none --entrypoint python ecp-batch:ci - < scripts/image_smoke.py
 
+      - name: smoke test the installed API and UI
+        run: |
+          # Pull pinned dependencies before isolating the runtime network from the internet.
+          postgres=public.ecr.aws/docker/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+          valkey=public.ecr.aws/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
+          docker pull "$postgres"
+          docker pull "$valkey"
+          cli="from energy_curves import main; main()"
+          docker network create --internal ecp-api-smoke
+          trap 'docker rm -f ecp-api ecp-api-pg ecp-api-valkey; docker network rm ecp-api-smoke' EXIT
+          docker run -d --name ecp-api-pg --network ecp-api-smoke --network-alias postgres \
+            -e POSTGRES_USER=ecp -e POSTGRES_PASSWORD=ecp -e POSTGRES_DB=ecp "$postgres"
+          docker run -d --name ecp-api-valkey --network ecp-api-smoke --network-alias valkey "$valkey"
+          for _ in $(seq 30); do docker exec ecp-api-pg pg_isready -U ecp -d ecp && break; sleep 1; done
+          docker run --rm --network ecp-api-smoke \
+            -e DATABASE_URL=postgresql://ecp:ecp@postgres:5432/ecp \
+            --entrypoint python ecp-batch:ci -c "$cli" db-migrate
+          docker run -d --name ecp-api --network ecp-api-smoke \
+            -e DATABASE_URL=postgresql://ecp:ecp@postgres:5432/ecp \
+            -e REDIS_URL=redis://valkey:6379/0 \
+            --entrypoint python ecp-batch:ci -c "$cli" serve --port 8000
+          docker exec -i ecp-api python - < scripts/image_api_smoke.py
+
   glue-compat:
     # AWS Glue 5.1 runtime (ADR-0007): Python 3.11, Java 17, PySpark 3.5.6. Runs the whole suite
     # plus the glue_compat checks, which assert those exact versions.
