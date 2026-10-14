@@ -190,8 +190,22 @@ jobs:
           # Pull pinned dependencies before isolating the runtime network from the internet.
           postgres=public.ecr.aws/docker/library/postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
           valkey=public.ecr.aws/valkey/valkey:9.1.2@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd
-          docker pull "$postgres"
-          docker pull "$valkey"
+          pull_with_retry() {
+            local image=$1 attempt
+            for ((attempt = 1; attempt <= 5; attempt++)); do
+              if docker pull "$image"; then
+                return 0
+              fi
+              if ((attempt == 5)); then
+                echo "Failed to pull $image after 5 attempts" >&2
+                return 1
+              fi
+              echo "Pull attempt $attempt failed; retrying in $((attempt * 15)) seconds" >&2
+              sleep "$((attempt * 15))"
+            done
+          }
+          pull_with_retry "$postgres"
+          pull_with_retry "$valkey"
           cli="from energy_curves import main; main()"
           docker network create --internal ecp-api-smoke
           trap 'docker rm -f ecp-api ecp-api-pg ecp-api-valkey; docker network rm ecp-api-smoke' EXIT
