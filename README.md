@@ -4,6 +4,10 @@ Builds modelled WTI and Brent forward curves from EIA inputs in a local pipeline
 
 Status: M0–M5 done: bootstrap and policy gates; the local pipeline, curve engine and serving app; the AWS batch running daily on synthetic data; the Glue backfill with parity; and Redshift with query parity. See [the plan](docs/PLAN.md), [scheduled batch evidence](docs/evidence/m4c-scheduled-2026-10-10.md), [rollout evidence](docs/evidence/m4c-rollout-2026-10-12.md), [Glue parity evidence](docs/evidence/m5b-glue-2026-10-11.md) and [Redshift query parity evidence](docs/evidence/m5c-redshift-2026-10-11.md).
 
+![Platform architecture: local stack, the AWS daily batch and on-demand Glue and Redshift (synthetic data only), and CI](docs/diagrams/platform.png)
+
+The diagram is generated from [`docs/diagrams/platform.py`](docs/diagrams/platform.py); see [`docs/diagrams/README.md`](docs/diagrams/README.md).
+
 ## Setup
 
 Requires [mise](https://mise.jdx.dev) and podman (or Docker).
