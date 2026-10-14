@@ -1,0 +1,57 @@
+name: mirror-ci-images
+
+# Copies the two pinned CI service images from ECR Public to this account's GHCR namespace, by
+# digest. Run by hand; nothing triggers it. The packages stay private and are linked to this
+# repository, which is what lets its workflows pull them with GITHUB_TOKEN (packages: read).
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: skopeo
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || sudo apt-get install -y skopeo
+          skopeo --version
+      - name: log in to ghcr.io
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: copy by digest and verify
+        run: |
+          set -euo pipefail
+          # skopeo takes a name and a digest, not both a tag and a digest; the digest is the pin
+          # (the tag names are the versions in .github/workflows/ci.yml).
+          copy() {
+            local name=$1 src=$2 tag=$3 want dest got attempt
+            want=${src##*@}
+            dest="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ecp-ci-${name}"
+            for attempt in 1 2 3 4 5; do
+              if skopeo copy --all --preserve-digests "docker://${src}" "docker://${dest}:${tag}"; then
+                break
+              fi
+              if ((attempt == 5)); then
+                echo "::error::could not copy ${src} after 5 attempts"
+                exit 1
+              fi
+              sleep $((attempt * 15))
+            done
+            got="sha256:$(skopeo inspect --raw "docker://${dest}@${want}" | sha256sum | cut -d' ' -f1)"
+            if [[ "$got" != "$want" ]]; then
+              echo "::error::${dest} serves ${got}, not the pinned ${want}"
+              exit 1
+            fi
+            echo "${dest}@${want} verified"
+          }
+          copy postgres public.ecr.aws/docker/library/postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f 17.11
+          copy valkey public.ecr.aws/valkey/valkey@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd 9.1.2
