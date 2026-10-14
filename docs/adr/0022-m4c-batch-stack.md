@@ -1,6 +1,6 @@
 # 22. M4c: the batch stack, applied in two stages
 
-Date: 2026-10-08 · Status: **accepted** (2026-10-10, after the first scheduled run). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md), [m4c-scheduled-2026-10-10](../evidence/m4c-scheduled-2026-10-10.md), [m4c-rollout-2026-10-10](../evidence/m4c-rollout-2026-10-10.md), [m4c-rollout-2026-10-12](../evidence/m4c-rollout-2026-10-12.md). The CI plan job and the deployment inputs below are coded (M4c-2, part A); the publish workflow is not.
+Date: 2026-10-08 · Status: **accepted** (2026-10-10, after the first scheduled run). Evidence: [m4c-2026-10-09](../evidence/m4c-2026-10-09.md), [m4c-scheduled-2026-10-10](../evidence/m4c-scheduled-2026-10-10.md), [m4c-rollout-2026-10-10](../evidence/m4c-rollout-2026-10-10.md), [m4c-rollout-2026-10-12](../evidence/m4c-rollout-2026-10-12.md). The CI plan job and the deployment inputs below are coded (M4c-2, part A); the publish workflow is not. Superseded by the [dated rollout decisions](#rollout-decisions-2026-10-11-and-2026-10-12).
 
 ## Context
 M4a (the S3 store, ADR-0019) and M4b (the entry points and image, ADR-0020) are done. M4c is what remains: the `infra/batch` stack in the `ecp-workloads` member account (ADR-0021), the first image, and the first cloud run. Preconditions met: PLAN.md R1 (ADR-0017) and R2 (ADR-0018, re-accepted in the member account). The cloud runs synthetic data only, so R3 matters only for M6.
@@ -28,7 +28,7 @@ Verified read-only in the member account (2026-10-08): 0 ECR repositories; no `A
 | State | The member state bucket, key `batch/terraform.tfstate`, `use_lockfile`; a git-ignored `backend.hcl` |
 | Account guard | `expected_account_id`; postconditions that the caller is that account and is not the organization's management account |
 | Data bucket | `terraform-aws-modules/s3-bucket/aws` at exactly 5.16.2. SSE-S3, versioning on, owner-enforced, public access blocked, deny non-TLS. Lifecycle: `store/staging/` expires after 7 days; old versions after 30 days; incomplete uploads aborted after 1 day. The store is `s3://<bucket>/store` |
-| ECR | `ecp-batch`: immutable tags, scan on push, AES256, keep the 2 newest images (the count rises to 5 with the publish workflow) |
+| ECR | `ecp-batch`: immutable tags, scan on push, AES256, keep the 2 newest images (the count rises to 5 with the publish workflow). Superseded by the [dated rollout decisions](#rollout-decisions-2026-10-11-and-2026-10-12). |
 | Lambda (`cloud.lambda_handler`) | Image by digest, no VPC, 512 MB, 60 s. **No reserved concurrency** (below). Role `ecp-batch-stage`: `s3:PutObject` on `store/staging/*`, and its own log stream |
 | Fargate (`cloud.task_main`) | 0.5 vCPU, **1 GB** (below). Entry point `python -m energy_curves.cloud`; the state machine passes `task <run_id>`. Role `ecp-batch-task`: get and put under `store/`, and `s3:ListBucket`, so a missing key is a 404 rather than a 403. Role `ecp-batch-exec`: the ECR pull for this repository and its own log stream |
 | Network (ADR-0004 batch profile) | Public subnets, a public IP for the task, egress 443 only, no ingress. No NAT gateway, no interface endpoints (a Rego rule now enforces this outside the demo stack) |
@@ -136,7 +136,7 @@ Locally, with rootless podman:
 `tests/test_batch_source.py` enforces this, and the stage-2 check rejects any other environment.
 
 ### Cost (`ca-central-1`, AWS public price list, 2026-10-08)
-About **$0.15 a month**, or $0.33 with no free tier (the ECR line below was corrected on 2026-10-09 from images assumed at 0.9 GB; the original estimate was $0.27 and $0.45; keeping 5 images instead of 2, planned with the publish workflow, adds at most $0.10):
+About **$0.15 a month**, or $0.33 with no free tier (the ECR line below was corrected on 2026-10-09 from images assumed at 0.9 GB; the original estimate was $0.27 and $0.45; keeping 5 images instead of 2, planned with the publish workflow, adds at most $0.10). Superseded by the [dated rollout decisions](#rollout-decisions-2026-10-11-and-2026-10-12).
 
 | Item | Monthly |
 |---|---|
@@ -174,12 +174,12 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 6. **Plan 2 with that digest:** the gates, then the hash. Stop. Then apply and verify, including a no-change re-plan.
 7. **One manual execution** (expect `published`), then one replay `ecs run-task` (expect `already_published`, pointer unchanged).
 8. **Plan 3** enables the schedule and moves it to the universal target, then the first scheduled run is watched (name, success, alarm).
-9. **The evidence,** then the CI plan job (done in code, see below), and later the publish workflow and a stage-4 rollout check, which are not built yet.
+9. **The evidence,** then the CI plan job (done in code, see below), and later the publish workflow and a stage-4 rollout check, which are not built yet. Superseded by the [dated rollout decisions](#rollout-decisions-2026-10-11-and-2026-10-12).
 
 ### The deployment inputs are committed, and CI plans the stack (M4c-2, part A, 2026-10-09)
 - **`infra/batch/image.auto.tfvars` is tracked** (the one exception to the `*.tfvars` ignore rule) and holds exactly `image_digest = "<the deployed digest>"` and `schedule_enabled = true`. A plain plan now describes the deployed state. **A rollout is a PR that changes the digest line, and a rollback is a revert.** A `-var` on the command line still wins, so a stage-1-style plan needs `-var image_digest=`. The tests pin that the file holds only those two assignments and is not ignored; the Terraform tests set their own inputs, because `terraform test` loads this file too.
 - **The alert address stays out of CI.** The subscription has `lifecycle { ignore_changes = [endpoint] }`, and CI plans with `alert_email = "ci@example.invalid"`. An email subscription's endpoint cannot change in place, so **changing the address later is a deliberate replace step** (`terraform apply -replace=aws_sns_topic_subscription.email`, which leaves the new subscription pending confirmation), not something a plan does by accident. Nothing reads the live subscription from CI.
-- **The ECR lifecycle keeps 2 images for now.** The count goes up to **5 together with the publish workflow**, as part of that work, so that a publish or two cannot expire the deployed image before a rollout: changing it replaces the lifecycle policy (delete, then put; the provider reports `cannot_update`), which needs its own reviewed plan and a check mode that accepts exactly that replace. The digest guard (`data.aws_ecr_image`) already fails a plan whose digest is not in the repository; a rollout check will also confirm it.
+- **The ECR lifecycle keeps 2 images for now.** The count goes up to **5 together with the publish workflow**, as part of that work, so that a publish or two cannot expire the deployed image before a rollout: changing it replaces the lifecycle policy (delete, then put; the provider reports `cannot_update`), which needs its own reviewed plan and a check mode that accepts exactly that replace. The digest guard (`data.aws_ecr_image`) already fails a plan whose digest is not in the repository; a rollout check will also confirm it. Superseded by the [dated rollout decisions](#rollout-decisions-2026-10-11-and-2026-10-12).
 - **The CI job** (`terraform-plan`, `batch` added to the matrix) assumes the member plan role, plans with `-lock-timeout=60s`, and prints only the `Plan:` / `No changes` line (a failed plan prints the first line of each error with 12-digit numbers masked). The plan and its JSON go to files that are removed afterwards. It then runs the policy gate with `--stack batch --stack-dir .`. It is **informational**: not a required check, so an `infra/batch` change merged but not yet applied shows as a change without blocking.
 - **Steady state:** with these inputs a plan of the real state shows `No changes` (read-only, streamed JSON, 2026-10-09). CI's steady state could later get a "current" check mode (all resources no-op); it is not built.
 
@@ -194,6 +194,11 @@ The trivy findings these exclusions raise are each ignored with the reason in th
 - **`batch_plan_check.py --stage 4`** accepts exactly that shape and was run against the real plan: no problems. Its tests are written to the same shape, including all-string variables.
 - **`image.auto.tfvars` now names the new digest.** The file says what is deployed, so between the merge of the digest PR and the apply, the informational CI plan job shows these three changes; that is the PR the apply follows. A rollback is a revert of that PR followed by the same check with the old digest, which the stage-4 check accepts the same way (the old image stays in ECR while the lifecycle keeps two).
 - **Applied on 2026-10-10** from `stage4.tfplan` (`Resources: 1 added, 2 changed, 1 destroyed`; state serial 8 to 10), and checked afterwards: the state machine definition equals the pre-apply one except the task-definition revision (1 to 2), the function is `Active` and `Successful` on the new digest with an unchanged environment, and a re-plan shows no changes. One manual execution then `SUCCEEDED`, published a watermark-only version 3 with the gold files unchanged, and the alarm stayed `OK`. The first scheduled run on this image is 2026-10-11. Evidence: [m4c-rollout-2026-10-10](../evidence/m4c-rollout-2026-10-10.md).
+
+## Rollout decisions (2026-10-11 and 2026-10-12)
+
+- **2026-10-11:** no publish workflow will be built. Image rollouts remain a manual, reviewed chain: build, scan, push by digest, a digest PR, plan, hash approval, apply, and one manual run. The [2026-10-12 rollout evidence](../evidence/m4c-rollout-2026-10-12.md) records that chain, including the stage-4 check. Earlier references to a future publish workflow are superseded by this decision.
+- **2026-10-12:** the ECR lifecycle keeps **5 images**. The change in [#77](https://github.com/tsogtbatjargal/energy-curve-platform/pull/77) was applied in that rollout. Earlier two-image retention statements and cost estimates describe the prior configuration.
 
 ## Rollout status (2026-10-12)
 
