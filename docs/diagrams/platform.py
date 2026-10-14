@@ -18,8 +18,10 @@ from diagrams.onprem.inmemory import Redis
 from diagrams.programming.framework import FastAPI
 from diagrams.programming.language import Python
 
-GRAPH = {"fontsize": "20", "labelloc": "t", "pad": "0.6", "nodesep": "0.9", "ranksep": "1.2"}
-NODE = {"fontsize": "13", "height": "2.0"}
+GRAPH = {"fontsize": "20", "labelloc": "t", "pad": "0.6", "nodesep": "1.1", "ranksep": "1.6"}
+NODE = {"fontsize": "13", "height": "1.9", "margin": "0.0,0.35"}
+EDGE = {"fontsize": "12"}
+HIDDEN = Edge(style="invis")
 SYNTHETIC = {"fontcolor": "#7a4b00", "bgcolor": "#fff8e6", "pencolor": "#d9a400"}
 
 with Diagram(
@@ -30,6 +32,7 @@ with Diagram(
     direction="LR",
     graph_attr=GRAPH,
     node_attr=NODE,
+    edge_attr=EDGE,
 ):
     # ADR-0011: real EIA data exists only locally; the cloud path never sees it.
     with Cluster("Local (the only place real EIA data exists)"):
@@ -44,8 +47,8 @@ with Diagram(
         valkey = Redis("Valkey")
         api = FastAPI("FastAPI")
         app = Client("w2ui app")
-        eia >> pipeline >> store >> pg
-        store >> api
+        eia >> pipeline >> store
+        store >> Edge(label="importer") >> pg
         api >> Edge(label="cache") >> valkey
         api >> pg
         api >> app
@@ -61,7 +64,12 @@ with Diagram(
             ecr = ECR("ECR\n(image by digest)")
             alarm = CloudwatchAlarm("CloudWatch alarm")
             topic = SNS("SNS alerts")
-            sched >> sfn >> stage >> task >> data
+            # ADR-0022: the state machine runs Stage (Lambda) and then Pipeline (ECS runTask.sync).
+            sched >> sfn
+            sfn >> Edge(label="1 stage") >> stage
+            sfn >> Edge(label="2 pipeline") >> task
+            stage >> Edge(label="staging") >> data
+            task >> Edge(label="publish") >> data
             ecr >> Edge(style="dashed") >> stage
             ecr >> Edge(style="dashed") >> task
             sfn >> Edge(style="dotted", label="failed") >> alarm >> topic
@@ -75,13 +83,16 @@ with Diagram(
             with Cluster("own private VPC, no internet path"):
                 rs = Redshift("Redshift Serverless")
             glue >> glue_bucket
-            glue_bucket >> Edge(label="COPY") >> rs
-            data >> Edge(label="COPY") >> rs
+            glue_bucket >> Edge(label="COPY (shape file)") >> rs
+            data >> Edge(xlabel="COPY (gold files)") >> rs
 
     # ADR-0010 (CI roles), ADR-0018 (workload boundary): OIDC plan and deploy roles.
     with Cluster("CI (GitHub Actions)"):
         gha = GithubActions("GitHub Actions")
-        plan = IAMRole("plan role\n(read-only, OIDC)")
-        deploy = IAMRole("deploy role\n(OIDC, approval)")
-        gha >> plan
-        gha >> deploy
+        plan = IAMRole("plan role\n(read-only)")
+        deploy = IAMRole("deploy role\n(approval)")
+        gha >> Edge(label="OIDC") >> plan
+        gha >> Edge(label="OIDC") >> deploy
+
+    # Layout only: this puts the CI cluster beside the local stack instead of below it.
+    pg >> HIDDEN >> gha
