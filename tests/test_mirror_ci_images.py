@@ -62,7 +62,8 @@ def test_the_sources_are_exactly_the_two_pinned_digests_of_the_ci_services() -> 
     text = PATH.read_text()
     refs = set(re.findall(r"public\.ecr\.aws/[\w./-]+@sha256:[0-9a-f]{64}", text))
     assert refs == {without_tag(POSTGRES), without_tag(VALKEY)}
-    assert POSTGRES in CI and VALKEY in CI  # the same digests the CI jobs run
+    for ref in (POSTGRES, VALKEY):  # the same digests the CI jobs pull from the mirror
+        assert ref.rsplit("@", 1)[1] in CI
 
 
 def test_no_source_is_addressed_by_tag_alone() -> None:
