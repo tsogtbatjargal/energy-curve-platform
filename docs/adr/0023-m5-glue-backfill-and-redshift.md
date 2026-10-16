@@ -114,3 +114,9 @@ Redshift Serverless compute $0.4125 per RPU-hour (billed per second; nothing whi
 ## Note (2026-10-16): the teardown plan check
 
 `redshift_plan_check.py --change destroy` accepts the teardown plan: exactly the 17 resources of the stack other than the Redshift service-linked role as plain deletes, a state that holds exactly those 17, and nothing from another stack. The role is account-wide and shared, so it is kept. A `removed { lifecycle { destroy = false } }` block is not honoured by `plan -destroy` in Terraform 1.15.8 (probed with `terraform_data`: the resource was still planned for deletion; a normal plan shows it as no longer managed), so the role is taken out of state first and the check refuses any plan that mentions it.
+
+## Note (2026-10-16): the Redshift stack was destroyed
+
+The Redshift stack was destroyed on 2026-10-16: 17 resources, from a saved plan that `redshift_plan_check.py --change destroy` and the policy gate (nothing to evaluate on an all-delete plan) had accepted, applied with locking on. Read-only checks afterwards found no namespace, workgroup, usage limit, snapshot or recovery point, no VPC for 10.43.0.0/16, and neither `ecp-redshift-copy` nor `ecp-redshift-data-api`. The batch and Glue stacks and the ECR repository were untouched.
+
+`AWSServiceRoleForRedshift` was kept: it was removed from the stack's state first (`terraform state rm aws_iam_service_linked_role.redshift`, see the teardown note above) and still exists in IAM. The state is now empty. A future re-create of the stack would need `terraform import aws_iam_service_linked_role.redshift <role ARN>` before its plan, because the role already exists and creating it again would fail.

@@ -36,3 +36,6 @@ The Glue job was hardened (M5c-0), the Redshift stack was applied in the workloa
 
 ## State
 The stack stays in place and idle: no compute runs between sessions and storage is under 1 GB. The loaded tables stay. A second session needs its own go. The Glue job's `s3:DeleteObject` narrowing remains deferred.
+
+## Update (2026-10-16)
+The stack described here was destroyed on 2026-10-16 (17 resources, verified read-only: no namespace, workgroup, snapshot or recovery point, and the 10.43 VPC gone). `AWSServiceRoleForRedshift` is kept, outside the state and present in IAM; a re-create needs an import of that role first. See the dated note in [ADR-0023](../adr/0023-m5-glue-backfill-and-redshift.md).
