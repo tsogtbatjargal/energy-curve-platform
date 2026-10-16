@@ -850,3 +850,185 @@ def test_update_mode_main_prints_ok_and_exits_zero(
     assert "OK    the reviewed shape" in out and MEMBER not in out
     path.write_text(json.dumps(plan()))
     assert rpc.main(["--stack-dir", str(stack), "--change", "update", str(path)]) == 1
+
+
+# --- destroy mode: the stack's resources, except the kept service-linked role -----------------
+# Terraform 1.15.8 does not honour `removed { lifecycle { destroy = false } }` under
+# `plan -destroy` (probed locally with terraform_data: the "removed" resource was still planned
+# for deletion). The service-linked role is therefore taken out of state first (`terraform state
+# rm`), and the destroy plan must hold the other 17 resources as deletes and never the role.
+
+KEPT = SLR
+DESTROYED = [a for a in ADDRESSES if a != KEPT]
+
+
+def destroy_plan() -> dict[str, Any]:
+    p = plan()
+    p["prior_state"]["values"]["root_module"]["resources"] += [
+        {"address": a, "mode": "managed", "values": {}} for a in DESTROYED
+    ]
+    p["resource_changes"] = [
+        {"address": a, "mode": "managed",
+         "change": {"actions": ["delete"], "before": {}, "after": None}}
+        for a in DESTROYED
+    ]  # fmt: skip
+    return p
+
+
+def run_destroy(p: dict[str, Any], stack: Path) -> list[str]:
+    problems, _ = rpc.check(p, stack, mode="destroy")
+    return problems
+
+
+def test_destroy_mode_accepts_the_seventeen_deletes_and_reports_them(stack: Path) -> None:
+    problems, report = rpc.check(destroy_plan(), stack, mode="destroy")
+    assert problems == []
+    assert "summary: 0 to add, 0 to change, 17 to destroy" in report
+    assert KEPT not in "\n".join(report)
+    assert MEMBER not in "\n".join(report)
+
+
+def test_destroy_mode_refuses_to_delete_the_service_linked_role(stack: Path) -> None:
+    p = destroy_plan()
+    p["prior_state"]["values"]["root_module"]["resources"].append(
+        {"address": KEPT, "mode": "managed", "values": {}}
+    )
+    p["resource_changes"].append(
+        {"address": KEPT, "mode": "managed",
+         "change": {"actions": ["delete"], "before": {}, "after": None}}
+    )  # fmt: skip
+    problems = run_destroy(p, stack)
+    assert any(KEPT in x and "kept" in x for x in problems), problems
+
+
+@pytest.mark.parametrize("actions", [["forget"], ["no-op"], ["update"], ["create"]])
+def test_destroy_mode_refuses_any_planned_action_on_the_service_linked_role(
+    stack: Path, actions: list[str]
+) -> None:
+    p = destroy_plan()
+    p["resource_changes"].append(
+        {"address": KEPT, "mode": "managed",
+         "change": {"actions": actions, "before": {}, "after": {}}}
+    )  # fmt: skip
+    assert any(KEPT in x for x in run_destroy(p, stack))
+
+
+def test_destroy_mode_refuses_a_state_that_still_holds_the_service_linked_role(
+    stack: Path,
+) -> None:
+    p = destroy_plan()
+    p["prior_state"]["values"]["root_module"]["resources"].append(
+        {"address": KEPT, "mode": "managed", "values": {}}
+    )
+    assert any("state" in x for x in run_destroy(p, stack))
+
+
+@pytest.mark.parametrize("address", DESTROYED)
+def test_destroy_mode_refuses_a_missing_delete(stack: Path, address: str) -> None:
+    p = destroy_plan()
+    p["resource_changes"] = [r for r in p["resource_changes"] if r["address"] != address]
+    assert any(address in x for x in run_destroy(p, stack))
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "aws_ecs_cluster.main",  # the batch or demo stacks
+        "aws_glue_job.shape",
+        "aws_iam_role.bastion",
+        "module.bucket.aws_s3_bucket.this[0]",
+        "aws_ecr_repository.batch",
+    ],
+)
+def test_destroy_mode_refuses_a_resource_from_any_other_stack(stack: Path, address: str) -> None:
+    p = destroy_plan()
+    p["resource_changes"].append(
+        {"address": address, "mode": "managed",
+         "change": {"actions": ["delete"], "before": {}, "after": None}}
+    )  # fmt: skip
+    assert any(address in x for x in run_destroy(p, stack))
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [["no-op"], ["update"], ["create"], ["delete", "create"], ["create", "delete"], ["forget"]],
+)
+def test_destroy_mode_accepts_deletes_only(stack: Path, actions: list[str]) -> None:
+    p = destroy_plan()
+    p["resource_changes"][0]["change"]["actions"] = actions
+    assert any(DESTROYED[0] in x for x in run_destroy(p, stack))
+
+
+def test_destroy_mode_refuses_an_import(stack: Path) -> None:
+    p = destroy_plan()
+    p["resource_changes"][0]["change"]["importing"] = {"id": "x"}
+    assert any(DESTROYED[0] in x for x in run_destroy(p, stack))
+
+
+def test_destroy_mode_refuses_a_state_with_any_other_managed_resource(stack: Path) -> None:
+    p = destroy_plan()
+    p["prior_state"]["values"]["root_module"]["resources"].append(
+        {"address": "aws_ecs_cluster.main", "mode": "managed", "values": {}}
+    )
+    assert any("state" in x for x in run_destroy(p, stack))
+
+
+def test_destroy_mode_refuses_a_partial_state(stack: Path) -> None:
+    p = destroy_plan()
+    resources = p["prior_state"]["values"]["root_module"]["resources"]
+    p["prior_state"]["values"]["root_module"]["resources"] = [
+        r for r in resources if r["address"] != NS
+    ]
+    p["resource_changes"] = [r for r in p["resource_changes"] if r["address"] != NS]
+    assert any("state" in x for x in run_destroy(p, stack))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p.update(errored=True),
+        lambda p: p.update(complete=False),
+        lambda p: p.update(deferred_changes=[{"address": "x"}]),
+        lambda p: p.update(resource_drift=[{"address": VPC}]),
+        lambda p: p.update(output_changes={"o": {"actions": ["delete"]}}),
+        lambda p: p["variables"]["region"].update(value="us-east-1"),
+        lambda p: p["variables"].update(extra={"value": "x"}),
+        lambda p: p["prior_state"]["values"]["root_module"]["resources"][0]["values"].update(
+            account_id="444444444444"
+        ),
+        lambda p: p["prior_state"]["values"]["root_module"]["resources"][1]["values"].update(
+            master_account_id=MEMBER
+        ),
+    ],
+)
+def test_destroy_mode_keeps_the_soundness_checks(stack: Path, mutate: Any) -> None:
+    p = destroy_plan()
+    mutate(p)
+    assert run_destroy(p, stack)
+
+
+def test_destroy_mode_keeps_the_source_checks(stack: Path) -> None:
+    (stack / "extra.tf").write_text('module "m" { source = "./x" }\n')
+    assert any("module block" in x for x in run_destroy(destroy_plan(), stack))
+
+
+def test_an_unknown_change_mode_is_refused(stack: Path) -> None:
+    problems, _ = rpc.check(destroy_plan(), stack, mode="remove")
+    assert any("unknown change mode" in x for x in problems)
+
+
+def test_the_other_modes_still_refuse_a_destroy_plan(stack: Path) -> None:
+    assert run(destroy_plan(), stack)
+    assert run_update(destroy_plan(), stack)
+
+
+def test_destroy_mode_main_prints_ok_and_exits_zero(
+    stack: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(destroy_plan()))
+    assert rpc.main(["--stack-dir", str(stack), "--change", "destroy", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "OK    the reviewed shape" in out and MEMBER not in out
+    path.write_text(json.dumps(plan()))
+    assert rpc.main(["--stack-dir", str(stack), "--change", "destroy", str(path)]) == 1
