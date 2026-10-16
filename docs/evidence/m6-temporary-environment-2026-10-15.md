@@ -3,6 +3,7 @@
 PLAN.md M6 lists an optional temporary environment. It was built on 2026-10-13, used, and destroyed on 2026-10-15. Everything below was read from AWS or from the run records; no real price data was involved.
 
 ## What it was
+- **Diagram:** [`docs/diagrams/demo.png`](../diagrams/demo.png) shows it: the request path from the owner address through the load balancer to the API, the Session Manager admin path, and the outbound traffic through the one NAT gateway.
 - **Purpose:** the local serving stack (FastAPI, Postgres, Valkey) running in the workload account for a short time: an internet-facing load balancer on HTTP:80 limited to one owner address (a /32), the API on Fargate in private subnets, a private single-AZ RDS Postgres, a private ElastiCache Valkey with TLS, a NAT gateway for outbound traffic, a private SSM bastion with no public address, and the batch stack's ECR image by digest. Every role carried the workload permissions boundary.
 - **Data:** synthetic only (ADR-0011).
 - **Code:** its Terraform is kept outside this repository, so no resource of it appears in `infra/`.
@@ -23,4 +24,4 @@ One bootstrap task loaded the synthetic data: 278 observations, dataset version 
 - **Last step:** the temporary bootstrap task definition's one active revision was deregistered.
 
 ## Cost
-Cost Explorer (unblended, estimated) for the workload account, 2026-10-12 to 2026-10-15, daily: net $0.00 each day. Before netting, the largest lines were EC2 - Other (about $0.12 over the period) and ECS (about $0.12), then RDS and the rest at under a cent. The monthly $40 budget showed $0.00 actual spend when it was read on 2026-10-16; budget data lags, so treat these as estimates until the month closes.
+Cost Explorer read on 2026-10-16 showed net $0.00 per day, estimated; its data lags and credits or free tier may offset charges, so this is preliminary. The planned cost was about $7.4 for 48 hours. A final figure will be added once billing settles.

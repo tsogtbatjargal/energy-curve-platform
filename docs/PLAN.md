@@ -155,7 +155,7 @@ So a hash of the plan JSON alone would not change when the actions changed.
 | M5 | Glue PySpark backfill and shape estimation, Polars parity test, Redshift load and queries | 5–7 |
 | M6 | Optional demo environment and teardown | 4–6 |
 
-**M6 status (2026-10-15):** the temporary environment was built on 2026-10-13 and destroyed on 2026-10-15; see [the note](evidence/m6-temporary-environment-2026-10-15.md).
+**M6 status (2026-10-15):** the temporary environment was built on 2026-10-13 and destroyed on 2026-10-15; see [the note](evidence/m6-temporary-environment-2026-10-15.md) and [the diagram](diagrams/demo.png).
 
 **Estimated AWS spend:** about $15–20 of the $40 budget.
 
