@@ -1,7 +1,7 @@
 """Pre-apply check of a saved infra/redshift plan (M5c-1, ADR-0023).
 
     terraform show -json <saved.tfplan> > <plan.json>
-    python scripts/redshift_plan_check.py [--change create|update] <plan.json>
+    python scripts/redshift_plan_check.py [--change create|update|destroy] <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it reads infra/redshift's source and
 its policy templates. It runs after policy_gate.py --stack redshift (ADR-0006 rules, PLAN.md R1 and
@@ -32,6 +32,12 @@ RedshiftServerless.5; no password or secret was set, and there is no network pat
 login, ADR-0023) and the AWS-owned key "AWS_OWNED_KMS_KEY", which is what the service reports when
 no key is configured. Any other admin name or key fails. The wiring is checked by reference in the
 configuration even though the ids are known by then.
+
+`--change destroy` is the teardown: exactly the 17 deletes of every resource but the Redshift
+service-linked role, which is kept (it is account-wide and shared). Terraform 1.15.8 does not honour
+`removed { lifecycle { destroy = false } }` under `plan -destroy` (probed with terraform_data), so
+the role is taken out of state first; the state must hold exactly the other 17 and the plan may
+never mention the role. Nothing from any other stack passes.
 
 Nothing else: no module, gateway, NAT, endpoint, address, route, rule resource, snapshot, endpoint
 access, resource policy, secret, key or any other service. Also: a sound plan (not errored,
@@ -80,6 +86,8 @@ CREATES = frozenset(
     | set(SUBNETS)
     | set(ASSOCIATIONS)
 )
+# `destroy` removes everything but the service-linked role, which is shared account-wide and kept.
+DESTROYS = CREATES - {SLR}
 DATA = frozenset(
     {
         "data.aws_caller_identity.current",
@@ -338,6 +346,12 @@ def check_common(plan: dict[str, Any], mode: str = "create") -> tuple[list[str],
         problems.append(
             "the state is not the applied stack: it must hold exactly the reviewed ones"
         )
+    if mode == "destroy" and owned != DESTROYS:
+        problems.append(
+            "the state is not the applied stack without the kept service-linked role: it must "
+            f"hold exactly the other {len(DESTROYS)} reviewed resources ({SLR} is removed from "
+            "state first)"
+        )
     for name, out in (plan.get("output_changes") or {}).items():
         if out["actions"] not in UNCHANGED:
             problems.append(f"unexpected output change: {'+'.join(out['actions'])} {name}")
@@ -378,11 +392,14 @@ def check(
     plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
 ) -> tuple[list[str], list[str]]:
     """(problems, report) for a saved plan of infra/redshift: `create` from an empty state, or
-    `update` (18 no-ops, the provider's read-back accepted) on the applied stack."""
-    if mode not in ("create", "update"):
+    `update` (18 no-ops, the provider's read-back accepted) on the applied stack, or `destroy`
+    (the 17 deletes of everything but the kept service-linked role)."""
+    if mode not in ("create", "update", "destroy"):
         return [f"unknown change mode {mode}"], []
     problems, account = check_common(plan, mode)
     problems += check_source(stack_dir or STACK)
+    if mode == "destroy":
+        return check_destroy(plan, problems)
     report: list[str] = []
     want = "create" if mode == "create" else "no-op"
     seen: set[str] = set()
@@ -410,10 +427,38 @@ def check(
     return problems, report
 
 
+def check_destroy(plan: dict[str, Any], problems: list[str]) -> tuple[list[str], list[str]]:
+    """Exactly the DESTROYS addresses as plain deletes, nothing from another stack, and never the
+    kept service-linked role (a delete of it, or any other action, is refused)."""
+    report: list[str] = []
+    seen: set[str] = set()
+    for rc in plan.get("resource_changes", []):
+        address, change = rc["address"], rc["change"]
+        actions = change["actions"]
+        report.append(f"{'+'.join(actions):8} {address}")
+        if address == SLR:
+            problems.append(
+                f"{address}: the service-linked role is kept; remove it from state before "
+                "planning the destroy"
+            )
+        elif address not in DESTROYS or actions != ["delete"] or change.get("importing"):
+            problems.append(f"unexpected change: {'+'.join(actions)} {address}")
+        else:
+            seen.add(address)
+    for address in sorted(DESTROYS - seen):
+        problems.append(f"missing change: delete {address}")
+    report.append(
+        f"summary: 0 to add, 0 to change, {len(DESTROYS)} to destroy"
+        if not problems
+        else "summary: not the reviewed shape"
+    )
+    return problems, report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="redshift_plan_check.py")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
-    parser.add_argument("--change", choices=("create", "update"), default="create")
+    parser.add_argument("--change", choices=("create", "update", "destroy"), default="create")
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)
     problems, report = check(json.loads(args.plan.read_text()), args.stack_dir, args.change)

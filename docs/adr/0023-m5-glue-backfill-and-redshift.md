@@ -110,3 +110,7 @@ Redshift Serverless compute $0.4125 per RPU-hour (billed per second; nothing whi
 - The deployed batch image does not change. `jobs/` is outside its build context, but `src/` gains two modules, so the next rebuild (not this PR) carries them; their behaviour is identical, pinned by the digest test.
 - If a 4-RPU workgroup is refused in ca-central-1, 8 RPU doubles the session price; the plan check stops for a decision instead of growing silently. *(It was: the documented list of Regions with 4 RPU excludes ca-central-1, so the stack is 8 RPU; see M5c-1.)*
 - Not decided here: what M6 publishes (PLAN.md R3). *(Note 2026-10-12: R3 is decided for any public output; see the ADR-0011 note.)*
+
+## Note (2026-10-16): the teardown plan check
+
+`redshift_plan_check.py --change destroy` accepts the teardown plan: exactly the 17 resources of the stack other than the Redshift service-linked role as plain deletes, a state that holds exactly those 17, and nothing from another stack. The role is account-wide and shared, so it is kept. A `removed { lifecycle { destroy = false } }` block is not honoured by `plan -destroy` in Terraform 1.15.8 (probed with `terraform_data`: the resource was still planned for deletion; a normal plan shows it as no longer managed), so the role is taken out of state first and the check refuses any plan that mentions it.
