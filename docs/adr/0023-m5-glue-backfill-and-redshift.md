@@ -124,3 +124,7 @@ The Redshift stack was destroyed on 2026-10-16: 17 resources, from a saved plan 
 ## Note (2026-10-16): the Glue bucket's emptying flag exists only for the closing teardown
 
 `force_destroy = true` on the Glue stack's versioned bucket was set for the project's closing teardown only. It is applied in place first (`glue_plan_check.py --change prepare`: that one attribute, false to true, everything else unchanged), and the destroy plan (`--change destroy`: all 14 resources, from a state that holds the flag as true) then lets the provider empty the bucket, versions and delete markers included, before deleting it. The stack has no service-linked role to keep.
+
+## Note (2026-10-17): the Glue stack was destroyed
+
+The Glue stack was destroyed on 2026-10-17 as 14 deletes, after `force_destroy` was applied in place so the provider could empty the versioned bucket (16 versions and 2 delete markers). The Redshift stack was destroyed the day before (see the note above), keeping `AWSServiceRoleForRedshift`, which a re-create would first need to import. Evidence: [the closing teardown](../evidence/closing-teardown-2026-10-17.md).
