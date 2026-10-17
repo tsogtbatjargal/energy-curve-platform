@@ -1,16 +1,15 @@
-"""M4c-2 (ADR-0022): CI plans infra/batch with the member plan role, and prints only a summary.
+"""CI plans the one live stack, bootstrap, with the member plan role.
 
-The workflow runs on a public repository, so what it may print is part of its contract: the
-batch plan goes to a file, only the `Plan:` / `No changes` line (and the first line of an
-error, with 12-digit numbers masked) reaches the log, and the files are removed afterwards. No
-secret is needed for the stack's inputs: the alert address is a placeholder, the digest and the
-schedule flag are tracked. The plan role ARN and the state bucket name hold the account ID, which
-the public log must not show, so they are secrets (repository and Dependabot), not variables.
+The batch, Glue and Redshift stacks were torn down at the project's close (2026-10-17), so their
+informational plan jobs are gone; the matrix keeps the required `terraform-plan (bootstrap)`
+check. The workflow runs on a public repository, so what it may print is part of its contract:
+the plan role ARN and the state bucket name hold the account ID, which the public log must not
+show, so they are secrets (repository and Dependabot), not variables, and plan files are removed
+afterwards.
 """
 
 import re
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -19,20 +18,11 @@ ROOT = Path(__file__).parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
 JOB = WORKFLOW["jobs"]["terraform-plan"]
 STEPS = {s["name"]: s for s in JOB["steps"] if "name" in s}
-BATCH_ONLY = "matrix.stack == 'batch'"
 BOOTSTRAP_ONLY = "matrix.stack == 'bootstrap'"
-GLUE_ONLY = "matrix.stack == 'glue'"
-REDSHIFT_ONLY = "matrix.stack == 'redshift'"
 
 
-def batch_plan_step() -> dict[str, Any]:
-    return next(
-        s for s in JOB["steps"] if s.get("if") == BATCH_ONLY and "terraform plan" in s["run"]
-    )
-
-
-def test_both_stacks_are_planned_by_the_same_job() -> None:
-    assert JOB["strategy"]["matrix"]["stack"] == ["bootstrap", "batch", "glue", "redshift"]
+def test_only_the_bootstrap_stack_is_planned() -> None:
+    assert JOB["strategy"]["matrix"]["stack"] == ["bootstrap"]
     assert JOB["permissions"] == {"contents": "read", "id-token": "write"}
 
 
@@ -47,10 +37,6 @@ def index_of(name: str) -> int:
     return next(
         i for i, s in enumerate(JOB["steps"]) if s.get("name") == name or name in s.get("uses", "")
     )
-
-
-def test_the_alert_address_is_a_placeholder() -> None:
-    assert JOB["env"]["TF_VAR_alert_email"] == "ci@example.invalid"
 
 
 def test_the_job_uses_exactly_these_secrets_and_variables() -> None:
@@ -85,16 +71,6 @@ def test_no_step_prints_the_secrets() -> None:
                 assert line.rstrip().endswith('>> "$GITHUB_ENV"'), line
 
 
-def test_the_batch_plan_goes_to_a_file_and_only_a_summary_is_printed() -> None:
-    run = batch_plan_step()["run"]
-    assert re.search(r"terraform plan .*-no-color .*> plan\.txt 2>&1", run)
-    assert "grep -E '^(Plan:|No changes)' plan.txt" in run
-    # an error shows its first line only, with 12-digit numbers masked
-    assert "grep -E '^Error' plan.txt" in run
-    assert "sed -E 's/[0-9]{12}/<account>/g'" in run
-    assert "cat plan" not in run
-
-
 def test_the_bootstrap_plan_is_unchanged() -> None:
     step = next(
         s for s in JOB["steps"] if s.get("if") == BOOTSTRAP_ONLY and "terraform plan" in s["run"]
@@ -103,14 +79,19 @@ def test_the_bootstrap_plan_is_unchanged() -> None:
     assert "terraform show -json tfplan > plan.json" in step["run"]
 
 
-def test_each_stack_has_its_own_policy_gate() -> None:
+def test_the_only_policy_gate_is_the_bootstraps() -> None:
     gates = [s for s in JOB["steps"] if "policy_gate.py" in s.get("run", "")]
-    by_guard = {s.get("if"): s["run"] for s in gates}
-    assert set(by_guard) == {BOOTSTRAP_ONLY, BATCH_ONLY, GLUE_ONLY, REDSHIFT_ONLY}
-    assert '--stack "$STACK"' in by_guard[BOOTSTRAP_ONLY]
-    assert '--stack "$STACK" --stack-dir .' in by_guard[BATCH_ONLY]
-    assert '--stack "$STACK" --stack-dir .' in by_guard[GLUE_ONLY]
-    assert '--stack "$STACK" --stack-dir .' in by_guard[REDSHIFT_ONLY]
+    assert [g.get("if") for g in gates] == [BOOTSTRAP_ONLY]
+    assert '--stack "$STACK"' in gates[0]["run"]
+
+
+def test_no_step_plans_a_torn_down_stack() -> None:
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = text[text.index("  terraform-plan:") :]
+    for stack in ("batch", "glue", "redshift"):
+        assert f"matrix.stack == '{stack}'" not in job
+    assert "TF_VAR_alert_email" not in job
+    assert "build_glue_bundle" not in job
 
 
 def test_plan_files_are_removed_even_when_a_step_fails() -> None:
@@ -132,44 +113,12 @@ def test_every_action_is_pinned_to_a_commit(job: str) -> None:
             assert re.search(r"@[0-9a-f]{40}( |$)", step["uses"]), step["uses"]
 
 
-def test_the_glue_plan_builds_the_bundle_first_and_prints_only_a_summary() -> None:
-    names = [s.get("name") for s in JOB["steps"]]
-    build = names.index("build the Glue bundle")
-    plan = names.index("terraform plan (glue, summary only)")
-    init = names.index("terraform init")
-    assert init < build < plan
-    assert STEPS["build the Glue bundle"]["if"] == GLUE_ONLY
-    assert STEPS["build the Glue bundle"]["run"] == "python ../../scripts/build_glue_bundle.py"
-    step = STEPS["terraform plan (glue, summary only)"]
-    assert step["if"] == GLUE_ONLY
-    run = step["run"]
-    assert "-out=tfplan > plan.txt" in run and "grep -E '^(Plan:|No changes)' plan.txt" in run
-    assert "grep -E '^Error' plan.txt" in run and "sed -E 's/[0-9]{12}/<account>/g'" in run
-    assert "cat plan" not in run
-
-
 def test_the_glue_stack_is_tested_offline_in_the_static_job() -> None:
     steps = WORKFLOW["jobs"]["iac-static"]["steps"]
     step = next(s for s in steps if s.get("name") == "terraform test (glue, mocked provider)")
     run = step["run"]
     assert run.index("build_glue_bundle.py") < run.index("init -backend=false") < run.index("test")
     assert "terraform -chdir=infra/glue test" in run
-
-
-def test_the_redshift_plan_prints_only_a_summary_and_is_gated_by_its_own_rules() -> None:
-    names = [s.get("name") for s in JOB["steps"]]
-    plan = names.index("terraform plan (redshift, summary only)")
-    gate = names.index("policy gate (redshift)")
-    assert names.index("terraform init") < plan < gate < names.index("remove plan artifacts")
-    step = STEPS["terraform plan (redshift, summary only)"]
-    assert step["if"] == REDSHIFT_ONLY
-    run = step["run"]
-    assert "-out=tfplan > plan.txt" in run and "grep -E '^(Plan:|No changes)' plan.txt" in run
-    assert "grep -E '^Error' plan.txt" in run and "sed -E 's/[0-9]{12}/<account>/g'" in run
-    assert "cat plan" not in run and "show -json tfplan > plan.json" in run
-    gate_step = STEPS["policy gate (redshift)"]
-    assert gate_step["if"] == REDSHIFT_ONLY
-    assert '--stack "$STACK" --stack-dir .' in gate_step["run"]
 
 
 def test_the_redshift_stack_is_tested_offline_in_the_static_job() -> None:

@@ -157,6 +157,8 @@ So a hash of the plan JSON alone would not change when the actions changed.
 
 **M6 status (2026-10-15):** the temporary environment was built on 2026-10-13 and destroyed on 2026-10-15; see [the note](evidence/m6-temporary-environment-2026-10-15.md) and [the diagram](diagrams/demo.png).
 
+**Closing (2026-10-17):** M0–M6 are complete. The Redshift stack (2026-10-16) and the Glue and batch stacks (2026-10-17) were destroyed; bootstrap, identity, the organization and the budgets remain. See [the closing teardown](evidence/closing-teardown-2026-10-17.md).
+
 **Estimated AWS spend:** about $15–20 of the $40 budget.
 
 - temporary environment: about $7

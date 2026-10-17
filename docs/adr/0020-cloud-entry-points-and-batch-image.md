@@ -116,3 +116,7 @@ are used.
 The deployed digest `sha256:06860528…e88322` was built from the same Dockerfile and package inputs:
 `git diff 1ae04a0..HEAD -- Dockerfile src/ pyproject.toml uv.lock` is empty. These checks add CI
 coverage; they do not change those inputs or require a new deployed image.
+
+## Note (2026-10-17): the batch stack was destroyed
+
+The batch stack that runs this image (43 resources: the scheduler, Step Functions, Lambda, ECS, the ECR repository with its images, the data bucket, the VPC and the roles) was destroyed on 2026-10-17 at the project's close. The image, the entry points and their tests remain in the repository; the image only existed in the destroyed ECR repository and would be rebuilt from source. `AWSServiceRoleForECS` and `AWSServiceRoleForRedshift` are account-wide, so they were taken out of state and kept; a re-create of the batch or Redshift stack would first need `terraform import aws_iam_service_linked_role.ecs <role ARN>` (or `.redshift`), because creating a role that exists fails. Evidence: [the closing teardown](../evidence/closing-teardown-2026-10-17.md).
