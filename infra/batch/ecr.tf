@@ -1,9 +1,10 @@
 # The batch image (ADR-0020). Pushed by digest; tags can never move.
 #trivy:ignore:AWS-0033 AES256 (SSE-S3-equivalent) rather than a KMS key: the image holds no secret.
 resource "aws_ecr_repository" "batch" {
+  # force_delete is set for the closing teardown only (ADR-0022): the destroy may delete images.
   name                 = local.name
   image_tag_mutability = "IMMUTABLE"
-  force_delete         = false
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = true

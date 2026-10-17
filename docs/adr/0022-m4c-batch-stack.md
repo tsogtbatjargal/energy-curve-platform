@@ -216,3 +216,7 @@ The rebuilt digest `sha256:06860528…e88322` is deployed on Lambda and task rev
 - **Learned in the applies:** the provider's read-back after a create leaves 18 (stage 1) and 4 (stage 2) refresh-drift entries, all null → empty values, which two reviewed refresh-only applies recorded. A stage-2 gate that refuses drift needs them recorded first; drift is judged from the plan JSON, because the text output showed only 1 of the 18.
 - **Not verified by a run:**
   - whether `runTask.sync` alone fails on a non-zero exit: the Choice state makes this moot.
+
+## Note (2026-10-16): the emptying flags exist only for the closing teardown
+
+`force_destroy = true` on the data bucket and `force_delete = true` on the ECR repository were set for the project's closing teardown only. The bucket is versioned and the repository holds images, so Terraform cannot destroy either while it is non-empty; with the flags applied in place first (`batch_plan_check.py --change prepare`: those two attributes, false to true, nothing else), a destroy plan (`--change destroy`: the 43 resources other than `aws_iam_service_linked_role.ecs`, from a state that holds both flags as true) lets the provider empty them. The ECS service-linked role is account-wide and AWS refuses to delete it while ECS resources use it, so it is taken out of state first, as the Redshift role was. Nothing in the live design depended on the flags being false; the earlier stage checks still pin `false` for a create from an empty state.

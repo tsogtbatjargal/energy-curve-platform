@@ -5,8 +5,9 @@ module "bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "5.16.2"
 
+  # force_destroy is set for the closing teardown only (ADR-0023): the destroy may empty it.
   bucket        = local.bucket
-  force_destroy = false
+  force_destroy = true
 
   control_object_ownership = true
   object_ownership         = "BucketOwnerEnforced"

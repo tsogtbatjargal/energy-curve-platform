@@ -5,6 +5,7 @@
     python scripts/batch_plan_check.py --stage 2 --digest sha256:<64 hex> <plan.json>
     python scripts/batch_plan_check.py --stage 3 --digest sha256:<64 hex> <plan.json>
     python scripts/batch_plan_check.py --stage 4 --digest sha256:<64 hex> <plan.json>
+    python scripts/batch_plan_check.py --change prepare|destroy <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it also reads infra/batch's source.
 It runs after policy_gate.py --stack batch (ADR-0006 rules, PLAN.md R1 and R2), not instead of it.
@@ -43,6 +44,12 @@ A rollout may also carry one more change, the ECR lifecycle policy, which the pr
 when its document changes: `policy` is the only reason, from the 2-image document to the reviewed
 5-image one (REVIEWED_LIFECYCLE, infra/batch/ecr.tf), and nothing else differs.
 
+`--change prepare` and `--change destroy` are the closing teardown (teardown_checks.py): `prepare`
+is the in-place apply of `force_destroy` on the bucket and `force_delete` on the ECR repository
+(false to true, nothing else, every other resource unchanged); `destroy` is the 43 deletes of every
+resource but the ECS service-linked role, which is account-wide and is taken out of state first,
+from a state that holds both flags as true.
+
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values (the alert address in particular).
 """
@@ -57,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 import policy_templates
+import teardown_checks
 from bootstrap_plan_check import UNCHANGED, dig, prior, variable
 
 STACK = Path(__file__).resolve().parents[1] / "infra" / "batch"
@@ -610,19 +618,44 @@ def check(
     return problems, report
 
 
+LIVE = STAGE1 | STAGE2
+FLAGS = {f"{_B}.this[0]": "force_destroy", "aws_ecr_repository.batch": "force_delete"}
+KEPT = frozenset({"aws_iam_service_linked_role.ecs"})
+
+
+def check_teardown(
+    plan: dict[str, Any], mode: str, stack_dir: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """The closing teardown: `prepare` (the two flag updates) or `destroy` (43 deletes, with the
+    ECS service-linked role kept out of state). See teardown_checks.py."""
+    if mode not in teardown_checks.MODES:
+        return [f"unknown change mode {mode}"], []
+    problems, _ = check_common(plan)
+    problems += check_source(stack_dir or STACK)
+    more, report = teardown_checks.check_changes(plan, mode, LIVE, FLAGS, KEPT)
+    return problems + more, report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="batch_plan_check.py")
-    parser.add_argument("--stage", type=int, choices=(1, 2, 3, 4), required=True)
+    parser.add_argument("--stage", type=int, choices=(1, 2, 3, 4))
+    parser.add_argument("--change", choices=teardown_checks.MODES, help="the closing teardown")
     parser.add_argument("--digest", help="stages 2 to 4: the approved image digest")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)
-    problems, report = check(
-        json.loads(args.plan.read_text()), args.stage, args.digest, args.stack_dir
-    )
+    if (args.stage is None) == (args.change is None):
+        parser.error("give exactly one of --stage and --change")
+    plan = json.loads(args.plan.read_text())
+    if args.change:
+        problems, report = check_teardown(plan, args.change, args.stack_dir)
+    else:
+        problems, report = check(plan, args.stage, args.digest, args.stack_dir)
     print("\n".join([*report, *(f"FAIL  {p}" for p in problems)] or ["(empty plan)"]))
     if not problems:
-        print(f"OK    stage {args.stage}: the reviewed shape")
+        print(
+            f"OK    {'stage ' + str(args.stage) if args.stage else args.change}: the reviewed shape"
+        )
     return 1 if problems else 0
 
 
