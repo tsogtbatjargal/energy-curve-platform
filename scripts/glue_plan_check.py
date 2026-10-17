@@ -2,7 +2,7 @@
 
     terraform show -json <saved.tfplan> > <plan.json>
     python scripts/build_glue_bundle.py     # the plan was made with this bundle
-    python scripts/glue_plan_check.py [--change create|update] <plan.json>
+    python scripts/glue_plan_check.py [--change create|update|prepare|destroy] <plan.json>
 
 Run it from the clean checkout the saved plan was made from: it rebuilds the bundle and reads
 infra/glue's source. It runs after policy_gate.py --stack glue (ADR-0006 rules, PLAN.md R1 and R2),
@@ -36,6 +36,11 @@ current reviewed template) and the bundle object (only etag and its computed ver
 bundle ETag must be the repository bundle's hash. The script, job, role, logs and bucket stay
 unchanged; every resource must still be the reviewed one. No Glue plan or apply is implied.
 
+`--change prepare` and `--change destroy` are the closing teardown (teardown_checks.py): `prepare`
+is the in-place apply of `force_destroy` on the bucket (false to true, nothing else, everything
+else unchanged); `destroy` is all 14 resources as plain deletes, from a state that holds the flag
+as true so the provider empties the versioned bucket first. Both need the applied stack's state.
+
 Plans hold sensitive values in plain text, so the report prints addresses, actions and attribute
 names only, never values.
 """
@@ -51,6 +56,7 @@ from typing import Any
 
 import build_glue_bundle
 import policy_templates
+import teardown_checks
 from bootstrap_plan_check import UNCHANGED, dig, prior, variable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +86,7 @@ OBJECTS = {
     BUNDLE: ("glue/energy_curves_m5.zip", "./build/energy_curves_m5.zip"),
 }
 LIFECYCLE = f"{_B}_lifecycle_configuration.this[0]"
+FLAGS = {f"{_B}.this[0]": "force_destroy"}
 SETTINGS = [
     (f"{_B}.this[0]", ("force_destroy",), False),
     *[(f"{_B}_public_access_block.this[0]", (flag,), True)
@@ -282,7 +289,7 @@ def check_common(plan: dict[str, Any], mode: str = "create") -> tuple[list[str],
     owned = {r["address"] for r in resources.get("resources", [])} - DATA
     if mode == "create" and owned:
         problems.append("the state is not empty: this stack starts from no managed resources")
-    if mode == "update" and owned != APPLIED:
+    if mode in ("update", "prepare", "destroy") and owned != APPLIED:
         problems.append(
             "the state is not the applied stack: it must hold exactly the reviewed ones"
         )
@@ -378,11 +385,15 @@ def check(
     plan: dict[str, Any], stack_dir: Path | None = None, mode: str = "create"
 ) -> tuple[list[str], list[str]]:
     """(problems, report) for a saved plan of infra/glue: `create` from an empty state, or
-    `update` (policy and bundle only) on the applied stack."""
-    if mode not in ("create", "update"):
+    `update` (policy and bundle only) on the applied stack, or the closing teardown: `prepare` (the
+    bucket's `force_destroy` false to true) and `destroy` (all 14 resources as deletes)."""
+    if mode not in ("create", "update", *teardown_checks.MODES):
         return [f"unknown change mode {mode}"], []
     problems, account = check_common(plan, mode)
     problems += check_source(stack_dir or STACK)
+    if mode in teardown_checks.MODES:
+        more, report = teardown_checks.check_changes(plan, mode, CREATES, FLAGS)
+        return problems + more, report
     report: list[str] = []
     want = expected_actions(mode)
     seen: set[str] = set()
@@ -416,7 +427,9 @@ def check(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="glue_plan_check.py")
     parser.add_argument("--stack-dir", type=Path, default=STACK)
-    parser.add_argument("--change", choices=("create", "update"), default="create")
+    parser.add_argument(
+        "--change", choices=("create", "update", *teardown_checks.MODES), default="create"
+    )
     parser.add_argument("plan", type=Path)
     args = parser.parse_args(argv)
     problems, report = check(json.loads(args.plan.read_text()), args.stack_dir, args.change)
