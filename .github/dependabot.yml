@@ -4,10 +4,14 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Version updates are paused (the project is complete). Security updates are not affected.
+    open-pull-requests-limit: 0
   - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
+    # Version updates are paused (the project is complete). Security updates are not affected.
+    open-pull-requests-limit: 0
     ignore:
       # PySpark must equal the AWS Glue runtime's Spark version (ADR-0007: Glue 5.1 -> 3.5.6).
       # Version updates (including patches) are manual and move with the Glue version. Only
@@ -22,12 +26,16 @@ updates:
     directory: /infra/bootstrap
     schedule:
       interval: weekly
+    # Version updates are paused (the project is complete). Security updates are not affected.
+    open-pull-requests-limit: 0
   # The batch image (ADR-0020): both FROM lines are pinned as tag@sha256 (the uv build stage and
   # the Lambda Python base), so Dependabot proposes new digests when either tag moves.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    # Version updates are paused (the project is complete). Security updates are not affected.
+    open-pull-requests-limit: 0
     ignore:
       # The Lambda base stays on Python 3.12, the project's runtime (ADR-0020). Dependabot labels
       # 3.12 -> 3.14 a semver-minor update; ignoring minor and major updates keeps the Python
