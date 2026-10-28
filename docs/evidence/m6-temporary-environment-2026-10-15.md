@@ -24,4 +24,21 @@ One bootstrap task loaded the synthetic data: 278 observations, dataset version 
 - **Last step:** the temporary bootstrap task definition's one active revision was deregistered.
 
 ## Cost
-Cost Explorer read on 2026-10-16 showed net $0.00 per day, estimated; its data lags and credits or free tier may offset charges, so this is preliminary. The planned cost was about $7.4 for 48 hours. A final figure will be added once billing settles.
+**Result.** A Cost Explorer read for the workload account on 2026-10-28, covering 2026-10-12 to 2026-10-27, daily, unblended, grouped by service and charge type, still marked estimated: gross usage $8.35, credits -$8.35, net $0.00 on every day. The figure may still change slightly while it is estimated.
+
+**Breakdown of the gross usage (rounded, so the lines can differ from the total by a cent):**
+
+| Service | Gross usage |
+| --- | --- |
+| EC2 - Other (the NAT gateway) | $3.85 |
+| Load balancing | $1.19 |
+| RDS | $1.03 |
+| VPC (public IPv4 addresses) | $0.71 |
+| ElastiCache | $0.66 |
+| ECS | $0.63 |
+| EC2 compute | $0.22 |
+| Secrets Manager, Glue, ECR and S3 together | $0.07 |
+
+**Plan against actual.** The planned estimate was about $7.4 for 48 hours. The credits fully offset the usage, so the out-of-pocket cost was $0.
+
+**Not covered.** 2026-10-01 to 2026-10-11: the batch bring-up, the first Glue runs and the Redshift session (small).
