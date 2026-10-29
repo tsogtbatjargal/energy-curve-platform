@@ -34,4 +34,4 @@ Both buckets are versioned and the batch ECR repository holds images, so Terrafo
 `terraform-plan` now plans only bootstrap (the required `terraform-plan (bootstrap)` check keeps its name). The batch, Glue and Redshift plan jobs were informational and would have planned a full create (batch's would also fail on its image lookup once the repository is gone). `iac-static` still validates all stacks' source and Rego tests, and the plan checks and their tests remain in the repository as the record.
 
 ## Follow-up
-The cost read of 2026-10-16 was preliminary (net $0.00 per day, estimated). A final check follows after billing settles: a Cost Explorer read a few days after the teardown, keeping the raw response so any credits are visible, and the month total after the month closes.
+The final cost figure (read 2026-10-28, still estimated: gross usage $8.35, credits -$8.35, net $0.00) is in [the M6 note](m6-temporary-environment-2026-10-15.md#cost).
